@@ -750,12 +750,20 @@ func registerRoutes(r *gin.Engine) {
 
 		lastTime := customBefore
 
-		// 🌟 3. 當日斷點續傳探測：未指定 before 但有指定 date 時，優先尋找該日檔案的最舊連線
+		// 🌟 3. 當日斷點續傳探測 (加入 00:00:00 邊界保護)
 		if lastTime == "" && targetDate != "" {
 			dayFile := filepath.Join(trafficDir, fmt.Sprintf("traffic_%s.parquet", targetDate))
 			rows, err := parquet.ReadFile[TrafficParquetRow](dayFile)
 			if err == nil && len(rows) > 0 {
 				oldestInDay := rows[len(rows)-1].Timestamp
+
+				// 🛑 關鍵防線：若該日檔案的最舊記錄已經到達或小於 00:00:00，代表該日回溯早已完成！
+				if oldestInDay <= targetDate+" 00:00:00" {
+					sendMsg("[流量回補] 🎯 %s 本地記錄已涵蓋至當日 00:00:00 (最舊連線：%s)，該日回溯已達標，無需向前回補！\n", targetDate, oldestInDay)
+					_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte("LIMIT"), 0644)
+					return
+				}
+
 				t, err := time.Parse("2006-01-02 15:04:05", oldestInDay)
 				if err == nil {
 					lastTime = t.Add(-1 * time.Second).Format("2006-01-02 15:04:05")
