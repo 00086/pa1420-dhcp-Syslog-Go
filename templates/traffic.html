@@ -145,27 +145,34 @@
     </div>
 </div>
 
-<!-- 流量概況四大指標卡片 -->
+<!-- 流量概況五大指標卡片 -->
 <div class="row g-2 mb-2 flex-shrink-0">
-    <div class="col-md-3">
+    <div class="col">
         <div class="card border-0 shadow-sm p-2 bg-white text-center">
             <small class="text-muted">已採樣連線總筆數</small>
             <h5 class="mb-0 fw-bold font-monospace text-primary" id="metric-total-flows">-- 筆</h5>
         </div>
     </div>
-    <div class="col-md-3">
+    <!-- 🌟 新增：當日 Parquet 檔案大小 -->
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">當日資料庫容量</small>
+            <h5 class="mb-0 fw-bold font-monospace text-info" id="metric-db-size">--</h5>
+        </div>
+    </div>
+    <div class="col">
         <div class="card border-0 shadow-sm p-2 bg-white text-center">
             <small class="text-muted">總傳輸位元組</small>
             <h5 class="mb-0 fw-bold font-monospace text-success" id="metric-total-bytes">-- MB</h5>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col">
         <div class="card border-0 shadow-sm p-2 bg-white text-center">
             <small class="text-muted">Top 1 消耗應用程式</small>
             <h5 class="mb-0 fw-bold font-monospace text-warning-emphasis" id="metric-top-app">--</h5>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col">
         <div class="card border-0 shadow-sm p-2 bg-white text-center">
             <small class="text-muted">防火牆主動阻擋事件</small>
             <h5 class="mb-0 fw-bold font-monospace text-danger" id="metric-deny-flows">-- 筆</h5>
@@ -471,7 +478,8 @@
                 const logsList = data.logs || [];
 
                 document.getElementById('metric-total-flows').innerText = `${totalFlows.toLocaleString()} 筆`;
-                document.getElementById('metric-total-bytes').innerText = data.total_bytes || '0 B';
+                document.getElementById('metric-db-size').innerText = data.db_size || '0 B'; // 👈 讀取 API 傳來的容量
+				document.getElementById('metric-total-bytes').innerText = data.total_bytes || '0 B';
                 document.getElementById('metric-top-app').innerText = data.top_app || '-';
                 document.getElementById('metric-deny-flows').innerText = `${(data.deny_flows || 0).toLocaleString()} 筆`;
                 document.getElementById('traffic-count-badge').innerText = `共 ${totalFlows.toLocaleString()} 筆 (頁次 ${currentPage} / ${totalPages})`;

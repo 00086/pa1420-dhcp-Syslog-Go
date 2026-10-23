@@ -592,6 +592,7 @@ func registerRoutes(r *gin.Engine) {
 			"total_bytes":  result.TotalBytes,
 			"top_app":      result.TopApp,
 			"deny_flows":   result.DenyFlows,
+			"db_size":      result.DbSize, // 👈 補上此行，將檔案容量輸出給前端
 			"histogram":    result.Histogram,
 			"logs":         result.Logs,
 			"current_page": result.CurrentPage,
