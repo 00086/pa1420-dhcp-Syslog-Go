@@ -240,6 +240,7 @@ type TrafficAnalyticsResult struct {
 	TotalBytes  string            `json:"total_bytes"`
 	TopApp      string            `json:"top_app"`
 	DenyFlows   int               `json:"deny_flows"`
+	DbSize      string            `json:"db_size"`  // 👈 新增：當日 Parquet 檔案總大小
 	Histogram   []HistogramBucket `json:"histogram"`
 	Logs        []TrafficLogItem  `json:"logs"`
 	CurrentPage int               `json:"current_page"`
@@ -1714,11 +1715,18 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 	parquetFileMutex.Lock()
 	var allRows []TrafficParquetRow
 	existingKeys := make(map[string]bool)
+	var totalFileSize int64 = 0 // 👈 新增變數：統計實體檔案大小
 
 	for _, f := range files {
 		if strings.HasSuffix(f, ".tmp") {
 			continue
 		}
+		
+		// 👈 累加檔案實體大小
+		if info, err := os.Stat(f); err == nil {
+			totalFileSize += info.Size()
+		}
+
 		rows, err := parquet.ReadFile[TrafficParquetRow](f)
 		if err == nil {
 			for _, r := range rows {
@@ -1732,12 +1740,25 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 	}
 	parquetFileMutex.Unlock()
 
+	// 👈 格式化當日資料庫容量大小
+	var dbSizeStr string
+	if totalFileSize >= 1024*1024*1024 {
+		dbSizeStr = fmt.Sprintf("%.2f GB", float64(totalFileSize)/(1024*1024*1024))
+	} else if totalFileSize >= 1024*1024 {
+		dbSizeStr = fmt.Sprintf("%.2f MB", float64(totalFileSize)/(1024*1024))
+	} else if totalFileSize >= 1024 {
+		dbSizeStr = fmt.Sprintf("%.1f KB", float64(totalFileSize)/1024)
+	} else {
+		dbSizeStr = fmt.Sprintf("%d B", totalFileSize)
+	}
+
 	if len(allRows) == 0 {
 		return &TrafficAnalyticsResult{
 			TotalFlows:  0,
 			TotalBytes:  "0 B",
 			TopApp:      "-",
 			DenyFlows:   0,
+			DbSize:      "0 B", // 👈 空資料時回傳 0 B
 			Histogram:   emptyHistogram,
 			Logs:        make([]TrafficLogItem, 0),
 			CurrentPage: 1,
@@ -1877,6 +1898,7 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 		TotalBytes:  totalBytesStr,
 		TopApp:      topApp,
 		DenyFlows:   denyFlows,
+		DbSize:      dbSizeStr, // 👈 輸出到前端 API
 		Histogram:   histogram,
 		Logs:        logs,
 		CurrentPage: page,
