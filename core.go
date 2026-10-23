@@ -1530,8 +1530,8 @@ func startSyslogBatchFlusher() {
 					time.Now().Format("15:04:05"), ins, tot)
 
 				chunkCounter++
-				// 當即時分塊累積滿 15 個時，在背景非同步整併，保持檔案乾淨
-				if chunkCounter >= 15 {
+				// 當即時分塊累積滿 60 個時，在背景非同步整併，保持檔案乾淨
+				if chunkCounter >= 60 {
 					chunkCounter = 0
 					go ConsolidateParquetFiles()
 				}
@@ -2019,8 +2019,7 @@ func saveThreatLogsToParquet(entries []ThreatEntry) (int, int, error) {
 	}
 
 	totalInserted := 0
-	totalToday := 0
-	todayStr := time.Now().Format("2006-01-02")
+	totalToday := 0 // 👈 這裡宣告的是 totalToday
 
 	for dateKey, newRows := range entriesByDate {
 		mainPath := filepath.Join(threatDir, fmt.Sprintf("threat_%s.parquet", dateKey))
@@ -2055,9 +2054,7 @@ func saveThreatLogsToParquet(entries []ThreatEntry) (int, int, error) {
 		}
 
 		if newCount == 0 && len(combinedRows) > 0 {
-			if dateKey == todayStr {
-				totalToday = len(combinedRows)
-			}
+			totalToday = len(combinedRows)
 			continue
 		}
 
@@ -2078,11 +2075,11 @@ func saveThreatLogsToParquet(entries []ThreatEntry) (int, int, error) {
 			return 0, 0, err
 		}
 
-		if dateKey == todayStr {
-			totalToday = len(combinedRows)
-		}
+		// 👈 這裡必須是 totalToday
+		totalToday = len(combinedRows)
 	}
 
 	return totalInserted, totalToday, nil
 }
+
 

@@ -626,6 +626,43 @@ func registerRoutes(r *gin.Engine) {
 			"message": fmt.Sprintf("成功自 PA-1420 擷取 %d 筆流量紀錄！新增至當日 Parquet：%d 筆，今日累計：%d 筆", len(entries), success, total),
 		})
 	})
+	
+	// 12-2. 🌟 立即手動自 PA-1420 擷取最新資安威脅日誌 (預設 2500 筆，最高 5000 筆)
+	r.POST("/api/threat-fetch-now", func(c *gin.Context) {
+		countStr := strings.TrimSpace(c.Query("count"))
+		if countStr == "" {
+			countStr = strings.TrimSpace(c.PostForm("count"))
+		}
+		if countStr == "" {
+			countStr = strings.TrimSpace(c.Request.FormValue("count"))
+		}
+
+		count, _ := strconv.Atoi(countStr)
+		if count <= 0 {
+			count = 2500
+		}
+		if count > 5000 {
+			count = 5000
+		}
+
+		// 呼叫過濾器函式 (filter="" 代表無條件抓取當前最新日誌，且時間戳記已自動轉為標準格式)
+		entries, err := fetchPAThreatLogsWithFilter(count, "")
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			return
+		}
+
+		success, total, err := saveThreatLogsToParquet(entries)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "success",
+			"message": fmt.Sprintf("成功自 PA-1420 擷取 %d 筆威脅紀錄！新增入庫：%d 筆，該檔案累計：%d 筆", len(entries), success, total),
+		})
+	})
 
 	// 13. 查詢後端流量排程器狀態 (供前端載入或 F5 時同步狀態)
 	r.GET("/api/traffic-scheduler", func(c *gin.Context) {
@@ -661,24 +698,33 @@ func registerRoutes(r *gin.Engine) {
 		})
 	})
 
-	// 16. 🌟 智慧接力回溯 (即時分輪串流輸出)：每輪即時回傳給終端機，不再等待全部跑完
+	// 16. 🌟 智慧接力回溯 (即時分輪串流輸出)：支援當日智慧斷點續傳與指定時間回溯
 	r.POST("/api/traffic-backfill", func(c *gin.Context) {
-		// 設定 HTTP 分塊串流標頭 (停用緩衝)
-		c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		c.Writer.Header().Set("Transfer-Encoding", "chunked")
-		c.Writer.Header().Set("X-Content-Type-Options", "nosniff")
-		c.Status(http.StatusOK)
-		c.Writer.Flush()
-
-		// 定義即時輸出小函式 (同時輸出至伺服器 Console 與客戶端 curl)
-		sendMsg := func(format string, a ...interface{}) {
-			msg := fmt.Sprintf(format, a...)
-			fmt.Print(msg)
-			_, _ = c.Writer.Write([]byte(msg))
-			c.Writer.Flush() // 👈 關鍵：強制立刻將封包送出到網路上
+		// 🌟 1. 優先讀取所有傳入參數 (同時相容 URL Query 與 POST 表單)
+		customBefore := strings.TrimSpace(c.Query("before"))
+		if customBefore == "" {
+			customBefore = strings.TrimSpace(c.PostForm("before"))
+		}
+		if customBefore == "" {
+			customBefore = strings.TrimSpace(c.Request.FormValue("before"))
 		}
 
-		rounds, _ := strconv.Atoi(c.DefaultPostForm("rounds", "5"))
+		targetDate := strings.TrimSpace(c.Query("date"))
+		if targetDate == "" {
+			targetDate = strings.TrimSpace(c.PostForm("date"))
+		}
+		if targetDate == "" {
+			targetDate = strings.TrimSpace(c.Request.FormValue("date"))
+		}
+
+		roundsStr := strings.TrimSpace(c.Query("rounds"))
+		if roundsStr == "" {
+			roundsStr = strings.TrimSpace(c.PostForm("rounds"))
+		}
+		if roundsStr == "" {
+			roundsStr = strings.TrimSpace(c.Request.FormValue("rounds"))
+		}
+		rounds, _ := strconv.Atoi(roundsStr)
 		if rounds <= 0 {
 			rounds = 5
 		}
@@ -686,10 +732,42 @@ func registerRoutes(r *gin.Engine) {
 			rounds = 10
 		}
 
-		customBefore := strings.TrimSpace(c.DefaultPostForm("before", ""))
+		// 🌟 2. 參數讀取完成後，再啟用 HTTP 分塊串流 (停用緩衝)
+		c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		c.Writer.Header().Set("Transfer-Encoding", "chunked")
+		c.Writer.Header().Set("X-Content-Type-Options", "nosniff")
+		c.Status(http.StatusOK)
+		c.Writer.Flush()
+
+		// 定義即時輸出小函式 (同時輸出至終端機與客戶端 curl)
+		sendMsg := func(format string, a ...interface{}) {
+			msg := fmt.Sprintf(format, a...)
+			fmt.Print(msg)
+			_, _ = c.Writer.Write([]byte(msg))
+			c.Writer.Flush()
+		}
+
 		lastTime := customBefore
 
-		// 跨日全庫搜尋最早時間
+		// 🌟 3. 當日斷點續傳探測：未指定 before 但有指定 date 時，優先尋找該日檔案的最舊連線
+		if lastTime == "" && targetDate != "" {
+			dayFile := filepath.Join(trafficDir, fmt.Sprintf("traffic_%s.parquet", targetDate))
+			rows, err := parquet.ReadFile[TrafficParquetRow](dayFile)
+			if err == nil && len(rows) > 0 {
+				oldestInDay := rows[len(rows)-1].Timestamp
+				t, err := time.Parse("2006-01-02 15:04:05", oldestInDay)
+				if err == nil {
+					lastTime = t.Add(-1 * time.Second).Format("2006-01-02 15:04:05")
+					sendMsg("[流量回補] 🎯 偵測到 %s 已有歷史資料，自動從最舊連線 %s 接力往前回溯！\n", targetDate, oldestInDay)
+				}
+			} else {
+				// 該日尚無資料，起點自動設為當天最後一秒
+				lastTime = targetDate + " 23:59:59"
+				sendMsg("[流量回補] 🎯 %s 尚無歷史日誌，自動自當日 23:59:59 起跑\n", targetDate)
+			}
+		}
+
+		// 🌟 4. 跨日全庫搜尋 (完全沒傳 date 也沒傳 before 時)
 		if lastTime == "" {
 			files, _ := filepath.Glob(filepath.Join(trafficDir, "traffic_*.parquet"))
 			sort.Strings(files)
@@ -708,6 +786,8 @@ func registerRoutes(r *gin.Engine) {
 					}
 				}
 			}
+		} else if targetDate == "" {
+			sendMsg("[流量回補] 🎯 收到指定時間點：%s，將以此為起點向前回溯\n", lastTime)
 		}
 
 		sendMsg("[流量回補] 🚀 啟動回溯作業，預計回溯 %d 輪 (目標: %d 筆)...\n", rounds, rounds*5000)
@@ -732,12 +812,17 @@ func registerRoutes(r *gin.Engine) {
 			}
 			if len(entries) == 0 {
 				sendMsg("[流量回補] ℹ️ 第 %d 輪已無更早的歷史日誌 (已達極限)\n", r+1)
+				_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte("LIMIT"), 0644) // 👈 加入此行
 				break
 			}
 
-			ins, tot, _ := saveTrafficLogsToParquet(entries)
-			totalNew += ins
-			successfulRounds++
+			ins, tot, err := saveTrafficLogsToParquet(entries)
+			if err != nil {
+				sendMsg("[流量回補] ❌ 存入磁碟發生錯誤：%v\n", err)
+			} else {
+				totalNew += ins
+				successfulRounds++
+			}
 
 			oldest := entries[0].Timestamp
 			for _, e := range entries {
@@ -746,7 +831,7 @@ func registerRoutes(r *gin.Engine) {
 				}
 			}
 
-			// 👈 每跑完一輪，客戶端會立刻跳出此行
+			// 每跑完一輪即時分塊輸出
 			sendMsg("[流量回補] ✅ [%d/%d] 完成！耗時: %.1fs，抓取: %d 筆，新增: %d 筆 (當日累計: %d 筆)，時間推進至: %s\n",
 				r+1, rounds, time.Since(startT).Seconds(), len(entries), ins, tot, oldest)
 
@@ -756,6 +841,9 @@ func registerRoutes(r *gin.Engine) {
 			} else {
 				lastTime = oldest
 			}
+			
+			// 👈 加入此行：即時將最新時間寫入狀態檔，供批次檔接力讀取
+			_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte(lastTime), 0644)
 
 			if r < rounds-1 {
 				time.Sleep(1500 * time.Millisecond)
@@ -767,6 +855,39 @@ func registerRoutes(r *gin.Engine) {
 
 	// 17. 🌟 智慧接力回溯：向 PA-1420 擷取歷史資安威脅 (即時分輪串流輸出)
 	r.POST("/api/threat-backfill", func(c *gin.Context) {
+		// 🌟 1. 優先讀取傳入參數
+		customBefore := strings.TrimSpace(c.Query("before"))
+		if customBefore == "" {
+			customBefore = strings.TrimSpace(c.PostForm("before"))
+		}
+		if customBefore == "" {
+			customBefore = strings.TrimSpace(c.Request.FormValue("before"))
+		}
+
+		targetDate := strings.TrimSpace(c.Query("date"))
+		if targetDate == "" {
+			targetDate = strings.TrimSpace(c.PostForm("date"))
+		}
+		if targetDate == "" {
+			targetDate = strings.TrimSpace(c.Request.FormValue("date"))
+		}
+
+		roundsStr := strings.TrimSpace(c.Query("rounds"))
+		if roundsStr == "" {
+			roundsStr = strings.TrimSpace(c.PostForm("rounds"))
+		}
+		if roundsStr == "" {
+			roundsStr = strings.TrimSpace(c.Request.FormValue("rounds"))
+		}
+		rounds, _ := strconv.Atoi(roundsStr)
+		if rounds <= 0 {
+			rounds = 5
+		}
+		if rounds > 10 {
+			rounds = 10
+		}
+
+		// 🌟 2. 啟用 HTTP 分塊串流
 		c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		c.Writer.Header().Set("Transfer-Encoding", "chunked")
 		c.Writer.Header().Set("X-Content-Type-Options", "nosniff")
@@ -780,17 +901,26 @@ func registerRoutes(r *gin.Engine) {
 			c.Writer.Flush()
 		}
 
-		rounds, _ := strconv.Atoi(c.DefaultPostForm("rounds", "5"))
-		if rounds <= 0 {
-			rounds = 5
-		}
-		if rounds > 10 {
-			rounds = 10
-		}
-
-		customBefore := strings.TrimSpace(c.DefaultPostForm("before", ""))
 		lastTime := customBefore
 
+		// 🌟 3. 當日斷點續傳探測
+		if lastTime == "" && targetDate != "" {
+			dayFile := filepath.Join(threatDir, fmt.Sprintf("threat_%s.parquet", targetDate))
+			rows, err := parquet.ReadFile[ThreatParquetRow](dayFile)
+			if err == nil && len(rows) > 0 {
+				oldestInDay := rows[len(rows)-1].Timestamp
+				t, err := time.Parse("2006-01-02 15:04:05", oldestInDay)
+				if err == nil {
+					lastTime = t.Add(-1 * time.Second).Format("2006-01-02 15:04:05")
+					sendMsg("[Threat 回補] 🎯 偵測到 %s 已有威脅資料，自動從最舊事件 %s 接力往前回溯！\n", targetDate, oldestInDay)
+				}
+			} else {
+				lastTime = targetDate + " 23:59:59"
+				sendMsg("[Threat 回補] 🎯 %s 尚無威脅日誌，自動自當日 23:59:59 起跑\n", targetDate)
+			}
+		}
+
+		// 🌟 4. 跨日全庫搜尋
 		if lastTime == "" {
 			files, _ := filepath.Glob(filepath.Join(threatDir, "threat_*.parquet"))
 			sort.Strings(files)
@@ -809,6 +939,8 @@ func registerRoutes(r *gin.Engine) {
 					}
 				}
 			}
+		} else if targetDate == "" {
+			sendMsg("[Threat 回補] 🎯 收到指定時間點：%s，將以此為起點向前回溯\n", lastTime)
 		}
 
 		sendMsg("[Threat 回補] 🚀 啟動資安威脅回溯，預計回溯 %d 輪 (目標: %d 筆)...\n", rounds, rounds*5000)
@@ -833,12 +965,17 @@ func registerRoutes(r *gin.Engine) {
 			}
 			if len(entries) == 0 {
 				sendMsg("[Threat 回補] ℹ️ 第 %d 輪已無更早的威脅日誌\n", r+1)
+				_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte("LIMIT"), 0644) // 👈 加入此行
 				break
 			}
 
-			ins, tot, _ := saveThreatLogsToParquet(entries)
-			totalNew += ins
-			successfulRounds++
+			ins, tot, err := saveThreatLogsToParquet(entries)
+			if err != nil {
+				sendMsg("[流量回補] ❌ 存入磁碟發生錯誤：%v\n", err)
+			} else {
+				totalNew += ins
+				successfulRounds++
+			}
 
 			oldest := entries[0].TimeGenerated
 			for _, e := range entries {
@@ -847,7 +984,6 @@ func registerRoutes(r *gin.Engine) {
 				}
 			}
 
-			// 👈 每跑完一輪，客戶端立刻印出
 			sendMsg("[Threat 回補] ✅ [%d/%d] 完成！耗時: %.1fs，抓取: %d 筆，新增: %d 筆 (累計: %d 筆)，時間推至: %s\n",
 				r+1, rounds, time.Since(startT).Seconds(), len(entries), ins, tot, oldest)
 
@@ -857,6 +993,9 @@ func registerRoutes(r *gin.Engine) {
 			} else {
 				lastTime = oldest
 			}
+			
+			// 👈 加入此行：即時將最新時間寫入狀態檔，供批次檔接力讀取
+			_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte(lastTime), 0644)
 
 			if r < rounds-1 {
 				time.Sleep(1500 * time.Millisecond)
