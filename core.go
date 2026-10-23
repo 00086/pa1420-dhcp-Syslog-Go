@@ -1368,6 +1368,22 @@ func saveParquetRowsDirect(rows []TrafficParquetRow) (int, int, error) {
 	return totalInserted, totalForToday, nil
 }
 
+// 🌟 Syslog 專屬極速落盤：直接寫入即時分塊，耗時僅需 2~5ms，絕不讀寫 100 萬筆主檔
+func saveSyslogBatchFast(rows []TrafficParquetRow) (int, int, error) {
+	if len(rows) == 0 {
+		return 0, 0, nil
+	}
+
+	todayStr := time.Now().Format("2006-01-02")
+	chunkPath := filepath.Join(trafficDir, fmt.Sprintf("traffic_%s_live_%d.parquet", todayStr, time.Now().UnixNano()))
+
+	if err := parquet.WriteFile(chunkPath, rows); err != nil {
+		return 0, 0, err
+	}
+
+	return len(rows), int(atomic.LoadInt64(&syslogReceivedCount)), nil
+}
+
 func saveTrafficLogsToParquet(entries []TrafficEntry) (int, int, error) {
 	var rows []TrafficParquetRow
 	for _, e := range entries {
@@ -1389,15 +1405,8 @@ func saveTrafficLogsToParquet(entries []TrafficEntry) (int, int, error) {
 			SessionID:        e.SessionID,
 		})
 	}
-	ins, tot, err := saveParquetRowsDirect(rows)
-	if err == nil {
-		syslogStatusMutex.Lock()
-		syslogLastFlushInsertCount = ins
-		syslogLastFlushTotalCount = tot
-		syslogLastFlushTime = time.Now()
-		syslogStatusMutex.Unlock()
-	}
-	return ins, tot, err
+	// 👈 僅執行存檔與回傳，絕不碰觸 Syslog 狀態變數！
+	return saveParquetRowsDirect(rows)
 }
 
 // -------------------------------------------------------------
@@ -1474,7 +1483,7 @@ func startSyslogReceiver(port int) {
 		fmt.Printf("[Syslog] ⚠️ 無法監聽 UDP %d: %v\n", port, err)
 		return
 	}
-	fmt.Printf("[Syslog] 🚀 成功啟動 UDP %d 即時接收服務 (正在等待 PA-1420 封包串流)...\n", port)
+	fmt.Printf("[Syslog] 🚀 成功啟動 UDP %d 即時接收服務 (極速串流引擎已就緒)...\n", port)
 	defer conn.Close()
 
 	buf := make([]byte, 8192)
@@ -1488,11 +1497,10 @@ func startSyslogReceiver(port int) {
 		if err == nil && row != nil {
 			select {
 			case syslogQueue <- *row:
-				atomic.AddInt64(&syslogReceivedCount, 1)
-				syslogStatusMutex.Lock()
-				syslogLastReceivedTime = time.Now()
-				syslogStatusMutex.Unlock()
+				atomic.AddInt64(&syslogReceivedCount, 1) // 👈 純原子操作，零延遲不卡鎖
 			default:
+				// 若佇列真的滿了，也記錄總接收數
+				atomic.AddInt64(&syslogReceivedCount, 1)
 			}
 		}
 	}
@@ -1500,46 +1508,46 @@ func startSyslogReceiver(port int) {
 
 func startSyslogBatchFlusher() {
 	go func() {
-		// 🌟 縮短至 5 秒週期 Flush，反應更即時、終端機即時反饋
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(3 * time.Second) // 3 秒極速 Flush
 		defer ticker.Stop()
 
 		var batch []TrafficParquetRow
+		chunkCounter := 0
+
+		flushNow := func() {
+			if len(batch) == 0 {
+				return
+			}
+			ins, tot, err := saveSyslogBatchFast(batch)
+			if err == nil {
+				syslogStatusMutex.Lock()
+				syslogLastFlushInsertCount = ins
+				syslogLastFlushTotalCount = tot
+				syslogLastFlushTime = time.Now()
+				syslogStatusMutex.Unlock()
+
+				fmt.Printf("[%s] 📡 [Syslog UDP 514] 極速入庫：%d 筆 (累計接收: %d 筆)\n",
+					time.Now().Format("15:04:05"), ins, tot)
+
+				chunkCounter++
+				// 當即時分塊累積滿 15 個時，在背景非同步整併，保持檔案乾淨
+				if chunkCounter >= 15 {
+					chunkCounter = 0
+					go ConsolidateParquetFiles()
+				}
+			}
+			batch = nil
+		}
+
 		for {
 			select {
 			case row := <-syslogQueue:
 				batch = append(batch, row)
-				if len(batch) >= 300 {
-					ins, tot, err := saveParquetRowsDirect(batch)
-					if err == nil {
-						syslogStatusMutex.Lock()
-						syslogLastFlushInsertCount = ins
-						syslogLastFlushTotalCount = tot
-						syslogLastFlushTime = time.Now()
-						syslogStatusMutex.Unlock()
-						if ins > 0 {
-							fmt.Printf("[%s] 📡 [Syslog UDP 514] 批次寫入 Parquet：新增 %d 筆 (當日累計: %d 筆)\n",
-								time.Now().Format("15:04:05"), ins, tot)
-						}
-					}
-					batch = nil
+				if len(batch) >= 1000 { // 累積滿 1000 筆即時落盤
+					flushNow()
 				}
 			case <-ticker.C:
-				if len(batch) > 0 {
-					ins, tot, err := saveParquetRowsDirect(batch)
-					if err == nil {
-						syslogStatusMutex.Lock()
-						syslogLastFlushInsertCount = ins
-						syslogLastFlushTotalCount = tot
-						syslogLastFlushTime = time.Now()
-						syslogStatusMutex.Unlock()
-						if ins > 0 {
-							fmt.Printf("[%s] 📡 [Syslog UDP 514] 定時 Flush Parquet：新增 %d 筆 (當日累計: %d 筆)\n",
-								time.Now().Format("15:04:05"), ins, tot)
-						}
-					}
-					batch = nil
-				}
+				flushNow()
 			}
 		}
 	}()
@@ -1651,7 +1659,7 @@ func GetTrafficSchedulerStatus() map[string]interface{} {
 }
 
 // -------------------------------------------------------------
-// 🌟 聚合查詢：直接讀取「每日單一主檔」，秒級載入
+// 🌟 聚合查詢：讀取「每日單一主檔 + 當日即時分塊」，秒級載入
 // -------------------------------------------------------------
 func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, perPage int) (*TrafficAnalyticsResult, error) {
 	if queryDate == "" {
@@ -1699,34 +1707,25 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 		}
 	}
 
-	mainPath := filepath.Join(trafficDir, fmt.Sprintf("traffic_%s.parquet", queryDate))
+	// 🌟 讀取指定日期的主檔與當日所有即時 Live 分塊
+	pattern := filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", queryDate))
+	files, _ := filepath.Glob(pattern)
 
 	parquetFileMutex.Lock()
 	var allRows []TrafficParquetRow
+	existingKeys := make(map[string]bool)
 
-	// 直接讀取單一主檔案
-	if _, err := os.Stat(mainPath); err == nil {
-		rows, err := parquet.ReadFile[TrafficParquetRow](mainPath)
-		if err == nil {
-			allRows = rows
+	for _, f := range files {
+		if strings.HasSuffix(f, ".tmp") {
+			continue
 		}
-	} else {
-		// 若主檔尚不存在，相容性讀取可能尚未整併的零星碎片
-		pattern := filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", queryDate))
-		files, _ := filepath.Glob(pattern)
-		existingKeys := make(map[string]bool)
-		for _, f := range files {
-			if strings.HasSuffix(f, ".tmp") {
-				continue
-			}
-			rows, err := parquet.ReadFile[TrafficParquetRow](f)
-			if err == nil {
-				for _, r := range rows {
-					key := fmt.Sprintf("%s|%s|%s|%d|%s", r.Timestamp, r.Source, r.Destination, r.ToPort, r.SessionID)
-					if !existingKeys[key] {
-						existingKeys[key] = true
-						allRows = append(allRows, r)
-					}
+		rows, err := parquet.ReadFile[TrafficParquetRow](f)
+		if err == nil {
+			for _, r := range rows {
+				key := fmt.Sprintf("%s|%s|%s|%d|%s", r.Timestamp, r.Source, r.Destination, r.ToPort, r.SessionID)
+				if !existingKeys[key] {
+					existingKeys[key] = true
+					allRows = append(allRows, r)
 				}
 			}
 		}
