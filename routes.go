@@ -709,6 +709,7 @@ func registerRoutes(r *gin.Engine) {
 		if customBefore == "" {
 			customBefore = strings.TrimSpace(c.Request.FormValue("before"))
 		}
+		customBefore = strings.ReplaceAll(customBefore, "/", "-")
 
 		targetDate := strings.TrimSpace(c.Query("date"))
 		if targetDate == "" {
@@ -716,6 +717,12 @@ func registerRoutes(r *gin.Engine) {
 		}
 		if targetDate == "" {
 			targetDate = strings.TrimSpace(c.Request.FormValue("date"))
+		}
+		targetDate = strings.ReplaceAll(targetDate, "/", "-")
+
+		// 🌟 核心防護：若有指定時間但未給 date，自動萃取前 10 碼為邊界日期
+		if targetDate == "" && len(customBefore) >= 10 {
+			targetDate = customBefore[:10]
 		}
 
 		roundsStr := strings.TrimSpace(c.Query("rounds"))
@@ -733,14 +740,14 @@ func registerRoutes(r *gin.Engine) {
 			rounds = 10
 		}
 
-		// 🌟 2. 參數讀取完成後，再啟用 HTTP 分塊串流 (停用緩衝)
+		// 🌟 2. 啟用 HTTP 分塊串流 (停用緩衝)
 		c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		c.Writer.Header().Set("Transfer-Encoding", "chunked")
 		c.Writer.Header().Set("X-Content-Type-Options", "nosniff")
 		c.Status(http.StatusOK)
 		c.Writer.Flush()
 
-		// 定義即時輸出小函式 (同時輸出至終端機與客戶端 curl)
+		// 定義即時輸出小函式
 		sendMsg := func(format string, a ...interface{}) {
 			msg := fmt.Sprintf(format, a...)
 			fmt.Print(msg)
@@ -750,14 +757,14 @@ func registerRoutes(r *gin.Engine) {
 
 		lastTime := customBefore
 
-		// 🌟 3. 當日斷點續傳探測 (加入 00:00:00 邊界保護)
+		// 🌟 3. 當日斷點續傳探測 (00:00:00 邊界防護)
 		if lastTime == "" && targetDate != "" {
 			dayFile := filepath.Join(trafficDir, fmt.Sprintf("traffic_%s.parquet", targetDate))
 			rows, err := parquet.ReadFile[TrafficParquetRow](dayFile)
 			if err == nil && len(rows) > 0 {
 				oldestInDay := rows[len(rows)-1].Timestamp
 
-				// 🛑 關鍵防線：若該日檔案的最舊記錄已經到達或小於 00:00:00，代表該日回溯早已完成！
+				// 🛑 邊界防線：若最舊紀錄已小於等於 00:00:00，代表該日已回補到底
 				if oldestInDay <= targetDate+" 00:00:00" {
 					sendMsg("[流量回補] 🎯 %s 本地記錄已涵蓋至當日 00:00:00 (最舊連線：%s)，該日回溯已達標，無需向前回補！\n", targetDate, oldestInDay)
 					_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte("LIMIT"), 0644)
@@ -770,13 +777,12 @@ func registerRoutes(r *gin.Engine) {
 					sendMsg("[流量回補] 🎯 偵測到 %s 已有歷史資料，自動從最舊連線 %s 接力往前回溯！\n", targetDate, oldestInDay)
 				}
 			} else {
-				// 該日尚無資料，起點自動設為當天最後一秒
 				lastTime = targetDate + " 23:59:59"
 				sendMsg("[流量回補] 🎯 %s 尚無歷史日誌，自動自當日 23:59:59 起跑\n", targetDate)
 			}
 		}
 
-		// 🌟 4. 跨日全庫搜尋 (完全沒傳 date 也沒傳 before 時)
+		// 🌟 4. 全庫最舊時間搜尋
 		if lastTime == "" {
 			files, _ := filepath.Glob(filepath.Join(trafficDir, "traffic_*.parquet"))
 			sort.Strings(files)
@@ -795,8 +801,12 @@ func registerRoutes(r *gin.Engine) {
 					}
 				}
 			}
-		} else if targetDate == "" {
-			sendMsg("[流量回補] 🎯 收到指定時間點：%s，將以此為起點向前回溯\n", lastTime)
+		} else {
+			if targetDate != "" {
+				sendMsg("[流量回補] 🎯 收到指定時間點：%s (邊界目標：%s 00:00:00)\n", lastTime, targetDate)
+			} else {
+				sendMsg("[流量回補] 🎯 收到指定時間點：%s，將以此為起點向前回溯\n", lastTime)
+			}
 		}
 
 		sendMsg("[流量回補] 🚀 啟動回溯作業，預計回溯 %d 輪 (目標: %d 筆)...\n", rounds, rounds*5000)
@@ -821,7 +831,7 @@ func registerRoutes(r *gin.Engine) {
 			}
 			if len(entries) == 0 {
 				sendMsg("[流量回補] ℹ️ 第 %d 輪已無更早的歷史日誌 (已達極限)\n", r+1)
-				_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte("LIMIT"), 0644) // 👈 加入此行
+				_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte("LIMIT"), 0644)
 				break
 			}
 
@@ -840,7 +850,6 @@ func registerRoutes(r *gin.Engine) {
 				}
 			}
 
-			// 每跑完一輪即時分塊輸出
 			sendMsg("[流量回補] ✅ [%d/%d] 完成！耗時: %.1fs，抓取: %d 筆，新增: %d 筆 (當日累計: %d 筆)，時間推進至: %s\n",
 				r+1, rounds, time.Since(startT).Seconds(), len(entries), ins, tot, oldest)
 
@@ -850,9 +859,14 @@ func registerRoutes(r *gin.Engine) {
 			} else {
 				lastTime = oldest
 			}
-			
-			// 👈 加入此行：即時將最新時間寫入狀態檔，供批次檔接力讀取
+
 			_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte(lastTime), 0644)
+
+			// 🛑 迴圈內部關鍵煞車機制
+			if targetDate != "" && lastTime <= targetDate+" 00:00:00" {
+				sendMsg("[流量回補] 🎯 已成功回溯至當日 00:00:00 邊界 (推進至: %s)，任務圓滿達成！\n", lastTime)
+				break
+			}
 
 			if r < rounds-1 {
 				time.Sleep(1500 * time.Millisecond)
@@ -864,7 +878,7 @@ func registerRoutes(r *gin.Engine) {
 
 	// 17. 🌟 智慧接力回溯：向 PA-1420 擷取歷史資安威脅 (即時分輪串流輸出)
 	r.POST("/api/threat-backfill", func(c *gin.Context) {
-		// 🌟 1. 優先讀取傳入參數
+		// 🌟 1. 優先讀取所有傳入參數
 		customBefore := strings.TrimSpace(c.Query("before"))
 		if customBefore == "" {
 			customBefore = strings.TrimSpace(c.PostForm("before"))
@@ -872,6 +886,7 @@ func registerRoutes(r *gin.Engine) {
 		if customBefore == "" {
 			customBefore = strings.TrimSpace(c.Request.FormValue("before"))
 		}
+		customBefore = strings.ReplaceAll(customBefore, "/", "-")
 
 		targetDate := strings.TrimSpace(c.Query("date"))
 		if targetDate == "" {
@@ -879,6 +894,12 @@ func registerRoutes(r *gin.Engine) {
 		}
 		if targetDate == "" {
 			targetDate = strings.TrimSpace(c.Request.FormValue("date"))
+		}
+		targetDate = strings.ReplaceAll(targetDate, "/", "-")
+
+		// 🌟 自動萃取日期邊界
+		if targetDate == "" && len(customBefore) >= 10 {
+			targetDate = customBefore[:10]
 		}
 
 		roundsStr := strings.TrimSpace(c.Query("rounds"))
@@ -912,12 +933,20 @@ func registerRoutes(r *gin.Engine) {
 
 		lastTime := customBefore
 
-		// 🌟 3. 當日斷點續傳探測
+		// 🌟 3. 當日斷點續傳探測 (補齊 00:00:00 邊界防護)
 		if lastTime == "" && targetDate != "" {
 			dayFile := filepath.Join(threatDir, fmt.Sprintf("threat_%s.parquet", targetDate))
 			rows, err := parquet.ReadFile[ThreatParquetRow](dayFile)
 			if err == nil && len(rows) > 0 {
 				oldestInDay := rows[len(rows)-1].Timestamp
+
+				// 🛑 補上 Threat 邊界防線
+				if oldestInDay <= targetDate+" 00:00:00" {
+					sendMsg("[Threat 回補] 🎯 %s 本地威脅已涵蓋至當日 00:00:00 (最舊紀錄：%s)，該日回溯已達標，無需向前回補！\n", targetDate, oldestInDay)
+					_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte("LIMIT"), 0644)
+					return
+				}
+
 				t, err := time.Parse("2006-01-02 15:04:05", oldestInDay)
 				if err == nil {
 					lastTime = t.Add(-1 * time.Second).Format("2006-01-02 15:04:05")
@@ -929,7 +958,7 @@ func registerRoutes(r *gin.Engine) {
 			}
 		}
 
-		// 🌟 4. 跨日全庫搜尋
+		// 🌟 4. 全庫最舊時間搜尋
 		if lastTime == "" {
 			files, _ := filepath.Glob(filepath.Join(threatDir, "threat_*.parquet"))
 			sort.Strings(files)
@@ -948,8 +977,13 @@ func registerRoutes(r *gin.Engine) {
 					}
 				}
 			}
-		} else if targetDate == "" {
-			sendMsg("[Threat 回補] 🎯 收到指定時間點：%s，將以此為起點向前回溯\n", lastTime)
+		} else {
+			// 修正提示文字判斷
+			if targetDate != "" {
+				sendMsg("[Threat 回補] 🎯 收到指定時間點：%s (邊界目標：%s 00:00:00)\n", lastTime, targetDate)
+			} else {
+				sendMsg("[Threat 回補] 🎯 收到指定時間點：%s，將以此為起點向前回溯\n", lastTime)
+			}
 		}
 
 		sendMsg("[Threat 回補] 🚀 啟動資安威脅回溯，預計回溯 %d 輪 (目標: %d 筆)...\n", rounds, rounds*5000)
@@ -974,13 +1008,14 @@ func registerRoutes(r *gin.Engine) {
 			}
 			if len(entries) == 0 {
 				sendMsg("[Threat 回補] ℹ️ 第 %d 輪已無更早的威脅日誌\n", r+1)
-				_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte("LIMIT"), 0644) // 👈 加入此行
+				_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte("LIMIT"), 0644)
 				break
 			}
 
 			ins, tot, err := saveThreatLogsToParquet(entries)
 			if err != nil {
-				sendMsg("[流量回補] ❌ 存入磁碟發生錯誤：%v\n", err)
+				// 修正錯誤標籤
+				sendMsg("[Threat 回補] ❌ 存入磁碟發生錯誤：%v\n", err)
 			} else {
 				totalNew += ins
 				successfulRounds++
@@ -1002,9 +1037,14 @@ func registerRoutes(r *gin.Engine) {
 			} else {
 				lastTime = oldest
 			}
-			
-			// 👈 加入此行：即時將最新時間寫入狀態檔，供批次檔接力讀取
+
 			_ = os.WriteFile(filepath.Join(appDir, "backfill_status.txt"), []byte(lastTime), 0644)
+
+			// 🛑 迴圈內部關鍵煞車機制
+			if targetDate != "" && lastTime <= targetDate+" 00:00:00" {
+				sendMsg("[Threat 回補] 🎯 已成功回溯至當日 00:00:00 邊界 (時間至: %s)，任務圓滿達成！\n", lastTime)
+				break
+			}
 
 			if r < rounds-1 {
 				time.Sleep(1500 * time.Millisecond)

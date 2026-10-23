@@ -1531,8 +1531,8 @@ func startSyslogBatchFlusher() {
 					time.Now().Format("15:04:05"), ins, tot)
 
 				chunkCounter++
-				// 當即時分塊累積滿 60 個時，在背景非同步整併，保持檔案乾淨
-				if chunkCounter >= 60 {
+				// 當即時分塊累積滿 15 個時，在背景非同步整併，保持檔案乾淨
+				if chunkCounter >= 15 {
 					chunkCounter = 0
 					go ConsolidateParquetFiles()
 				}
