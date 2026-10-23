@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}PA-1420 智能監控聯防系統{% endblock %}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { background-color: #f4f6f9; height: 100vh; overflow: hidden; }
+        .health-badge { background-color: #eef2f6; padding: 4px 10px; border-radius: 6px; font-size: 13px; }
+        .clickable-badge {
+            cursor: pointer;
+            transition: all 0.2s ease-in-out;
+            user-select: none;
+            border: 1px solid transparent;
+        }
+        .clickable-badge:hover {
+            background-color: #dbe7f6 !important;
+            border-color: #0d6efd !important;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(13, 110, 253, 0.2);
+        }
+        .nav-pills .nav-link {
+            font-size: 14px;
+            font-weight: 600;
+            padding: 5px 16px;
+            color: #495057;
+            border-radius: 6px;
+        }
+        .nav-pills .nav-link.active {
+            background-color: #0d6efd;
+            color: #fff;
+            box-shadow: 0 2px 4px rgba(13, 110, 253, 0.3);
+        }
+        {% block extra_styles %}{% endblock %}
+    </style>
+</head>
+<body class="d-flex flex-column">
+
+<div class="container-fluid d-flex flex-column h-100 p-3">
+    
+    <!-- 1. 設定檔缺失/錯誤 置頂警示橫幅 (預設隱藏) -->
+    <div id="config-alert-banner" class="alert alert-danger shadow-sm mb-2 d-none d-flex justify-content-between align-items-center py-2 px-3">
+        <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-exclamation-octagon-fill fs-5 text-danger"></i>
+            <div>
+                <strong class="d-block" id="config-alert-title">未偵測到有效的連線設定檔 (pa1420key.txt)</strong>
+                <small id="config-alert-msg" class="text-secondary font-monospace"></small>
+            </div>
+        </div>
+        <button class="btn btn-sm btn-outline-danger" onclick="checkConfigStatus(true)">
+            <i class="bi bi-arrow-clockwise"></i> 存檔後點此重新偵測
+        </button>
+    </div>
+    
+    <!-- 2. 總 Banner：PA-1420 系統健康即時資訊看板 (圖一) 與 功能導覽列 -->
+    <div class="row mb-2 flex-shrink-0">
+        <div class="col-12">
+            <div class="card shadow-sm border-0 bg-white">
+                <div class="card-body py-2 px-3">
+                    
+                    <!-- 上層：主機資訊與功能選擇分頁 -->
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 pb-2 mb-2 border-bottom">
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
+                            <span class="fw-bold text-dark fs-6"><i class="bi bi-shield-lock-fill text-primary"></i> <span id="sys-hostname">PA-1420</span></span>
+                            <span class="health-badge"><i class="bi bi-hdd-network text-secondary me-1"></i>型號: <strong id="sys-model">-</strong></span>
+                            <span class="health-badge"><i class="bi bi-code-slash text-secondary me-1"></i>PAN-OS: <strong id="sys-os">-</strong></span>
+                            <span class="health-badge"><i class="bi bi-clock-history text-secondary me-1"></i>運行時間: <strong id="sys-uptime">-</strong></span>
+                        </div>
+
+                        <!-- 模組功能切換按鈕群組 (無縫跳轉，高亮當前模組) -->
+                        <ul class="nav nav-pills gap-1">
+                            <li class="nav-item">
+                                <a class="nav-link {% if active_page == 'dhcp' %}active{% endif %}" href="/">
+                                    <i class="bi bi-ethernet me-1"></i>DHCP 租約管理
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a class="nav-link {% if active_page == 'traffic' %}active{% endif %}" href="/traffic">
+                                    <i class="bi bi-activity me-1"></i>流量紀錄分析
+                                    <span class="badge bg-warning text-dark ms-1" style="font-size: 10px;">DuckDB</span>
+                                </a>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <!-- 下層：雙 CPU、記憶體、SSD 與活躍連線數 (點擊開啟圖表) -->
+                    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                        <div class="d-flex align-items-center gap-3 flex-wrap">
+                            <!-- 管理平面 CPU (MP) -->
+                            <span class="health-badge clickable-badge" title="點擊查看歷史趨勢圖" onclick="openChartModal('mp_cpu', '管理 CPU (MP) 使用率趨勢 (%)', 'rgb(13, 110, 253)')">
+                                <i class="bi bi-gear-wide-connected text-primary me-1"></i>管理 CPU (MP): 
+                                <strong id="sys-mp-cpu" class="font-monospace text-success">0%</strong>
+                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 11px;"></i>
+                            </span>
+
+                            <!-- 資料平面 CPU (DP) -->
+                            <span class="health-badge clickable-badge" title="點擊查看歷史趨勢圖" onclick="openChartModal('dp_cpu', '資料 CPU (DP) 使用率趨勢 (%)', 'rgb(253, 126, 20)')">
+                                <i class="bi bi-lightning-charge-fill text-warning me-1"></i>資料 CPU (DP): 
+                                <strong id="sys-dp-cpu" class="font-monospace text-success">0%</strong>
+                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 11px;"></i>
+                            </span>
+
+                            <!-- 系統記憶體 (RAM) -->
+                            <span class="health-badge clickable-badge" title="點擊查看歷史趨勢圖" onclick="openChartModal('mem_usage_pct', '記憶體使用率趨勢 (%)', 'rgb(13, 202, 240)')">
+                                <i class="bi bi-memory text-info me-1"></i>記憶體: 
+                                <strong id="sys-mem" class="font-monospace text-success">0%</strong>
+                                <small class="text-muted ms-1" id="sys-mem-desc"></small>
+                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 11px;"></i>
+                            </span>
+
+                            <!-- SSD 磁碟狀態 -->
+                            <span class="health-badge clickable-badge" title="點擊查看歷史趨勢圖" onclick="openChartModal('disk_usage_pct', 'SSD 日誌儲存空間使用率趨勢 (%)', 'rgb(220, 53, 69)')">
+                                <i class="bi bi-device-ssd text-danger me-1"></i>SSD (日誌區): 
+                                <strong id="sys-disk" class="font-monospace text-success">0%</strong>
+                                <small class="text-muted ms-1" id="sys-disk-desc"></small>
+                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 11px;"></i>
+                            </span>
+                        </div>
+
+                        <!-- 連線數即時容量 -->
+                        <div class="d-flex align-items-center gap-2 ps-2 border-start clickable-badge rounded pe-2 py-1" title="點擊查看歷史趨勢圖" onclick="openChartModal('active_sessions', '活躍連線數歷史趨勢', 'rgb(25, 135, 84)')">
+                            <span class="small text-muted"><i class="bi bi-bezier2 me-1"></i>連線數:</span>
+                            <span class="fw-bold font-monospace text-primary" id="sys-sessions">0 / 0</span>
+                            <div class="progress" style="width: 80px; height: 8px;">
+                                <div id="session-bar" class="progress-bar bg-success" role="progressbar" style="width: 0%;"></div>
+                            </div>
+                            <span class="small font-monospace" id="session-pct">0%</span>
+                            <i class="bi bi-graph-up text-muted ms-1" style="font-size: 11px;"></i>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. 子頁面主要內容注入區塊 -->
+    {% block content %}{% endblock %}
+
+</div>
+
+<!-- ================= 共用彈出視窗：效能趨勢圖表 ================= -->
+<div class="modal fade" id="chartModal" tabindex="-1" aria-labelledby="chartModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content shadow">
+            <div class="modal-header bg-light py-1 px-3 d-flex align-items-center" style="min-height: 38px;">
+                <h6 class="modal-title fw-bold mb-0 text-dark" id="chartModalTitle" style="font-size: 15px; line-height: 1.2;">效能歷史趨勢圖</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close" style="padding: 6px;"></button>
+            </div>
+            <div class="modal-body p-2 px-3">
+                <div id="chart-extra-details" class="mb-2" style="display: none;"></div>
+                <div style="position: relative; height: 260px; width: 100%;">
+                    <canvas id="healthChart"></canvas>
+                </div>
+            </div>
+            <div class="modal-footer py-1 px-3 d-flex justify-content-between text-muted small bg-light" style="font-size: 12px;">
+                <span><i class="bi bi-info-circle me-1"></i>系統每 1 分鐘自動採樣記錄，圖表顯示最近 3 小時趨勢 (最多 180 筆)。</span>
+                <button type="button" class="btn btn-secondary btn-sm py-0 px-2" style="font-size: 12px; height: 24px;" data-bs-dismiss="modal">關閉</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    // 全域共用變數與圖表邏輯
+    let latestSystemHealthData = null;
+    const chartModalObj = new bootstrap.Modal(document.getElementById('chartModal'));
+    let healthChartInstance = null;
+
+    function checkConfigStatus(manual = false) {
+        fetch('/api/config-status')
+            .then(res => res.json())
+            .then(data => {
+                const banner = document.getElementById('config-alert-banner');
+                if (data.status !== 'ok') {
+                    banner.classList.remove('d-none');
+                    document.getElementById('config-alert-msg').innerText = data.message;
+                    if (manual) alert(`❌ 設定檔檢查失敗：\n${data.message}`);
+                } else {
+                    banner.classList.add('d-none');
+                    if (manual) {
+                        alert('✅ 設定檔驗證成功！正在連線 PA-1420...');
+                        refreshSystemHealth();
+                    }
+                }
+            })
+            .catch(err => console.log('檢查設定檔狀態異常:', err));
+    }
+
+    function refreshSystemHealth() {
+        fetch('/api/system-health')
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    latestSystemHealthData = data;
+                    document.getElementById('sys-hostname').innerText = data.hostname;
+                    document.getElementById('sys-model').innerText = data.model;
+                    document.getElementById('sys-os').innerText = data.sw_version;
+                    document.getElementById('sys-uptime').innerText = data.uptime;
+                    
+                    const mpElem = document.getElementById('sys-mp-cpu');
+                    mpElem.innerText = `${data.mp_cpu}%`;
+                    mpElem.className = `font-monospace ${data.mp_cpu > 80 ? 'text-danger' : (data.mp_cpu > 50 ? 'text-warning' : 'text-success')}`;
+
+                    const dpElem = document.getElementById('sys-dp-cpu');
+                    dpElem.innerText = `${data.dp_cpu}%`;
+                    dpElem.className = `font-monospace ${data.dp_cpu > 80 ? 'text-danger' : (data.dp_cpu > 50 ? 'text-warning' : 'text-success')}`;
+
+                    const memElem = document.getElementById('sys-mem');
+                    memElem.innerText = `${data.mem_usage_pct}%`;
+                    memElem.className = `font-monospace ${data.mem_usage_pct > 85 ? 'text-danger' : (data.mem_usage_pct > 65 ? 'text-warning' : 'text-success')}`;
+                    document.getElementById('sys-mem-desc').innerText = data.mem_desc ? `(${data.mem_desc})` : '';
+
+                    const diskElem = document.getElementById('sys-disk');
+                    if (diskElem && data.disk_usage_pct !== undefined) {
+                        diskElem.innerText = `${data.disk_usage_pct}%`;
+                        diskElem.className = `font-monospace ${data.disk_usage_pct > 90 ? 'text-danger' : (data.disk_usage_pct > 75 ? 'text-warning' : 'text-success')}`;
+                        document.getElementById('sys-disk-desc').innerText = data.disk_desc ? `(${data.disk_desc})` : '';
+                    }
+
+                    document.getElementById('sys-sessions').innerText = `${data.active_sessions.toLocaleString()} / ${data.max_sessions.toLocaleString()}`;
+                    document.getElementById('session-pct').innerText = `${data.session_usage_pct}%`;
+                    
+                    const bar = document.getElementById('session-bar');
+                    bar.style.width = `${Math.min(data.session_usage_pct, 100)}%`;
+                    bar.className = data.session_usage_pct > 80 ? 'progress-bar bg-danger' : (data.session_usage_pct > 50 ? 'progress-bar bg-warning' : 'progress-bar bg-success');
+                }
+            })
+            .catch(err => console.log('系統健康狀態更新失敗', err));
+    }
+
+    function openChartModal(metricKey, title, colorStr) {
+        document.getElementById('chartModalTitle').innerHTML = `<i class="bi bi-graph-up-arrow text-primary me-1"></i> ${title}`;
+        const extraDetailsDiv = document.getElementById('chart-extra-details');
+        
+        if (extraDetailsDiv) {
+            if (metricKey === 'disk_usage_pct' && latestSystemHealthData && latestSystemHealthData.disk_partitions && latestSystemHealthData.disk_partitions.length > 0) {
+                let tableHtml = `
+                    <div class="card shadow-sm border bg-white mb-2">
+                        <div class="card-header bg-light py-1 px-2 fw-bold text-dark d-flex justify-content-between align-items-center" style="font-size: 13.5px; line-height: 1.2;">
+                            <span><i class="bi bi-hdd-network text-secondary me-1"></i>實體 SSD 各掛載分區詳細狀態</span>
+                            <span class="badge bg-secondary font-monospace" style="font-size: 11px; padding: 2px 6px;">共 ${latestSystemHealthData.disk_partitions.length} 個分區</span>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-hover align-middle font-monospace text-center mb-0" style="font-size: 14.5px; line-height: 1.25;">
+                                <thead class="table-light">
+                                    <tr style="border-bottom: 1px solid #dee2e6;">
+                                        <th class="text-start ps-3" style="padding-top: 3px; padding-bottom: 3px;">掛載點 (Mount)</th>
+                                        <th style="padding-top: 3px; padding-bottom: 3px;">檔案系統</th>
+                                        <th style="padding-top: 3px; padding-bottom: 3px;">總容量</th>
+                                        <th style="padding-top: 3px; padding-bottom: 3px;">已使用</th>
+                                        <th style="padding-top: 3px; padding-bottom: 3px;">可用空間</th>
+                                        <th class="pe-3" style="padding-top: 3px; padding-bottom: 3px;">使用率</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                `;
+                latestSystemHealthData.disk_partitions.forEach(p => {
+                    let pctClass = p.percent >= 90 ? 'text-danger fw-bold' : (p.percent >= 75 ? 'text-warning text-dark fw-bold' : 'text-success');
+                    tableHtml += `
+                        <tr>
+                            <td class="fw-bold text-start ps-3 text-primary" style="padding-top: 2px; padding-bottom: 2px;">${p.mount}</td>
+                            <td class="text-muted" style="padding-top: 2px; padding-bottom: 2px; font-size: 13px;">${p.filesystem}</td>
+                            <td style="padding-top: 2px; padding-bottom: 2px;">${p.size}</td>
+                            <td style="padding-top: 2px; padding-bottom: 2px;">${p.used}</td>
+                            <td style="padding-top: 2px; padding-bottom: 2px;">${p.avail}</td>
+                            <td class="pe-3" style="padding-top: 2px; padding-bottom: 2px;"><span class="${pctClass}">${p.percent}%</span></td>
+                        </tr>
+                    `;
+                });
+                tableHtml += `</tbody></table></div></div>`;
+                extraDetailsDiv.innerHTML = tableHtml;
+                extraDetailsDiv.style.display = 'block';
+            } else {
+                extraDetailsDiv.innerHTML = '';
+                extraDetailsDiv.style.display = 'none';
+            }
+        }
+
+        chartModalObj.show();
+
+        fetch('/api/health-history')
+            .then(res => res.json())
+            .then(data => {
+                if (data.status !== 'success') return;
+                const labels = data.history.map(row => {
+                    let d = new Date(row.record_time);
+                    return d.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+                });
+                const values = data.history.map(row => row[metricKey]);
+
+                if (healthChartInstance) healthChartInstance.destroy();
+                const ctx = document.getElementById('healthChart').getContext('2d');
+                healthChartInstance = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: title,
+                            data: values,
+                            borderColor: colorStr,
+                            backgroundColor: colorStr.replace(')', ', 0.12)').replace('rgb', 'rgba'),
+                            borderWidth: 2,
+                            pointRadius: values.length > 50 ? 1 : 3,
+                            fill: true,
+                            tension: 0.35
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: { y: { beginAtZero: true, max: metricKey !== 'active_sessions' ? 100 : undefined } }
+                    }
+                });
+            })
+            .catch(err => console.log('讀取歷史紀錄失敗', err));
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        checkConfigStatus();
+        refreshSystemHealth();
+    });
+    setInterval(refreshSystemHealth, 30000);
+</script>
+
+{% block scripts %}{% endblock %}
+
+</body>
+</html>

@@ -1,0 +1,510 @@
+{% extends "base.html" %}
+
+{% block title %}PA-1420 DHCP 租約智能監控聯防系統{% endblock %}
+
+{% block extra_styles %}
+.upload-card { background-color: #ffffff; border-radius: 8px; padding: 12px 15px; }
+.upload-zone {
+    border: 2px dashed #0d6efd; 
+    border-radius: 6px; 
+    padding: 10px;
+    text-align: center; 
+    background-color: #f8fbff; 
+    cursor: pointer; 
+    transition: 0.25s;
+}
+.upload-zone:hover, .upload-zone.dragover { background-color: #e2edff; border-color: #0a58ca; }
+.table-sticky-header th {
+    position: sticky; top: 0; background-color: #f8f9fa; z-index: 2;
+    box-shadow: 0 2px 2px -1px rgba(0,0,0,0.1); white-space: nowrap;
+}
+.table-scroll-container { overflow-y: scroll; flex-grow: 1; }
+.table-fixed { table-layout: fixed; width: 100%; margin-bottom: 0; }
+.table-fixed th, .table-fixed td { vertical-align: middle; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+{% endblock %}
+
+{% block content %}
+<!-- 操作列 (上傳區塊與排程監控) -->
+<div class="row mb-3 flex-shrink-0">
+    <div class="col-md-5">
+        <div class="card shadow-sm h-100 upload-card d-flex flex-column justify-content-between">
+            <div class="d-flex align-items-center gap-2 mb-2">
+                <label for="upload-date" class="form-label mb-0 small fw-bold text-nowrap">
+                    <i class="bi bi-calendar-event text-primary"></i> 指定匯入日期：
+                </label>
+                <input type="date" id="upload-date" class="form-control form-control-sm font-monospace">
+            </div>
+            <div id="drop-zone" class="upload-zone flex-grow-1 d-flex flex-column justify-content-center">
+                <div class="fw-bold text-primary small">
+                    <i class="bi bi-cloud-arrow-up-fill fs-5 me-1"></i> 點擊選取或拖曳 XML 至此
+                </div>
+                <span class="text-muted" style="font-size: 11px;">(將歸入上方選定之日期)</span>
+                <input type="file" id="file-input" accept=".xml" style="display: none;">
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-7">
+        <div class="card shadow-sm h-100">
+            <div class="card-body p-3 d-flex flex-column justify-content-between">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <div class="d-flex align-items-center gap-2 mb-1">
+                            <span class="badge bg-secondary fs-6"><i class="bi bi-activity"></i> 系統監控中 (6 次/日)</span>
+                            <span class="fw-bold text-dark" style="font-size: 15px;">
+                                <i class="bi bi-clock-history text-primary"></i> 下次更新：<span id="next-run-time" class="text-primary font-monospace">--:--</span>
+                            </span>
+                        </div>
+                        <div class="text-dark" style="font-size: 14px;">
+                            <i class="bi bi-calendar-check text-secondary me-1"></i>自動排程：每日 <strong>01:00、05:00、09:00、13:00、17:00、21:00</strong>
+                        </div>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-danger btn-sm px-2 text-nowrap" onclick="openThreatModal()">
+                            <i class="bi bi-shield-slash-fill"></i> 資安威脅排行
+                        </button>
+                        <button class="btn btn-outline-danger btn-sm px-2 text-nowrap" onclick="openArpModal()">
+                            <i class="bi bi-search"></i> ARP 固定IP比對
+                        </button>
+                        <button class="btn btn-outline-primary btn-sm px-2 text-nowrap" id="fetch-btn" onclick="fetchNow()">
+                            <i class="bi bi-arrow-repeat"></i> 立即從 PA-1420 抓取
+                        </button>
+                    </div>
+                </div>
+                <div id="status-result" class="border-top pt-2 mt-2 d-flex align-items-center" style="min-height: 28px;">
+                    <span class="text-muted small"><i class="bi bi-info-circle me-1"></i>系統排程運作中，等待下一批次執行或點擊按鈕更新...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 租約清單資料面板 -->
+<div class="row flex-grow-1 overflow-hidden">
+    <div class="col-12 h-100">
+        <div class="card shadow-sm h-100 d-flex flex-column">
+            <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <div class="d-flex align-items-center gap-2">
+                    <h5 class="mb-0 fw-bold"><i class="bi bi-shield-check text-primary"></i> 租約清單</h5>
+                    <div class="input-group input-group-sm ms-3" style="width: 250px;">
+                        <label class="input-group-text"><i class="bi bi-calendar3"></i> 檢視日期</label>
+                        <input type="date" class="form-control font-monospace" id="view-date" onchange="changeDate(this.value)">
+                    </div>
+                </div>
+                <span class="badge bg-primary rounded-pill" id="total-records-badge">共 0 筆</span>
+            </div>
+            
+            <div class="card-body p-0 table-scroll-container">
+                <table class="table table-hover table-striped table-sticky-header table-fixed">
+                    <colgroup>
+                        <col style="width: 15%;">
+                        <col style="width: 18%;">
+                        <col style="width: 25%;">
+                        <col style="width: 10%;">
+                        <col style="width: 10%;">
+                        <col style="width: 22%;">
+                    </colgroup>
+                    <thead>
+                        <tr>
+                            <th>IP 位址</th>
+                            <th>MAC 位址</th>
+                            <th>Hostname</th>
+                            <th>State</th>
+                            <th>Duration</th>
+                            <th>Lease Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="table-body"></tbody>
+                </table>
+            </div>
+
+            <div class="card-footer bg-white flex-shrink-0 d-flex justify-content-end py-2">
+                <nav><ul class="pagination pagination-sm mb-0" id="pagination-ul"></ul></nav>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ARP 彈出視窗 -->
+<div class="modal fade" id="arpModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-light py-2 d-flex justify-content-between align-items-center">
+                <div class="d-flex align-items-center gap-2">
+                    <h5 class="modal-title fw-bold mb-0"><i class="bi bi-cpu-fill text-danger"></i> PA-1420 ARP 即時比對分析</h5>
+                    <span id="arp-dns-status" class="badge bg-secondary ms-2" style="display: none;">
+                        <span class="spinner-border spinner-border-sm me-1"></span>解析中...
+                    </span>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <button class="btn btn-primary btn-sm px-3 shadow-sm" id="arp-refresh-btn" onclick="refreshArpTableData()">
+                        <i class="bi bi-arrow-clockwise"></i> 重新顯示取得資料
+                    </button>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <div class="row g-2 mb-3">
+                    <div class="col-md-3"><div class="p-2 border rounded bg-light text-center"><div class="small text-muted">目前 ARP 總上線設備</div><h4 class="mb-0 fw-bold font-monospace" id="arp-total-count">0</h4></div></div>
+                    <div class="col-md-3"><div class="p-2 border rounded bg-light text-center"><div class="small text-muted">DHCP 動態正常配發</div><h4 class="mb-0 fw-bold font-monospace text-success" id="arp-dhcp-count">0</h4></div></div>
+                    <div class="col-md-3"><div class="p-2 border rounded bg-warning-subtle text-center"><div class="small text-warning-emphasis fw-bold">🚨 疑似私設 / 固定 IP</div><h4 class="mb-0 fw-bold font-monospace text-warning-emphasis" id="arp-static-count">0</h4></div></div>
+                    <div class="col-md-3"><div class="p-2 border rounded bg-danger-subtle text-center"><div class="small text-danger fw-bold">⚠️ MAC 不符 / IP 異常</div><h4 class="mb-0 fw-bold font-monospace text-danger" id="arp-conflict-count">0</h4></div></div>
+                </div>
+                <div class="table-responsive" style="max-height: 480px;">
+                    <table class="table table-sm table-bordered table-hover align-middle mb-0 font-monospace">
+                        <thead class="table-light sticky-top">
+                            <tr><th>IP 位址</th><th>MAC 位址</th><th>實體介面</th><th>Hostname / 設備名稱</th><th>分析判定</th></tr>
+                        </thead>
+                        <tbody id="arp-table-body"><tr><td colspan="5" class="text-center py-4">載入中...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer py-1">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">關閉</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 資安威脅彈出視窗 -->
+<div class="modal fade" id="threatModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white py-2">
+                <h5 class="modal-title fw-bold"><i class="bi bi-shield-x"></i> PA-1420 資安威脅與阻擋事件即時分析</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-3">
+                <div class="row g-3 mb-3">
+                    <div class="col-md-4">
+                        <div class="card h-100 shadow-sm border-0 bg-light">
+                            <div class="card-body p-2 d-flex flex-column align-items-center">
+                                <div class="small fw-bold text-dark mb-1">威脅等級分佈</div>
+                                <div style="position: relative; height: 170px; width: 100%;"><canvas id="threatSeverityChart"></canvas></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card h-100 shadow-sm border-0">
+                            <div class="card-header bg-white py-1 small fw-bold text-danger"><i class="bi bi-fire"></i> Top 5 攻擊來源 IP</div>
+                            <ul class="list-group list-group-flush small font-monospace" id="top-sources-list"><li class="list-group-item text-center py-4 text-muted">載入中...</li></ul>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card h-100 shadow-sm border-0">
+                            <div class="card-header bg-white py-1 small fw-bold text-dark"><i class="bi bi-bug-fill text-warning"></i> Top 5 觸發特徵</div>
+                            <ul class="list-group list-group-flush small" id="top-threats-list"><li class="list-group-item text-center py-4 text-muted">載入中...</li></ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="card shadow-sm border-0">
+                    <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
+                        <span class="small fw-bold"><i class="bi bi-list-columns-reverse text-primary me-1"></i>最新阻擋事件明細</span>
+                        <span class="badge bg-danger rounded-pill" id="total-threats-badge">共 0 筆事件</span>
+                    </div>
+                    <div class="table-responsive" style="max-height: 350px;">
+                        <table class="table table-sm table-hover align-middle mb-0 font-monospace" style="font-size: 13px;">
+                            <thead class="table-light sticky-top">
+                                <tr><th>時間</th><th>等級</th><th>來源 IP</th><th>目的 IP</th><th>應用程式</th><th>威脅特徵</th><th>動作</th></tr>
+                            </thead>
+                            <tbody id="threat-table-body"><tr><td colspan="7" class="text-center py-4">載入中...</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer py-1">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">關閉</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const todayStr = new Date().toISOString().split('T')[0];
+    let currentDate = todayStr;
+    let currentPage = 1;
+    let lastSeenTimestamp = 0;
+    const arpModalObj = new bootstrap.Modal(document.getElementById('arpModal'));
+    const threatModalObj = new bootstrap.Modal(document.getElementById('threatModal'));
+    let threatChartInstance = null;
+    let arpPollingTimer = null;
+
+    document.getElementById('upload-date').value = todayStr;
+    document.getElementById('view-date').value = todayStr;
+
+    function updateNextScheduleDisplay() {
+        const now = new Date();
+        const currentHour = now.getHours();
+        const scheduleHours = [1, 5, 9, 13, 17, 21];
+        let nextHour = scheduleHours.find(h => (h > currentHour) || (h === currentHour && now.getMinutes() === 0));
+        const span = document.getElementById('next-run-time');
+        if (span) span.innerText = (nextHour !== undefined) ? `${String(nextHour).padStart(2, '0')}:00` : '明日 01:00';
+    }
+
+    function updateStatusPanel(data) {
+        const resultArea = document.getElementById('status-result');
+        let multiMsg = data.multi_lease_count > 0 ? ` <span class="badge bg-warning text-dark fs-6 ms-1">同 IP 多重租約：${data.multi_lease_count} 筆</span>` : "";
+        let timeString = new Date(data.timestamp * 1000).toLocaleTimeString('zh-TW', { hour12: false });
+        let titleBadge = (data.type === 'auto')
+            ? '<span class="badge bg-info text-dark fs-6 me-2"><i class="bi bi-robot"></i> 自動排程完成</span>'
+            : '<span class="badge bg-success fs-6 me-2"><i class="bi bi-person-check"></i> 手動抓取完成</span>';
+        let uniqueIpMsg = (data.unique_ip_count !== undefined) ? `，今日不重複 IP：<strong class="text-dark">${data.unique_ip_count}</strong> 筆` : "";
+
+        if (data.status === 'success') {
+            resultArea.innerHTML = `
+                <div class="d-flex align-items-center flex-wrap" style="font-size: 14px;">
+                    ${titleBadge}<span class="text-muted me-2"><i class="bi bi-clock"></i> ${timeString}</span>
+                    <span class="fw-bold text-success">新增：${data.success_count} 筆</span>${multiMsg}
+                    <span class="text-secondary ms-2">，略過重複：${data.duplicate_count} 筆${uniqueIpMsg}</span>
+                </div>`;
+        } else if (data.status === 'error') {
+            resultArea.innerHTML = `
+                <div class="d-flex align-items-center" style="font-size: 14px;">
+                    <span class="badge bg-danger fs-6 me-2"><i class="bi bi-exclamation-triangle"></i> 執行失敗</span>
+                    <span class="text-muted me-2"><i class="bi bi-clock"></i> ${timeString}</span>
+                    <span class="text-danger fw-bold">${data.message}</span>
+                </div>`;
+        }
+    }
+
+    function fetchNow() {
+        const resultArea = document.getElementById('status-result');
+        const btn = document.getElementById('fetch-btn');
+        btn.disabled = true;
+        resultArea.innerHTML = `<div class="d-flex align-items-center text-primary" style="font-size: 13.5px;"><div class="spinner-border spinner-border-sm me-2"></div> 連線 PA-1420 抓取中...</div>`;
+        
+        fetch('/api/fetch-now', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                lastSeenTimestamp = data.timestamp;
+                updateStatusPanel(data);
+                if (data.status === 'success') {
+                    document.getElementById('view-date').value = data.date;
+                    loadData(1, data.date);
+                    refreshSystemHealth();
+                }
+            })
+            .finally(() => {
+                btn.disabled = false;
+                updateNextScheduleDisplay();
+            });
+    }
+
+    function checkAutoUpdate() {
+        updateNextScheduleDisplay();
+        fetch('/api/latest-status')
+            .then(res => res.json())
+            .then(data => {
+                if (data.timestamp > lastSeenTimestamp) {
+                    lastSeenTimestamp = data.timestamp;
+                    if (data.status === 'waiting') return;
+                    updateStatusPanel(data);
+                    const currentViewDate = document.getElementById('view-date').value;
+                    if (data.status === 'success' && data.date === currentViewDate) {
+                        loadData(currentPage, data.date);
+                        refreshSystemHealth();
+                    }
+                }
+            })
+            .catch(err => console.log("排程檢查異常", err));
+    }
+
+    function loadData(page, date = currentDate) {
+        currentPage = page;
+        currentDate = date;
+        fetch(`/api/leases?page=${page}&per_page=50&date=${date}`)
+            .then(res => res.json())
+            .then(data => {
+                renderTable(data.data);
+                renderPagination(data.current_page, data.total_pages);
+                document.getElementById('total-records-badge').innerText = `共 ${data.total_records} 筆`;
+            });
+    }
+
+    function changeDate(newDate) {
+        if (!newDate) return;
+        loadData(1, newDate);
+    }
+
+    function renderTable(data) {
+        const tbody = document.getElementById('table-body');
+        tbody.innerHTML = '';
+        if (!data || data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-5"><i class="bi bi-inbox fs-3 d-block mb-2"></i>該日期查無租約紀錄</td></tr>';
+            return;
+        }
+        data.forEach(row => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td class="font-monospace text-primary fw-bold">${row.ip}</td>
+                <td class="font-monospace">${row.mac}</td>
+                <td title="${row.hostname || ''}">${row.hostname || '<span class="text-muted">-</span>'}</td>
+                <td><span class="badge bg-secondary">${row.state}</span></td>
+                <td>${row.duration}</td>
+                <td><small>${row.leasetime}</small></td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    function renderPagination(current, total) {
+        const ul = document.getElementById('pagination-ul');
+        ul.innerHTML = '';
+        if (!total || total <= 1) return;
+        const maxVisible = 10;
+        let startPage = Math.max(1, current - Math.floor(maxVisible / 2));
+        let endPage = startPage + maxVisible - 1;
+        if (endPage > total) { endPage = total; startPage = Math.max(1, endPage - maxVisible + 1); }
+
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="loadData(1, '${currentDate}'); return false;"><i class="bi bi-chevron-double-left"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="loadData(${current - 1}, '${currentDate}'); return false;"><i class="bi bi-chevron-left"></i></a></li>`;
+        for (let i = startPage; i <= endPage; i++) {
+            ul.innerHTML += `<li class="page-item ${i === current ? 'active' : ''}"><a class="page-link" href="#" onclick="loadData(${i}, '${currentDate}'); return false;">${i}</a></li>`;
+        }
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="loadData(${current + 1}, '${currentDate}'); return false;"><i class="bi bi-chevron-right"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="loadData(${total}, '${currentDate}'); return false;"><i class="bi bi-chevron-double-right"></i></a></li>`;
+    }
+
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+    dropZone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => { if (e.target.files.length > 0) uploadFile(e.target.files[0]); });
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault(); 
+        dropZone.classList.remove('dragover');
+        if (e.dataTransfer.files.length > 0) uploadFile(e.dataTransfer.files[0]);
+    });
+
+    function uploadFile(file) {
+        if (!file.name.toLowerCase().endsWith('.xml')) {
+            alert('請選擇或拖曳 .xml 格式檔案！');
+            return;
+        }
+        const selectedDate = document.getElementById('upload-date').value || todayStr;
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('record_date', selectedDate);
+
+        fetch('/upload', { method: 'POST', body: formData })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert(`✅ ${data.message}\n✨ 成功新增：${data.success_count} 筆\n🔁 略過重複：${data.duplicate_count} 筆`);
+                    document.getElementById('view-date').value = data.record_date;
+                    loadData(1, data.record_date);
+                } else {
+                    alert(`❌ 匯入失敗：\n${data.message}`);
+                }
+            })
+            .catch(err => alert(`❌ 傳輸異常：${err}`))
+            .finally(() => { fileInput.value = ''; });
+    }
+
+    function openArpModal() {
+        arpModalObj.show();
+        document.getElementById('arp-table-body').innerHTML = '<tr><td colspan="5" class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary me-2"></div>正在比對 ARP...</td></tr>';
+        refreshArpTableData();
+    }
+
+    function refreshArpTableData() {
+        const refreshBtn = document.getElementById('arp-refresh-btn');
+        const statusBadge = document.getElementById('arp-dns-status');
+        refreshBtn.disabled = true;
+        const date = document.getElementById('view-date').value || todayStr;
+
+        fetch(`/api/arp-analysis?date=${date}`)
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    document.getElementById('arp-total-count').innerText = data.total_arp;
+                    document.getElementById('arp-dhcp-count').innerText = data.normal_dhcp_count;
+                    document.getElementById('arp-static-count').innerText = data.static_ip_count;
+                    document.getElementById('arp-conflict-count').innerText = data.conflict_count;
+
+                    if (data.dns_progress && data.dns_progress.is_running) {
+                        statusBadge.style.display = 'inline-block';
+                        statusBadge.className = 'badge bg-warning text-dark ms-2';
+                        statusBadge.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>解析中 (${data.dns_progress.done}/${data.dns_progress.total})`;
+                        if (!arpPollingTimer) {
+                            arpPollingTimer = setTimeout(() => { arpPollingTimer = null; refreshArpTableData(); }, 3000);
+                        }
+                    } else {
+                        statusBadge.style.display = 'inline-block';
+                        statusBadge.className = 'badge bg-success ms-2';
+                        statusBadge.innerHTML = `<i class="bi bi-check-circle me-1"></i>DNS 解析完成`;
+                    }
+
+                    const tbody = document.getElementById('arp-table-body');
+                    tbody.innerHTML = '';
+                    data.data.forEach(row => {
+                        const tr = document.createElement('tr');
+                        if (row.tag_class === 'warning') tr.className = 'table-warning';
+                        if (row.tag_class === 'danger') tr.className = 'table-danger';
+                        tr.innerHTML = `
+                            <td class="fw-bold">${row.ip}</td><td>${row.mac}</td><td>${row.interface}</td>
+                            <td>${row.hostname}</td><td><span class="badge bg-${row.tag_class}">${row.dev_type}</span></td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                }
+            })
+            .finally(() => { refreshBtn.disabled = false; });
+    }
+
+    function openThreatModal() {
+        threatModalObj.show();
+        const tbody = document.getElementById('threat-table-body');
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4"><div class="spinner-border spinner-border-sm text-danger me-2"></div>正在擷取資安日誌...</td></tr>';
+
+        fetch('/api/threat-analytics')
+            .then(res => res.json())
+            .then(data => {
+                if (data.status !== 'success') return;
+                document.getElementById('total-threats-badge').innerText = `最近記錄 ${data.total_threats} 筆`;
+                const sev = data.severity_dist;
+                if (threatChartInstance) threatChartInstance.destroy();
+                const ctx = document.getElementById('threatSeverityChart').getContext('2d');
+                threatChartInstance = new Chart(ctx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['重大', '高', '中', '低', '一般'],
+                        datasets: [{
+                            data: [sev.critical, sev.high, sev.medium, sev.low, sev.informational],
+                            backgroundColor: ['#dc3545', '#fd7e14', '#ffc107', '#0dcaf0', '#6c757d']
+                        }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+
+                const srcList = document.getElementById('top-sources-list');
+                srcList.innerHTML = '';
+                data.top_sources.forEach((item, idx) => {
+                    srcList.innerHTML += `<li class="list-group-item d-flex justify-content-between align-items-center py-1"><div><strong class="text-primary">${item.ip}</strong><small class="text-muted d-block">${item.hostname}</small></div><span class="badge bg-danger rounded-pill">${item.count}</span></li>`;
+                });
+
+                const threatList = document.getElementById('top-threats-list');
+                threatList.innerHTML = '';
+                data.top_threats.forEach(item => {
+                    threatList.innerHTML += `<li class="list-group-item d-flex justify-content-between align-items-center py-1"><span class="text-truncate" style="max-width: 200px;">${item.threat_name}</span><span class="badge bg-warning text-dark rounded-pill">${item.count}</span></li>`;
+                });
+
+                tbody.innerHTML = '';
+                data.logs.forEach(row => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${row.time}</td><td><span class="badge bg-danger">${row.severity}</span></td><td>${row.src}</td><td>${row.dst}</td><td>${row.app}</td><td>${row.threat_name}</td><td>${row.action}</td>`;
+                    tbody.appendChild(tr);
+                });
+            });
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        updateNextScheduleDisplay();
+        loadData(1);
+    });
+    setInterval(checkAutoUpdate, 10000);
+</script>
+{% endblock %}
