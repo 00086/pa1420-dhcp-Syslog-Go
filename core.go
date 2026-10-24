@@ -71,6 +71,12 @@ var (
 	syslogLastFlushTotalCount  int
 	syslogLastFlushTime        time.Time
 	syslogStatusMutex          sync.RWMutex
+	
+	// 🚨 新增：Threat 專屬 Syslog 即時接收佇列與統計
+	threatSyslogQueue         = make(chan ThreatParquetRow, 10000)
+	threatSyslogReceivedCount int64
+	threatSyslogLastFlushCount int
+	threatSyslogLastFlushTime  time.Time
 
 	// 後端流量 API 自動排程狀態 (維持原樣)
 	trafficSchedulerInterval int
@@ -1425,6 +1431,91 @@ func saveSyslogBatchFast(rows []TrafficParquetRow) (int, int, error) {
 	return len(rows), int(atomic.LoadInt64(&syslogReceivedCount)), nil
 }
 
+// 🌟 Threat Syslog 專屬極速落盤：直接寫入即時分塊 (耗時僅 2~5ms)
+func saveThreatSyslogBatchFast(rows []ThreatParquetRow) (int, int, error) {
+	if len(rows) == 0 {
+		return 0, 0, nil
+	}
+
+	todayStr := time.Now().Format("2006-01-02")
+	chunkPath := filepath.Join(threatDir, fmt.Sprintf("threat_%s_live_%d.parquet", todayStr, time.Now().UnixNano()))
+
+	if err := parquet.WriteFile(chunkPath, rows); err != nil {
+		return 0, 0, err
+	}
+
+	return len(rows), int(atomic.LoadInt64(&threatSyslogReceivedCount)), nil
+}
+
+// 🌟 解析 Palo Alto THREAT Syslog 封包
+func parsePaloAltoThreatSyslog(msg string) (*ThreatParquetRow, error) {
+	if !strings.Contains(msg, "THREAT") {
+		return nil, errors.New("not threat log")
+	}
+
+	reader := csv.NewReader(strings.NewReader(msg))
+	reader.FieldsPerRecord = -1
+	reader.LazyQuotes = true
+	fields, err := reader.Read()
+	if err != nil {
+		return nil, err
+	}
+
+	idx := -1
+	for i, f := range fields {
+		if strings.TrimSpace(f) == "THREAT" {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 || len(fields) <= idx+31 {
+		return nil, errors.New("insufficient threat fields")
+	}
+
+	rawTime := strings.TrimSpace(fields[idx+3])
+	if rawTime == "" && idx >= 2 {
+		rawTime = strings.TrimSpace(fields[idx-2])
+	}
+	formattedTime := strings.ReplaceAll(rawTime, "/", "-")
+
+	toPort, _ := strconv.Atoi(strings.TrimSpace(fields[idx+22]))
+	
+	threatName := strings.TrimSpace(fields[idx+29])
+	threatID := threatName
+	if idx+30 < len(fields) && threatName == "" {
+		threatName = strings.TrimSpace(fields[idx+30])
+	}
+
+	urlMisc := ""
+	if idx+33 < len(fields) {
+		urlMisc = strings.TrimSpace(fields[idx+33])
+	}
+
+	row := &ThreatParquetRow{
+		Timestamp:   formattedTime,
+		Subtype:     strings.TrimSpace(fields[idx+1]),
+		ThreatID:    threatID,
+		ThreatName:  threatName,
+		FromZone:    strings.TrimSpace(fields[idx+13]),
+		ToZone:      strings.TrimSpace(fields[idx+14]),
+		Src:         strings.TrimSpace(fields[idx+4]),
+		Dst:         strings.TrimSpace(fields[idx+5]),
+		ToPort:      int32(toPort),
+		Application: strings.TrimSpace(fields[idx+11]),
+		Action:      strings.TrimSpace(fields[idx+27]),
+		Severity:    strings.ToLower(strings.TrimSpace(fields[idx+31])),
+		URL:         urlMisc,
+		SessionID:   strings.TrimSpace(fields[idx+19]),
+	}
+
+	if row.Src == "" || row.Dst == "" {
+		return nil, errors.New("empty src/dst in threat log")
+	}
+
+	return row, nil
+}
+
 func saveTrafficLogsToParquet(entries []TrafficEntry) (int, int, error) {
 	var rows []TrafficParquetRow
 	for _, e := range entries {
@@ -1524,7 +1615,7 @@ func startSyslogReceiver(port int) {
 		fmt.Printf("[Syslog] ⚠️ 無法監聽 UDP %d: %v\n", port, err)
 		return
 	}
-	fmt.Printf("[Syslog] 🚀 成功啟動 UDP %d 即時接收服務 (極速串流引擎已就緒)...\n", port)
+	fmt.Printf("[Syslog] 🚀 成功啟動 UDP %d 即時接收服務 (流量與威脅雙引擎串流就緒)...\n", port)
 	defer conn.Close()
 
 	buf := make([]byte, 8192)
@@ -1534,14 +1625,31 @@ func startSyslogReceiver(port int) {
 			continue
 		}
 		rawMsg := string(buf[:n])
-		row, err := parsePaloAltoSyslog(rawMsg)
-		if err == nil && row != nil {
-			select {
-			case syslogQueue <- *row:
-				atomic.AddInt64(&syslogReceivedCount, 1) // 👈 純原子操作，零延遲不卡鎖
-			default:
-				// 若佇列真的滿了，也記錄總接收數
-				atomic.AddInt64(&syslogReceivedCount, 1)
+
+		// 🚨 分流 1：威脅日誌 (THREAT)
+		if strings.Contains(rawMsg, "THREAT") {
+			tRow, err := parsePaloAltoThreatSyslog(rawMsg)
+			if err == nil && tRow != nil {
+				select {
+				case threatSyslogQueue <- *tRow:
+					atomic.AddInt64(&threatSyslogReceivedCount, 1)
+				default:
+					atomic.AddInt64(&threatSyslogReceivedCount, 1)
+				}
+			}
+			continue
+		}
+
+		// 📡 分流 2：流量日誌 (TRAFFIC)
+		if strings.Contains(rawMsg, "TRAFFIC") {
+			row, err := parsePaloAltoSyslog(rawMsg)
+			if err == nil && row != nil {
+				select {
+				case syslogQueue <- *row:
+					atomic.AddInt64(&syslogReceivedCount, 1)
+				default:
+					atomic.AddInt64(&syslogReceivedCount, 1)
+				}
 			}
 		}
 	}
@@ -1553,38 +1661,65 @@ func startSyslogBatchFlusher() {
 		defer ticker.Stop()
 
 		var batch []TrafficParquetRow
+		var threatBatch []ThreatParquetRow
 		chunkCounter := 0
+		threatChunkCounter := 0
 
 		flushNow := func() {
-			if len(batch) == 0 {
-				return
-			}
-			ins, tot, err := saveSyslogBatchFast(batch)
-			if err == nil {
-				syslogStatusMutex.Lock()
-				syslogLastFlushInsertCount = ins
-				syslogLastFlushTotalCount = tot
-				syslogLastFlushTime = time.Now()
-				syslogStatusMutex.Unlock()
+			// 1. 處理流量批次落盤
+			if len(batch) > 0 {
+				ins, tot, err := saveSyslogBatchFast(batch)
+				if err == nil {
+					syslogStatusMutex.Lock()
+					syslogLastFlushInsertCount = ins
+					syslogLastFlushTotalCount = tot
+					syslogLastFlushTime = time.Now()
+					syslogStatusMutex.Unlock()
 
-				fmt.Printf("[%s] 📡 [Syslog UDP 514] 極速入庫：%d 筆 (累計接收: %d 筆)\n",
-					time.Now().Format("15:04:05"), ins, tot)
+					fmt.Printf("[%s] 📡 [Syslog UDP 514] 流量極速入庫：%d 筆 (累計: %d 筆)\n",
+						time.Now().Format("15:04:05"), ins, tot)
 
-				chunkCounter++
-				// 當即時分塊累積滿 20 個時，在背景非同步整併，保持檔案乾淨
-				if chunkCounter >= 20 {
-					chunkCounter = 0
-					go ConsolidateParquetFiles()
+					chunkCounter++
+					if chunkCounter >= 20 {
+						chunkCounter = 0
+						go ConsolidateParquetFiles()
+					}
 				}
+				batch = nil
 			}
-			batch = nil
+
+			// 2. 處理威脅批次落盤
+			if len(threatBatch) > 0 {
+				ins, tot, err := saveThreatSyslogBatchFast(threatBatch)
+				if err == nil {
+					syslogStatusMutex.Lock()
+					threatSyslogLastFlushCount = ins // 👈 記錄威脅本批入庫筆數
+					threatSyslogLastFlushTime = time.Now()
+					syslogStatusMutex.Unlock()
+
+					fmt.Printf("[%s] 🚨 [Syslog UDP 514] 威脅日誌入庫：%d 筆 (累計: %d 筆)\n",
+						time.Now().Format("15:04:05"), ins, tot)
+
+					threatChunkCounter++
+					if threatChunkCounter >= 20 {
+						threatChunkCounter = 0
+						go ConsolidateThreatParquetFiles()
+					}
+				}
+				threatBatch = nil
+			}
 		}
 
 		for {
 			select {
 			case row := <-syslogQueue:
 				batch = append(batch, row)
-				if len(batch) >= 1000 { // 累積滿 1000 筆即時落盤
+				if len(batch) >= 1000 {
+					flushNow()
+				}
+			case tRow := <-threatSyslogQueue:
+				threatBatch = append(threatBatch, tRow)
+				if len(threatBatch) >= 50 { // 威脅事件較精確，累積滿 50 筆即提早入庫
 					flushNow()
 				}
 			case <-ticker.C:
@@ -1600,16 +1735,19 @@ func GetSyslogStatus() map[string]interface{} {
 	if !syslogLastFlushTime.IsZero() {
 		lastStr = syslogLastFlushTime.Format("15:04:05")
 	}
-	ins := syslogLastFlushInsertCount
+	ins := syslogLastFlushInsertCount       // 流量當批筆數
 	tot := syslogLastFlushTotalCount
+	tIns := threatSyslogLastFlushCount     // 威脅當批筆數
 	syslogStatusMutex.RUnlock()
 
 	return map[string]interface{}{
-		"port":              514,
-		"received_total":    atomic.LoadInt64(&syslogReceivedCount),
-		"last_flush_insert": ins,
-		"last_flush_total":  tot,
-		"last_flush_time":   lastStr,
+		"port":                     514,
+		"received_total":           tot,
+		"last_flush_insert":        ins,  // 👈 流量當批
+		"last_flush_total":         tot,
+		"last_flush_time":          lastStr,
+		"threat_last_flush_insert": tIns, // 👈 威脅當批
+		"threat_received_total":    atomic.LoadInt64(&threatSyslogReceivedCount),
 	}
 }
 

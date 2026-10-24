@@ -67,21 +67,15 @@
 {% endblock %}
 
 {% block content %}
-<!-- 🌟 頂部精簡標題列：同一列並排，極致壓縮列高 -->
-<div class="d-flex justify-content-between align-items-center mb-1 flex-shrink-0" style="min-height: 26px;">
-    <div class="d-flex align-items-center gap-2">
-        <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-shield-shaded text-danger me-1"></i>PA-1420 資安威脅分析 (Threat Engine)</span>
-        <span class="text-muted text-nowrap" style="font-size: 11.5px;">整合 Palo Alto 次世代防火牆防護日誌與內部 DHCP 主機關聯比對</span>
-    </div>
-    <div class="d-flex align-items-center gap-2">
-        <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
-        <button class="btn btn-outline-danger btn-sm py-0 px-2 d-flex align-items-center gap-1 shadow-sm text-nowrap" onclick="fetchThreatNow()" id="btnFetchNow" style="font-size: 11px; height: 22px;">
-            <i class="bi bi-cloud-arrow-down"></i>立即擷取威脅
-        </button>
-    </div>
+<!-- 🌟 頂部精簡標題列：同一列水平並排，極致壓縮列高 -->
+<!--
+<div class="d-flex align-items-center gap-2 mb-1 flex-shrink-0" style="min-height: 26px;">
+    <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-shield-shaded text-danger me-1"></i>PA-1420 資安威脅分析 (Threat Engine)</span>
+    <span class="text-muted text-nowrap" style="font-size: 11.5px;">整合 Palo Alto 次世代防火牆防護日誌與內部 DHCP 主機關聯比對</span>
 </div>
+-->
 
-<!-- 威脅查詢工具列 (依照 traffic 設計) -->
+<!-- 威脅查詢工具列 (1:1 依照 traffic 版面排版) -->
 <div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white" style="overflow: visible;">
@@ -132,6 +126,15 @@
                             <i class="bi bi-arrow-clockwise fs-6" id="refresh-icon"></i>
                         </button>
                     </div>
+                </div>
+
+                <!-- 🌟 右側：DuckDB 向量加速與 Syslog 接收狀態徽章 (與 traffic 一致置於此行最右側) -->
+                <div class="d-flex align-items-center gap-2 ms-auto">
+                    <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
+                    <span class="badge bg-danger-subtle text-danger-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" style="font-size: 12px;">
+                        <span class="spinner-grow spinner-grow-sm text-danger" style="width: 6px; height: 6px;"></span>
+                        <span id="threat-syslog-badge">Syslog 514: Threat 0 筆</span>
+                    </span>
                 </div>
 
             </div>
@@ -200,7 +203,6 @@
         <div class="card shadow-sm h-100 d-flex flex-column border-0">
             <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
                 <span class="fw-bold small"><i class="bi bi-list-columns-reverse text-danger me-1"></i>所有威脅紀錄明細 (Parquet 列式儲存 + DuckDB 向量加速)</span>
-                <!-- 🌟 依照 traffic 圖二：右上角顯示「共 X 筆 (頁次 Y / Z)」徽章 -->
                 <span class="badge bg-secondary font-monospace" id="threat-count-badge">共 0 筆</span>
             </div>
             <div class="card-body p-0 table-scroll-container">
@@ -249,7 +251,7 @@
                     </table>
                 </div>
             </div>
-            <!-- 🌟 依照 traffic 圖二：固定於底部的頁尾與分頁導覽列 -->
+            <!-- 固定於底部的頁尾與分頁導覽列 -->
             <div class="card-footer bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
                 <span class="small text-muted"><i class="bi bi-info-circle me-1"></i>Palo Alto 次世代防火牆威脅防護日誌；滑鼠懸停於內容上方可檢視完整數值。</span>
                 <nav><ul class="pagination pagination-sm mb-0" id="threat-pagination-ul"></ul></nav>
@@ -499,7 +501,6 @@
                 document.getElementById('metric-top-threat').innerText = data.top_threat || '-';
                 document.getElementById('metric-top-threat').title = data.top_threat || '-';
 
-                // 🌟 1:1 依照 traffic 圖二：在右上角標籤顯示「共 X 筆 (頁次 Y / Z)」
                 document.getElementById('threat-count-badge').innerText = `共 ${totalThreats.toLocaleString()} 筆 (頁次 ${currentPage} / ${totalPages})`;
 
                 renderThreatHistogram(data.histogram || []);
@@ -551,7 +552,6 @@
                     tbody.appendChild(tr);
                 });
 
-                // 🌟 依照 traffic 圖二繪製完整頁碼列 (« < 1 2 3 ... > »)
                 renderThreatPagination(currentPage, totalPages);
             })
             .catch(err => {
@@ -564,7 +564,6 @@
             });
     }
 
-    // 🌟 1:1 依照 traffic 圖二的分頁元件演算法 (含雙箭頭與當前高亮)
     function renderThreatPagination(current, total) {
         const ul = document.getElementById('threat-pagination-ul');
         ul.innerHTML = '';
@@ -586,22 +585,19 @@
         ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryThreatLogs(${total}); return false;"><i class="bi bi-chevron-double-right"></i></a></li>`;
     }
 
-    function fetchThreatNow() {
-        const btn = document.getElementById('btnFetchNow');
-        btn.disabled = true;
-        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>擷取中...';
-        fetch('/api/threat-fetch-now', { method: 'POST' })
-            .then(r => r.json())
+    function refreshSyslogStatus() {
+        fetch(`/api/syslog-status?_t=${Date.now()}`)
+            .then(res => res.json())
             .then(res => {
-                btn.disabled = false;
-                btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i>立即擷取威脅';
-                queryThreatLogs(1);
+                if (res.status === 'success' && res.data) {
+                    const batchIns = (res.data.threat_last_flush_insert || 0).toLocaleString();
+                    const badge = document.getElementById('threat-syslog-badge');
+                    if (badge) {
+                        badge.innerText = `Syslog 514: Threat ${batchIns} 筆`;
+                    }
+                }
             })
-            .catch(err => {
-                btn.disabled = false;
-                btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i>立即擷取威脅';
-                alert('擷取失敗: ' + err);
-            });
+            .catch(() => {});
     }
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -612,6 +608,8 @@
         setRefreshInterval(savedSec, labelMap[savedSec] || '30 秒');
 
         queryThreatLogs(1);
+        refreshSyslogStatus();
+        setInterval(refreshSyslogStatus, 3000);
     });
 </script>
 {% endblock %}

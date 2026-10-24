@@ -110,12 +110,11 @@
                 </div>
 
                 <!-- 右側：Syslog 接收狀態徽章 -->
-                <div class="d-flex align-items-center ms-auto">
+                <div class="d-flex align-items-center gap-2 ms-auto">
+				    <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
                     <span class="badge bg-success-subtle text-success-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" id="syslog-status-badge" style="font-size: 12px;">
                         <span class="spinner-grow spinner-grow-sm text-success" style="width: 6px; height: 6px;"></span>
-                        <span>Syslog 514</span>
-                        <span class="text-muted">|</span>
-                        <span id="syslog-flush-text">接收: 0 筆</span>
+                        <span id="syslog-flush-text">Syslog 514: Traffic 0 筆</span>
                     </span>
                 </div>
 
@@ -130,7 +129,7 @@
         <div class="card shadow-sm border-0 bg-white">
             <div class="card-header bg-white py-1 px-3 d-flex justify-content-between align-items-center border-bottom-0">
                 <div class="d-flex align-items-center gap-2">
-                    <span class="small fw-bold text-dark"><i class="bi bi-bar-chart-fill text-primary me-1"></i>Message Count (今日流量隨時間分佈直方圖)</span>
+                    <span class="small fw-bold text-dark"><i class="bi bi-bar-chart-fill text-primary me-1"></i>Message Count (流量隨時間分佈直方圖)</span>
                     <button class="btn btn-outline-secondary btn-sm py-0 px-2 d-flex align-items-center gap-1 border-0" id="chart-toggle-btn" onclick="toggleHistogram()" style="font-size: 11px; height: 22px;" title="收合或展開直方圖">
                         <i class="bi bi-chevron-up" id="chart-toggle-icon"></i>
                         <span id="chart-toggle-text">收合圖表</span>
@@ -362,9 +361,12 @@
             .then(res => res.json())
             .then(res => {
                 if (res.status === 'success' && res.data) {
-                    const batchIns = res.data.last_flush_insert || 0;
-                    document.getElementById('syslog-flush-text').innerHTML = 
-                        `本批: <strong class="text-success">${batchIns.toLocaleString()}</strong> 筆`;
+                    // 🌟 取用「當批入庫筆數」，維持顯示當次進來的數十筆，不再無限累加
+                    const batchIns = (res.data.last_flush_insert || 0).toLocaleString();
+                    const textElem = document.getElementById('syslog-flush-text');
+                    if (textElem) {
+                        textElem.innerText = `Syslog 514: Traffic ${batchIns} 筆`;
+                    }
                 }
             })
             .catch(() => {});
