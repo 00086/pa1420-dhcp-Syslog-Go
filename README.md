@@ -142,7 +142,7 @@ LUFRPT14MW55QW...（您的 PA-1420 API Key）...==
 1. **編譯 Go 後端程式**：
    ```cmd
    go mod tidy
-   go build -ldflags "-s -w" -o PA1420_Monitor.exe .
+   go build -trimpath -ldflags="-s -w" -o PA1420_Monitor.exe .
    ```
 2. **準備 DuckDB 查詢引擎**：前往 [DuckDB 官方 GitHub Releases](https://github.com/duckdb/duckdb/releases/latest) 下載 `duckdb_cli-windows-amd64.zip`，解壓縮出 `duckdb.exe` 並放入根目錄。
 3. **啟動服務**：確保配置檔與前端樣板就緒後，直接雙擊 `PA1420_Monitor.exe`。系統即在背景啟動 HTTP (Port 5006) 與 UDP (Port 514) 串流監聽。
