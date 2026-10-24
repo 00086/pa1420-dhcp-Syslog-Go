@@ -168,37 +168,9 @@ type ARPEntry struct {
 	Status    string `xml:"status"`
 }
 
-type ThreatEntry struct {
-	Src           string `xml:"src"`
-	Dst           string `xml:"dst"`
-	ThreatID      string `xml:"threatid"`
-	ThreatName    string `xml:"threat_name"`
-	Subtype       string `xml:"subtype"`
-	Severity      string `xml:"severity"`
-	Action        string `xml:"action"`
-	TimeGenerated string `xml:"time_generated"`
-	ReceiveTime   string `xml:"receive_time"`
-	App           string `xml:"app"`
-}
-
-type TrafficParquetRow struct {
-	Timestamp        string `parquet:"timestamp,snappy"`
-	Type             string `parquet:"type,snappy"`
-	FromZone         string `parquet:"from_zone,snappy"`
-	ToZone           string `parquet:"to_zone,snappy"`
-	Source           string `parquet:"source,snappy"`
-	NatSourceIP      string `parquet:"nat_source_ip,snappy"`
-	Destination      string `parquet:"destination,snappy"`
-	NatDestIP        string `parquet:"nat_dest_ip,snappy"`
-	ToPort           int32  `parquet:"to_port"`
-	Application      string `parquet:"application,snappy"`
-	Action           string `parquet:"action,snappy"`
-	Rule             string `parquet:"rule,snappy"`
-	SessionEndReason string `parquet:"session_end_reason,snappy"`
-	Bytes            int64  `parquet:"bytes"`
-	SessionID        string `parquet:"session_id,snappy"`
-}
-
+// -------------------------------------------------------------
+// 🌟 流量與威脅日誌核心資料結構定義 (對齊 Parquet ZSTD 壓縮)
+// -------------------------------------------------------------
 type TrafficEntry struct {
 	Timestamp        string `xml:"time_generated"`
 	ReceiveTime      string `xml:"receive_time"`
@@ -216,6 +188,89 @@ type TrafficEntry struct {
 	SessionEndReason string `xml:"session_end_reason"`
 	Bytes            int64  `xml:"bytes"`
 	SessionID        string `xml:"sessionid"`
+}
+
+type TrafficParquetRow struct {
+	Timestamp        string `parquet:"timestamp,zstd"`
+	Type             string `parquet:"type,zstd"`
+	FromZone         string `parquet:"from_zone,zstd"`
+	ToZone           string `parquet:"to_zone,zstd"`
+	Source           string `parquet:"source,zstd"`
+	NatSourceIP      string `parquet:"nat_source_ip,zstd"`
+	Destination      string `parquet:"destination,zstd"`
+	NatDestIP        string `parquet:"nat_dest_ip,zstd"`
+	ToPort           int32  `parquet:"to_port"`
+	Application      string `parquet:"application,zstd"`
+	Action           string `parquet:"action,zstd"`
+	Rule             string `parquet:"rule,zstd"`
+	SessionEndReason string `parquet:"session_end_reason,zstd"`
+	Bytes            int64  `parquet:"bytes"`
+	SessionID        string `parquet:"session_id,zstd"`
+}
+
+type ThreatEntry struct {
+	TimeGenerated string `xml:"time_generated"` // 👈 保持 TimeGenerated 讓 XML 解析與回溯相容
+	ReceiveTime   string `xml:"receive_time"`
+	Subtype       string `xml:"subtype"`
+	ThreatID      string `xml:"threatid"`
+	ThreatName    string `xml:"threat_name"`
+	FromZone      string `xml:"from"`
+	ToZone        string `xml:"to"`
+	Src           string `xml:"src"`
+	Dst           string `xml:"dst"`
+	ToPort        int    `xml:"dport"`
+	App           string `xml:"app"`
+	Action        string `xml:"action"`
+	Severity      string `xml:"severity"`
+	URL           string `xml:"misc"`
+	SessionID     string `xml:"sessionid"`
+}
+
+type ThreatParquetRow struct {
+	Timestamp   string `parquet:"timestamp,zstd"`
+	Subtype     string `parquet:"subtype,zstd"`
+	ThreatID    string `parquet:"threat_id,zstd"`
+	ThreatName  string `parquet:"threat_name,zstd"`
+	FromZone    string `parquet:"from_zone,zstd"`
+	ToZone      string `parquet:"to_zone,zstd"`
+	Src         string `parquet:"src,zstd"`
+	Dst         string `parquet:"dst,zstd"`
+	ToPort      int32  `parquet:"to_port"`
+	Application string `parquet:"application,zstd"`
+	Action      string `parquet:"action,zstd"`
+	Severity    string `parquet:"severity,zstd"`
+	URL         string `parquet:"url,zstd"`
+	SessionID   string `parquet:"session_id,zstd"`
+}
+
+type ThreatLogItem struct {
+	Timestamp      string `json:"timestamp"`
+	Subtype        string `json:"subtype"`
+	ThreatName     string `json:"threat_name"`
+	FromZone       string `json:"from_zone"`
+	ToZone         string `json:"to_zone"`
+	Source         string `json:"source"`
+	SrcHostname    string `json:"src_hostname"`
+	Destination    string `json:"destination"`
+	ToPort         int    `json:"to_port"`
+	Application    string `json:"application"`
+	Action         string `json:"action"`
+	Severity       string `json:"severity"`
+	URL            string `json:"url"`
+	SessionID      string `json:"session_id"`
+}
+
+type ThreatAnalyticsResult struct {
+	TotalThreats  int               `json:"total_threats"`
+	CriticalHigh  int               `json:"critical_high"`
+	TopThreat     string            `json:"top_threat"`
+	TopVictimIP   string            `json:"top_victim_ip"`
+	TopVictimHost string            `json:"top_victim_host"`
+	DbSize        string            `json:"db_size"`
+	Histogram     []HistogramBucket `json:"histogram"`
+	Logs          []ThreatLogItem   `json:"logs"`
+	CurrentPage   int               `json:"current_page"`
+	TotalPages    int               `json:"total_pages"`
 }
 
 type HistogramBucket struct {
@@ -1190,95 +1245,73 @@ func fetchPATrafficLogsWithFilter(count int, filter string) ([]TrafficEntry, err
 }
 
 // -------------------------------------------------------------
-// 🌟 核心整併器：啟動時將歷史所有零碎分塊整合成「每日單一主檔」
+// 🌟 核心整併器：由 DuckDB 接管背景極速整併 (零記憶體消耗)
 // -------------------------------------------------------------
 func ConsolidateParquetFiles() (int, int, error) {
 	parquetFileMutex.Lock()
 	defer parquetFileMutex.Unlock()
 
 	entries, err := os.ReadDir(trafficDir)
-	if err != nil {
-		return 0, 0, err
-	}
+	if err != nil { return 0, 0, err }
 
 	dateFiles := make(map[string][]string)
 	re := regexp.MustCompile(`^traffic_(\d{4}-\d{2}-\d{2})`)
 
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".parquet") || strings.HasSuffix(e.Name(), ".tmp") {
-			continue
-		}
-		m := re.FindStringSubmatch(e.Name())
-		if len(m) > 1 {
-			dateKey := m[1]
-			dateFiles[dateKey] = append(dateFiles[dateKey], filepath.Join(trafficDir, e.Name()))
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".parquet") || strings.HasSuffix(e.Name(), ".tmp") { continue }
+		if m := re.FindStringSubmatch(e.Name()); len(m) > 1 {
+			dateFiles[m[1]] = append(dateFiles[m[1]], filepath.Join(trafficDir, e.Name()))
 		}
 	}
 
 	totalMergedFiles := 0
-	totalRowsRetained := 0
 
 	for dateKey, files := range dateFiles {
 		targetMainFile := filepath.Join(trafficDir, fmt.Sprintf("traffic_%s.parquet", dateKey))
+		if len(files) == 1 && files[0] == targetMainFile { continue }
 
-		// 若已經只有一個且檔名正是主檔，則不需整併
-		if len(files) == 1 && files[0] == targetMainFile {
-			continue
-		}
+		fmt.Printf("[資料整合] ⏳ DuckDB 引擎啟動：正在將 %s 的 %d 個分塊日誌極速整併...\n", dateKey, len(files))
 
-		fmt.Printf("[資料整合] ⏳ 正在將 %s 的 %d 個分塊日誌整合成單一檔案...\n", dateKey, len(files))
-
-		var combinedRows []TrafficParquetRow
-		existingKeys := make(map[string]bool)
-
-		for _, f := range files {
-			rows, err := parquet.ReadFile[TrafficParquetRow](f)
-			if err == nil {
-				for _, r := range rows {
-					key := fmt.Sprintf("%s|%s|%s|%d|%s", r.Timestamp, r.Source, r.Destination, r.ToPort, r.SessionID)
-					if !existingKeys[key] {
-						existingKeys[key] = true
-						combinedRows = append(combinedRows, r)
-					}
-				}
-			}
-		}
-
-		if len(combinedRows) == 0 {
-			continue
-		}
-
-		// 按接收時間倒序排序 (最新連線在最前)
-		sort.Slice(combinedRows, func(i, j int) bool {
-			return combinedRows[i].Timestamp > combinedRows[j].Timestamp
-		})
-
-		// 寫入臨時檔並原子替換為主檔
 		tmpFile := targetMainFile + ".tmp"
-		if err := parquet.WriteFile(tmpFile, combinedRows); err != nil {
+		globPath := filepath.ToSlash(filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", dateKey)))
+		tmpSlash := filepath.ToSlash(tmpFile)
+
+		// 🦆 讓 DuckDB 執行 SQL：分組排序 -> 去重 (Row_Num=1) -> 存為 ZSTD Parquet
+		copyQuery := fmt.Sprintf(`
+			COPY (
+				SELECT * EXCLUDE (row_num) FROM (
+					SELECT *, ROW_NUMBER() OVER (
+						PARTITION BY timestamp, source, destination, to_port, session_id 
+						ORDER BY timestamp DESC
+					) as row_num
+					FROM '%s'
+				) WHERE row_num = 1
+				ORDER BY timestamp DESC
+			) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
+		`, globPath, tmpSlash)
+
+		_, err := runDuckDBQuery(copyQuery)
+		if err != nil {
 			_ = os.Remove(tmpFile)
+			fmt.Printf("[資料整合] ❌ DuckDB 整併 %s 失敗: %v\n", dateKey, err)
 			continue
 		}
 
 		_ = os.Remove(targetMainFile)
-		if err := os.Rename(tmpFile, targetMainFile); err != nil {
-			_ = os.Remove(tmpFile)
-			continue
-		}
-
-		// 刪除所有碎檔
-		for _, f := range files {
-			if f != targetMainFile {
-				_ = os.Remove(f)
-				totalMergedFiles++
+		if err := os.Rename(tmpFile, targetMainFile); err == nil {
+			for _, f := range files {
+				if f != targetMainFile {
+					_ = os.Remove(f)
+					totalMergedFiles++
+				}
 			}
+			fmt.Printf("[資料整合] ✅ %s 整併完成！已合併為單一 ZSTD 主檔，清除 %d 個碎片檔案。\n", dateKey, len(files)-1)
+		} else {
+			_ = os.Remove(tmpFile)
 		}
-		totalRowsRetained += len(combinedRows)
-		fmt.Printf("[資料整合] ✅ %s 整併完成！已合併為單一檔案，保留 %d 筆唯一紀錄，清除 %d 個碎片檔案。\n",
-			dateKey, len(combinedRows), len(files)-1)
 	}
 
-	return totalMergedFiles, totalRowsRetained, nil
+	return totalMergedFiles, 0, nil
 }
 
 // -------------------------------------------------------------
@@ -1696,21 +1729,16 @@ func runDuckDBQuery(query string) ([]map[string]interface{}, error) {
 }
 
 // -------------------------------------------------------------
-// 🌟 聚合查詢：DuckDB 向量化極速引擎 (400萬筆只需 0.1 秒)
+// 🌟 聚合查詢：DuckDB 向量化極速引擎 (並行化與翻頁解耦版)
 // -------------------------------------------------------------
-func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, perPage int) (*TrafficAnalyticsResult, error) {
-	if queryDate == "" {
-		queryDate = time.Now().Format("2006-01-02")
-	}
+func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, perPage int, onlyLogs bool) (*TrafficAnalyticsResult, error) {
+	if queryDate == "" { queryDate = time.Now().Format("2006-01-02") }
 	if page < 1 { page = 1 }
 	if perPage < 1 { perPage = 50 }
 
 	emptyHistogram := make([]HistogramBucket, 24)
-	for h := 0; h < 24; h++ {
-		emptyHistogram[h] = HistogramBucket{TimeBucket: fmt.Sprintf("%02d:00", h), Count: 0}
-	}
+	for h := 0; h < 24; h++ { emptyHistogram[h] = HistogramBucket{TimeBucket: fmt.Sprintf("%02d:00", h), Count: 0} }
 
-	// 確保 Parquet 檔案存在並計算總大小
 	pattern := filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", queryDate))
 	files, _ := filepath.Glob(pattern)
 
@@ -1743,23 +1771,16 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 		}, nil
 	}
 
-	// SQL 查詢路徑 (DuckDB 在 Windows 上需要正斜線)
 	duckdbPattern := filepath.ToSlash(pattern)
 
-	// 動態組裝 SQL 條件
 	var conds []string
 	conds = append(conds, "1=1")
 	if src != "" { conds = append(conds, fmt.Sprintf("source ILIKE '%%%s%%'", strings.ReplaceAll(src, "'", "''"))) }
 	if dst != "" { conds = append(conds, fmt.Sprintf("destination ILIKE '%%%s%%'", strings.ReplaceAll(dst, "'", "''"))) }
 	if app != "" { conds = append(conds, fmt.Sprintf("application ILIKE '%%%s%%'", strings.ReplaceAll(app, "'", "''"))) }
-	
 	if action != "" && strings.ToLower(action) != "all" {
 		act := strings.ToLower(action)
-		if act == "allow" {
-			conds = append(conds, "action = 'allow'")
-		} else if act == "deny" {
-			conds = append(conds, "(action IN ('deny', 'drop') OR action LIKE 'reset%')")
-		}
+		if act == "allow" { conds = append(conds, "action = 'allow'") } else if act == "deny" { conds = append(conds, "(action IN ('deny', 'drop') OR action LIKE 'reset%')") }
 	}
 	if zone != "" && strings.ToLower(zone) != "all" {
 		z := strings.ReplaceAll(strings.ToLower(zone), "'", "''")
@@ -1767,27 +1788,50 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 	}
 	whereClause := strings.Join(conds, " AND ")
 
-	// ==========================================
-	// 🦆 任務 1：極速聚合指標 (總數、流量、排行)
-	// ==========================================
-	statsQuery := fmt.Sprintf(`
-		SELECT 
-			COUNT(*) AS total_flows,
-			COALESCE(SUM(bytes), 0) AS total_bytes,
-			COALESCE(SUM(CASE WHEN action IN ('deny','drop') OR action LIKE 'reset%%' THEN 1 ELSE 0 END), 0) AS deny_flows,
-			MODE(application) AS top_app
-		FROM '%s' WHERE %s
-	`, duckdbPattern, whereClause)
+	var statsRes, histRes, logsRes []map[string]interface{}
+	var errStats, errHist, errLogs error
+	var wg sync.WaitGroup
 
-	statsRes, err := runDuckDBQuery(statsQuery)
-	if err != nil { return nil, err }
+	// ==========================================
+	// 🦆 任務 1 & 2：若非單純換頁，則平行執行統計與直方圖
+	// ==========================================
+	if !onlyLogs {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			statsQuery := fmt.Sprintf(`SELECT COUNT(*) AS total_flows, COALESCE(SUM(bytes), 0) AS total_bytes, COALESCE(SUM(CASE WHEN action IN ('deny','drop') OR action LIKE 'reset%%' THEN 1 ELSE 0 END), 0) AS deny_flows, MODE(application) AS top_app FROM '%s' WHERE %s`, duckdbPattern, whereClause)
+			statsRes, errStats = runDuckDBQuery(statsQuery)
+		}()
+		go func() {
+			defer wg.Done()
+			histQuery := fmt.Sprintf(`SELECT SUBSTRING(timestamp FROM 12 FOR 2) || ':00' AS h, COUNT(*) AS c FROM '%s' WHERE %s GROUP BY h`, duckdbPattern, whereClause)
+			histRes, errHist = runDuckDBQuery(histQuery)
+		}()
+	}
 
+	// ==========================================
+	// 🦆 任務 3：同時撈取目前頁面的 50 筆明細
+	// ==========================================
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		offset := (page - 1) * perPage
+		logsQuery := fmt.Sprintf(`SELECT * FROM '%s' WHERE %s ORDER BY timestamp DESC LIMIT %d OFFSET %d`, duckdbPattern, whereClause, perPage, offset)
+		logsRes, errLogs = runDuckDBQuery(logsQuery)
+	}()
+
+	wg.Wait()
+	if errStats != nil { return nil, errStats }
+	if errHist != nil { return nil, errHist }
+	if errLogs != nil { return nil, errLogs }
+
+	// 處理結果
 	var totalFlows int
 	var totalBytesNum int64
 	var denyFlows int
 	topApp := "-"
 
-	if len(statsRes) > 0 {
+	if !onlyLogs && len(statsRes) > 0 {
 		if v, ok := statsRes[0]["total_flows"].(float64); ok { totalFlows = int(v) }
 		if v, ok := statsRes[0]["total_bytes"].(float64); ok { totalBytesNum = int64(v) }
 		if v, ok := statsRes[0]["deny_flows"].(float64); ok { denyFlows = int(v) }
@@ -1795,50 +1839,23 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 	}
 
 	var totalBytesStr string
-	if totalBytesNum >= 1024*1024*1024 {
-		totalBytesStr = fmt.Sprintf("%.2f GB", float64(totalBytesNum)/(1024*1024*1024))
-	} else if totalBytesNum >= 1024*1024 {
-		totalBytesStr = fmt.Sprintf("%.2f MB", float64(totalBytesNum)/(1024*1024))
-	} else if totalBytesNum >= 1024 {
-		totalBytesStr = fmt.Sprintf("%.1f KB", float64(totalBytesNum)/1024)
-	} else {
-		totalBytesStr = fmt.Sprintf("%d B", totalBytesNum)
-	}
+	if totalBytesNum >= 1024*1024*1024 { totalBytesStr = fmt.Sprintf("%.2f GB", float64(totalBytesNum)/(1024*1024*1024))
+	} else if totalBytesNum >= 1024*1024 { totalBytesStr = fmt.Sprintf("%.2f MB", float64(totalBytesNum)/(1024*1024))
+	} else if totalBytesNum >= 1024 { totalBytesStr = fmt.Sprintf("%.1f KB", float64(totalBytesNum)/1024)
+	} else { totalBytesStr = fmt.Sprintf("%d B", totalBytesNum) }
 
-	// ==========================================
-	// 🦆 任務 2：24 小時直方圖分佈
-	// ==========================================
-	histQuery := fmt.Sprintf(`
-		SELECT SUBSTRING(timestamp FROM 12 FOR 2) || ':00' AS h, COUNT(*) AS c
-		FROM '%s' WHERE %s GROUP BY h
-	`, duckdbPattern, whereClause)
-
-	histRes, err := runDuckDBQuery(histQuery)
-	if err != nil { return nil, err }
-
-	histMap := make(map[string]int)
-	for _, row := range histRes {
-		if h, ok := row["h"].(string); ok {
-			if c, ok := row["c"].(float64); ok { histMap[h] = int(c) }
+	if !onlyLogs {
+		histMap := make(map[string]int)
+		for _, row := range histRes {
+			if h, ok := row["h"].(string); ok {
+				if c, ok := row["c"].(float64); ok { histMap[h] = int(c) }
+			}
+		}
+		for h := 0; h < 24; h++ {
+			emptyHistogram[h].Count = histMap[fmt.Sprintf("%02d:00", h)]
 		}
 	}
-	for h := 0; h < 24; h++ {
-		hb := fmt.Sprintf("%02d:00", h)
-		emptyHistogram[h].Count = histMap[hb]
-	}
 
-	// ==========================================
-	// 🦆 任務 3：分頁明細 (直接 ORDER BY，精準切片)
-	// ==========================================
-	offset := (page - 1) * perPage
-	logsQuery := fmt.Sprintf(`
-		SELECT * FROM '%s' WHERE %s ORDER BY timestamp DESC LIMIT %d OFFSET %d
-	`, duckdbPattern, whereClause, perPage, offset)
-
-	logsRes, err := runDuckDBQuery(logsQuery)
-	if err != nil { return nil, err }
-
-	// 補回 DHCP Hostname 對應
 	dhcpMap := make(map[string]string)
 	db, _ := initDB()
 	if db != nil {
@@ -1862,36 +1879,22 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 
 	logs := make([]TrafficLogItem, 0, len(logsRes))
 	safeStr := func(v interface{}) string {
-		if v == nil { return "" }
-		return fmt.Sprintf("%v", v)
+		if v == nil { return "" }; return fmt.Sprintf("%v", v)
 	}
 
 	for _, r := range logsRes {
 		bytesVal := int64(0)
 		if v, ok := r["bytes"].(float64); ok { bytesVal = int64(v) }
-
 		var bFmt string
 		if bytesVal >= 1024*1024 { bFmt = fmt.Sprintf("%.2f MB", float64(bytesVal)/(1024*1024))
 		} else if bytesVal >= 1024 { bFmt = fmt.Sprintf("%.1f KB", float64(bytesVal)/1024)
 		} else { bFmt = fmt.Sprintf("%d B", bytesVal) }
 
 		logs = append(logs, TrafficLogItem{
-			Timestamp:        safeStr(r["timestamp"]),
-			Type:             safeStr(r["type"]),
-			FromZone:         safeStr(r["from_zone"]),
-			ToZone:           safeStr(r["to_zone"]),
-			Source:           safeStr(r["source"]),
-			SrcHostname:      dhcpMap[safeStr(r["source"])],
-			NatSourceIP:      safeStr(r["nat_source_ip"]),
-			Destination:      safeStr(r["destination"]),
-			NatDestIP:        safeStr(r["nat_dest_ip"]),
-			ToPort:           int(r["to_port"].(float64)),
-			Application:      safeStr(r["application"]),
-			Action:           safeStr(r["action"]),
-			Rule:             safeStr(r["rule"]),
-			SessionEndReason: safeStr(r["session_end_reason"]),
-			Bytes:            bytesVal,
-			BytesFormatted:   bFmt,
+			Timestamp: safeStr(r["timestamp"]), Type: safeStr(r["type"]), FromZone: safeStr(r["from_zone"]), ToZone: safeStr(r["to_zone"]),
+			Source: safeStr(r["source"]), SrcHostname: dhcpMap[safeStr(r["source"])], NatSourceIP: safeStr(r["nat_source_ip"]), Destination: safeStr(r["destination"]),
+			NatDestIP: safeStr(r["nat_dest_ip"]), ToPort: int(r["to_port"].(float64)), Application: safeStr(r["application"]), Action: safeStr(r["action"]),
+			Rule: safeStr(r["rule"]), SessionEndReason: safeStr(r["session_end_reason"]), Bytes: bytesVal, BytesFormatted: bFmt,
 		})
 	}
 
@@ -1905,153 +1908,125 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 	}, nil
 }
 
-// 🌟 威脅日誌 Parquet 儲存結構
-type ThreatParquetRow struct {
-	Timestamp   string `parquet:"timestamp,snappy"`
-	Src         string `parquet:"src,snappy"`
-	Dst         string `parquet:"dst,snappy"`
-	ThreatID    string `parquet:"threat_id,snappy"`
-	ThreatName  string `parquet:"threat_name,snappy"`
-	Subtype     string `parquet:"subtype,snappy"`
-	Severity    string `parquet:"severity,snappy"`
-	Action      string `parquet:"action,snappy"`
-	Application string `parquet:"application,snappy"`
-}
-
-// 🌟 Threat 多檔合併器：將同一日期的碎片/多次回補合併為每日單一主檔
+// 🌟 Threat 多檔合併器：將同一日期的碎片/多次回補合併為每日單一主檔，核心整併器：由 DuckDB 接管背景極速整併 (零記憶體消耗)
 func ConsolidateThreatParquetFiles() (int, int, error) {
 	threatFileMutex.Lock()
 	defer threatFileMutex.Unlock()
 
 	entries, err := os.ReadDir(threatDir)
-	if err != nil {
-		return 0, 0, err
-	}
+	if err != nil { return 0, 0, err }
 
 	dateFiles := make(map[string][]string)
 	re := regexp.MustCompile(`threat_(\d{4}-\d{2}-\d{2})`)
 
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".parquet") || strings.HasSuffix(e.Name(), ".tmp") {
-			continue
-		}
-		m := re.FindStringSubmatch(e.Name())
-		if len(m) > 1 {
-			dateKey := m[1]
-			dateFiles[dateKey] = append(dateFiles[dateKey], filepath.Join(threatDir, e.Name()))
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".parquet") || strings.HasSuffix(e.Name(), ".tmp") { continue }
+		if m := re.FindStringSubmatch(e.Name()); len(m) > 1 {
+			dateFiles[m[1]] = append(dateFiles[m[1]], filepath.Join(threatDir, e.Name()))
 		}
 	}
 
 	totalMergedFiles := 0
-	totalRowsRetained := 0
 
 	for dateKey, files := range dateFiles {
 		targetMainFile := filepath.Join(threatDir, fmt.Sprintf("threat_%s.parquet", dateKey))
+		if len(files) == 1 && files[0] == targetMainFile { continue }
 
-		// 若已經只有一個且檔名正是標準主檔，則不需整併
-		if len(files) == 1 && files[0] == targetMainFile {
-			continue
-		}
-
-		fmt.Printf("[威脅整合] ⏳ 正在將 %s 的 %d 個檔案整合成每日單一主檔...\n", dateKey, len(files))
-
-		var combinedRows []ThreatParquetRow
-		existingKeys := make(map[string]bool)
-
-		for _, f := range files {
-			rows, err := parquet.ReadFile[ThreatParquetRow](f)
-			if err == nil {
-				for _, r := range rows {
-					key := fmt.Sprintf("%s|%s|%s|%s|%s", r.Timestamp, r.Src, r.Dst, r.ThreatName, r.Action)
-					if !existingKeys[key] {
-						existingKeys[key] = true
-						combinedRows = append(combinedRows, r)
-					}
-				}
-			}
-		}
-
-		if len(combinedRows) == 0 {
-			continue
-		}
-
-		sort.Slice(combinedRows, func(i, j int) bool {
-			return combinedRows[i].Timestamp > combinedRows[j].Timestamp
-		})
+		fmt.Printf("[威脅整合] ⏳ DuckDB 引擎啟動：正在將 %s 的 %d 個檔案極速整併...\n", dateKey, len(files))
 
 		tmpFile := targetMainFile + ".tmp"
-		if err := parquet.WriteFile(tmpFile, combinedRows); err != nil {
+		globPath := filepath.ToSlash(filepath.Join(threatDir, fmt.Sprintf("threat_%s*.parquet", dateKey)))
+		tmpSlash := filepath.ToSlash(tmpFile)
+
+		copyQuery := fmt.Sprintf(`
+			COPY (
+				SELECT * EXCLUDE (row_num) FROM (
+					SELECT *, ROW_NUMBER() OVER (
+						PARTITION BY timestamp, src, dst, threat_name, action 
+						ORDER BY timestamp DESC
+					) as row_num
+					FROM '%s'
+				) WHERE row_num = 1
+				ORDER BY timestamp DESC
+			) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
+		`, globPath, tmpSlash)
+
+		_, err := runDuckDBQuery(copyQuery)
+		if err != nil {
 			_ = os.Remove(tmpFile)
+			fmt.Printf("[威脅整合] ❌ DuckDB 整併 %s 失敗: %v\n", dateKey, err)
 			continue
 		}
 
 		_ = os.Remove(targetMainFile)
-		if err := os.Rename(tmpFile, targetMainFile); err != nil {
-			_ = os.Remove(tmpFile)
-			continue
-		}
-
-		for _, f := range files {
-			if f != targetMainFile {
-				_ = os.Remove(f)
-				totalMergedFiles++
+		if err := os.Rename(tmpFile, targetMainFile); err == nil {
+			for _, f := range files {
+				if f != targetMainFile {
+					_ = os.Remove(f)
+					totalMergedFiles++
+				}
 			}
+			fmt.Printf("[威脅整合] ✅ %s 整併完成！已合併為單一 ZSTD 主檔，清除 %d 個碎片檔案。\n", dateKey, len(files)-1)
+		} else {
+			_ = os.Remove(tmpFile)
 		}
-		totalRowsRetained += len(combinedRows)
-		fmt.Printf("[威脅整合] ✅ %s 整併完成！保留 %d 筆唯一紀錄，清除 %d 個碎片檔案。\n",
-			dateKey, len(combinedRows), len(files)-1)
 	}
 
-	return totalMergedFiles, totalRowsRetained, nil
+	return totalMergedFiles, 0, nil
 }
 
-// 🌟 Threat 每日單一主檔寫入 (Atomic .tmp 替換)
+// 🌟 Threat 每日單一主檔寫入 (Atomic .tmp 替換，支援 ZSTD 列式儲存)
 func saveThreatLogsToParquet(entries []ThreatEntry) (int, int, error) {
-	if len(entries) == 0 {
-		return 0, 0, nil
-	}
+	if len(entries) == 0 { return 0, 0, nil }
 
 	threatFileMutex.Lock()
 	defer threatFileMutex.Unlock()
 
 	entriesByDate := make(map[string][]ThreatParquetRow)
 	for _, e := range entries {
-		tName := strings.TrimSpace(e.ThreatID)
-		if tName == "" {
-			tName = strings.TrimSpace(e.ThreatName)
+		tName := strings.TrimSpace(e.ThreatName)
+		if tName == "" { tName = strings.TrimSpace(e.ThreatID) }
+
+		// 👈 關鍵修正：從 TimeGenerated 提取時間，若為空則以 ReceiveTime 備援
+		ts := strings.TrimSpace(e.TimeGenerated)
+		if ts == "" {
+			ts = strings.TrimSpace(e.ReceiveTime)
 		}
+
 		row := ThreatParquetRow{
-			Timestamp:   e.TimeGenerated,
-			Src:         strings.TrimSpace(e.Src),
-			Dst:         strings.TrimSpace(e.Dst),
+			Timestamp:   ts, // 👈 帶入正確提取的時間字串
+			Subtype:     strings.TrimSpace(e.Subtype),
 			ThreatID:    strings.TrimSpace(e.ThreatID),
 			ThreatName:  tName,
-			Subtype:     strings.TrimSpace(e.Subtype),
-			Severity:    strings.ToLower(strings.TrimSpace(e.Severity)),
-			Action:      strings.TrimSpace(e.Action),
+			FromZone:    strings.TrimSpace(e.FromZone),
+			ToZone:      strings.TrimSpace(e.ToZone),
+			Src:         strings.TrimSpace(e.Src),
+			Dst:         strings.TrimSpace(e.Dst),
+			ToPort:      int32(e.ToPort),
 			Application: strings.TrimSpace(e.App),
+			Action:      strings.TrimSpace(e.Action),
+			Severity:    strings.ToLower(strings.TrimSpace(e.Severity)),
+			URL:         strings.TrimSpace(e.URL),
+			SessionID:   strings.TrimSpace(e.SessionID),
 		}
 
 		recordDate := time.Now().Format("2006-01-02")
-		if len(row.Timestamp) >= 10 {
-			recordDate = row.Timestamp[:10]
-		}
+		if len(row.Timestamp) >= 10 { recordDate = row.Timestamp[:10] }
 		entriesByDate[recordDate] = append(entriesByDate[recordDate], row)
 	}
 
 	totalInserted := 0
-	totalToday := 0 // 👈 這裡宣告的是 totalToday
+	totalToday := 0
 
 	for dateKey, newRows := range entriesByDate {
 		mainPath := filepath.Join(threatDir, fmt.Sprintf("threat_%s.parquet", dateKey))
 		tmpPath := mainPath + ".tmp"
 
-		existingKeys := make(map[string]bool)
 		var combinedRows []ThreatParquetRow
+		existingKeys := make(map[string]bool)
 
 		if _, err := os.Stat(mainPath); err == nil {
-			oldRows, err := parquet.ReadFile[ThreatParquetRow](mainPath)
-			if err == nil {
+			if oldRows, err := parquet.ReadFile[ThreatParquetRow](mainPath); err == nil {
 				for _, r := range oldRows {
 					key := fmt.Sprintf("%s|%s|%s|%s|%s", r.Timestamp, r.Src, r.Dst, r.ThreatName, r.Action)
 					if !existingKeys[key] {
@@ -2059,8 +2034,6 @@ func saveThreatLogsToParquet(entries []ThreatEntry) (int, int, error) {
 						combinedRows = append(combinedRows, r)
 					}
 				}
-			} else {
-				return 0, 0, fmt.Errorf("威脅主檔讀取異常: %w", err)
 			}
 		}
 
@@ -2078,7 +2051,6 @@ func saveThreatLogsToParquet(entries []ThreatEntry) (int, int, error) {
 			totalToday = len(combinedRows)
 			continue
 		}
-
 		totalInserted += newCount
 
 		sort.Slice(combinedRows, func(i, j int) bool {
@@ -2087,20 +2059,228 @@ func saveThreatLogsToParquet(entries []ThreatEntry) (int, int, error) {
 
 		if err := parquet.WriteFile(tmpPath, combinedRows); err != nil {
 			_ = os.Remove(tmpPath)
-			return 0, 0, err
+			continue
 		}
 
 		_ = os.Remove(mainPath)
-		if err := os.Rename(tmpPath, mainPath); err != nil {
-			_ = os.Remove(tmpPath)
-			return 0, 0, err
-		}
-
-		// 👈 這裡必須是 totalToday
+		_ = os.Rename(tmpPath, mainPath)
 		totalToday = len(combinedRows)
 	}
 
 	return totalInserted, totalToday, nil
 }
+
+// -------------------------------------------------------------
+// 🦆 威脅日誌極速聚合查詢 (DuckDB 向量化引擎 - 新舊 Parquet 完整相容版)
+// -------------------------------------------------------------
+func queryThreatAnalytics(queryDate, src, dst, severity, action, threatName string, page, perPage int, onlyLogs bool) (*ThreatAnalyticsResult, error) {
+	// 🌟 日期斜線防呆轉換 (2026/10/24 -> 2026-10-24)
+	queryDate = strings.ReplaceAll(strings.TrimSpace(queryDate), "/", "-")
+	if queryDate == "" { 
+		queryDate = time.Now().Format("2006-01-02") 
+	}
+	if page < 1 { page = 1 }
+	if perPage < 1 { perPage = 50 }
+
+	emptyHistogram := make([]HistogramBucket, 24)
+	for h := 0; h < 24; h++ {
+		emptyHistogram[h] = HistogramBucket{TimeBucket: fmt.Sprintf("%02d:00", h), Count: 0}
+	}
+
+	pattern := filepath.Join(threatDir, fmt.Sprintf("threat_%s*.parquet", queryDate))
+	files, _ := filepath.Glob(pattern)
+
+	var totalFileSize int64 = 0
+	hasFiles := false
+	for _, f := range files {
+		if !strings.HasSuffix(f, ".tmp") {
+			if info, err := os.Stat(f); err == nil {
+				totalFileSize += info.Size()
+				hasFiles = true
+			}
+		}
+	}
+
+	var dbSizeStr string
+	if totalFileSize >= 1024*1024*1024 {
+		dbSizeStr = fmt.Sprintf("%.2f GB", float64(totalFileSize)/(1024*1024*1024))
+	} else if totalFileSize >= 1024*1024 {
+		dbSizeStr = fmt.Sprintf("%.2f MB", float64(totalFileSize)/(1024*1024))
+	} else if totalFileSize >= 1024 {
+		dbSizeStr = fmt.Sprintf("%.1f KB", float64(totalFileSize)/1024)
+	} else {
+		dbSizeStr = fmt.Sprintf("%d B", totalFileSize)
+	}
+
+	// 若當日尚無任何檔案，秒回 0 筆空資料
+	if !hasFiles {
+		return &ThreatAnalyticsResult{
+			TotalThreats: 0, CriticalHigh: 0, TopThreat: "-", TopVictimIP: "-", TopVictimHost: "-",
+			DbSize: "0 B", Histogram: emptyHistogram, Logs: make([]ThreatLogItem, 0), CurrentPage: 1, TotalPages: 1,
+		}, nil
+	}
+
+	duckdbPattern := filepath.ToSlash(pattern)
+	var conds []string
+	conds = append(conds, "1=1")
+	if src != "" { conds = append(conds, fmt.Sprintf("src ILIKE '%%%s%%'", strings.ReplaceAll(src, "'", "''"))) }
+	if dst != "" { conds = append(conds, fmt.Sprintf("dst ILIKE '%%%s%%'", strings.ReplaceAll(dst, "'", "''"))) }
+	if threatName != "" { 
+		t := strings.ReplaceAll(threatName, "'", "''")
+		conds = append(conds, fmt.Sprintf("(threat_name ILIKE '%%%s%%' OR subtype ILIKE '%%%s%%')", t, t)) 
+	}
+	if severity != "" && strings.ToLower(severity) != "all" {
+		conds = append(conds, fmt.Sprintf("LOWER(severity) = '%s'", strings.ToLower(severity)))
+	}
+	if action != "" && strings.ToLower(action) != "all" {
+		conds = append(conds, fmt.Sprintf("LOWER(action) ILIKE '%%%s%%'", strings.ToLower(action)))
+	}
+	whereClause := strings.Join(conds, " AND ")
+
+	var statsRes, histRes, logsRes []map[string]interface{}
+	var errStats, errHist, errLogs error
+	var wg sync.WaitGroup
+
+	if !onlyLogs {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			statsQuery := fmt.Sprintf(`
+				SELECT 
+					COUNT(*) AS total_threats,
+					COALESCE(SUM(CASE WHEN LOWER(severity) IN ('critical', 'high') THEN 1 ELSE 0 END), 0) AS critical_high,
+					MODE(threat_name) AS top_threat,
+					MODE(src) AS top_victim
+				FROM '%s' WHERE %s
+			`, duckdbPattern, whereClause)
+			statsRes, errStats = runDuckDBQuery(statsQuery)
+		}()
+
+		go func() {
+			defer wg.Done()
+			histQuery := fmt.Sprintf(`
+				SELECT SUBSTRING(timestamp FROM 12 FOR 2) || ':00' AS h, COUNT(*) AS c
+				FROM '%s' WHERE %s GROUP BY h
+			`, duckdbPattern, whereClause)
+			histRes, errHist = runDuckDBQuery(histQuery)
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		offset := (page - 1) * perPage
+		// 🌟 核心防護：使用 SELECT *，不指定單一欄位，新舊檔案完全零報錯！
+		logsQuery := fmt.Sprintf(`
+			SELECT * FROM '%s' WHERE %s 
+			ORDER BY timestamp DESC 
+			LIMIT %d OFFSET %d
+		`, duckdbPattern, whereClause, perPage, offset)
+		logsRes, errLogs = runDuckDBQuery(logsQuery)
+	}()
+
+	wg.Wait()
+	if errStats != nil { return nil, errStats }
+	if errHist != nil { return nil, errHist }
+	if errLogs != nil { return nil, errLogs }
+
+	var totalThreats, criticalHigh int
+	topThreat := "-"
+	topVictimIP := "-"
+
+	if !onlyLogs && len(statsRes) > 0 {
+		if v, ok := statsRes[0]["total_threats"].(float64); ok { totalThreats = int(v) }
+		if v, ok := statsRes[0]["critical_high"].(float64); ok { criticalHigh = int(v) }
+		if v, ok := statsRes[0]["top_threat"].(string); ok && v != "" { topThreat = v }
+		if v, ok := statsRes[0]["top_victim"].(string); ok && v != "" { topVictimIP = v }
+	}
+
+	if !onlyLogs {
+		histMap := make(map[string]int)
+		for _, row := range histRes {
+			if h, ok := row["h"].(string); ok {
+				if c, ok := row["c"].(float64); ok { histMap[h] = int(c) }
+			}
+		}
+		for h := 0; h < 24; h++ {
+			emptyHistogram[h].Count = histMap[fmt.Sprintf("%02d:00", h)]
+		}
+	}
+
+	dhcpMap := make(map[string]string)
+	db, _ := initDB()
+	if db != nil {
+		rDHCP, _ := db.Query("SELECT ip, hostname FROM dhcp_leases WHERE record_date = ?", queryDate)
+		if rDHCP != nil {
+			defer rDHCP.Close()
+			for rDHCP.Next() {
+				var ip, hn string; _ = rDHCP.Scan(&ip, &hn)
+				if hn != "" { dhcpMap[ip] = hn }
+			}
+		}
+		rCache, _ := db.Query("SELECT ip, hostname FROM ip_hostname_cache")
+		if rCache != nil {
+			defer rCache.Close()
+			for rCache.Next() {
+				var ip, hn string; _ = rCache.Scan(&ip, &hn)
+				if hn != "" && dhcpMap[ip] == "" { dhcpMap[ip] = hn }
+			}
+		}
+	}
+
+	topVictimHost := dhcpMap[topVictimIP]
+	if topVictimHost == "" { topVictimHost = "-" }
+
+	// 🌟 安全取值小幫手：新舊 Parquet 缺少欄位自動補 "-"
+	safeGet := func(m map[string]interface{}, key string) string {
+		if v, ok := m[key]; ok && v != nil {
+			s := strings.TrimSpace(fmt.Sprintf("%v", v))
+			if s != "" && s != "<nil>" { return s }
+		}
+		return "-"
+	}
+
+	logs := make([]ThreatLogItem, 0, len(logsRes))
+	for _, r := range logsRes {
+		portVal := 0
+		if v, ok := r["to_port"].(float64); ok { portVal = int(v) }
+
+		srcIP := safeGet(r, "src")
+		logs = append(logs, ThreatLogItem{
+			Timestamp:   safeGet(r, "timestamp"),
+			Subtype:     safeGet(r, "subtype"),
+			ThreatName:  safeGet(r, "threat_name"),
+			FromZone:    safeGet(r, "from_zone"),
+			ToZone:      safeGet(r, "to_zone"),
+			Source:      srcIP,
+			SrcHostname: dhcpMap[srcIP],
+			Destination: safeGet(r, "dst"),
+			ToPort:      portVal,
+			Application: safeGet(r, "application"),
+			Action:      safeGet(r, "action"),
+			Severity:    strings.ToLower(safeGet(r, "severity")),
+			URL:         safeGet(r, "url"),
+			SessionID:   safeGet(r, "session_id"),
+		})
+	}
+
+	totalPages := int(math.Ceil(float64(totalThreats) / float64(perPage)))
+	if totalPages == 0 { totalPages = 1 }
+
+	return &ThreatAnalyticsResult{
+		TotalThreats:  totalThreats,
+		CriticalHigh:  criticalHigh,
+		TopThreat:     topThreat,
+		TopVictimIP:   topVictimIP,
+		TopVictimHost: topVictimHost,
+		DbSize:        dbSizeStr,
+		Histogram:     emptyHistogram,
+		Logs:          logs,
+		CurrentPage:   page,
+		TotalPages:    totalPages,
+	}, nil
+}
+
+
 
 

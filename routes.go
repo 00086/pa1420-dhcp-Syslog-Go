@@ -579,8 +579,11 @@ func registerRoutes(r *gin.Engine) {
 		zone := strings.TrimSpace(c.DefaultQuery("zone", "all"))
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "50"))
+		
+		// 🌟 判斷是否為純翻頁模式
+		onlyLogs := c.DefaultQuery("only_logs", "false") == "true"
 
-		result, err := queryTrafficAnalytics(date, src, dst, app, action, zone, page, perPage)
+		result, err := queryTrafficAnalytics(date, src, dst, app, action, zone, page, perPage, onlyLogs)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
 			return
@@ -592,14 +595,14 @@ func registerRoutes(r *gin.Engine) {
 			"total_bytes":  result.TotalBytes,
 			"top_app":      result.TopApp,
 			"deny_flows":   result.DenyFlows,
-			"db_size":      result.DbSize, // 👈 補上此行，將檔案容量輸出給前端
+			"db_size":      result.DbSize,
 			"histogram":    result.Histogram,
 			"logs":         result.Logs,
 			"current_page": result.CurrentPage,
 			"total_pages":  result.TotalPages,
 		})
 	})
-
+	
 	// 12. 立即手動自 PA-1420 擷取最新流量 (預設 2500 筆，最高支援 5000 筆)
 	r.POST("/api/traffic-fetch-now", func(c *gin.Context) {
 		count, _ := strconv.Atoi(c.DefaultPostForm("count", "2500"))
@@ -1052,6 +1055,53 @@ func registerRoutes(r *gin.Engine) {
 		}
 
 		sendMsg("🏁 [Threat 回補] 完成！共執行 %d 輪，補入 %d 筆紀錄，時間已推進至 %s。\n", successfulRounds, totalNew, lastTime)
+	})
+	
+	// 威脅日誌分析主頁面
+	r.GET("/threat", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		renderPongo(c, "threat.html", pongo2.Context{
+			"page":       "threat",
+			"today":      time.Now().Format("2006-01-02"),
+			"today_fmt":  time.Now().Format("2006/01/02"),
+		})
+	})
+
+	// 威脅日誌 DuckDB 檢索 API
+	r.GET("/api/threat-query", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		c.Header("Pragma", "no-cache")
+		c.Header("Expires", "0")
+
+		date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
+		src := strings.TrimSpace(c.DefaultQuery("src", ""))
+		dst := strings.TrimSpace(c.DefaultQuery("dst", ""))
+		severity := strings.TrimSpace(c.DefaultQuery("severity", "all"))
+		action := strings.TrimSpace(c.DefaultQuery("action", "all"))
+		threatName := strings.TrimSpace(c.DefaultQuery("threat_name", ""))
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "50"))
+		onlyLogs := c.DefaultQuery("only_logs", "false") == "true"
+
+		res, err := queryThreatAnalytics(date, src, dst, severity, action, threatName, page, perPage, onlyLogs)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":          "success",
+			"total_threats":   res.TotalThreats,
+			"critical_high":   res.CriticalHigh,
+			"top_threat":      res.TopThreat,
+			"top_victim_ip":   res.TopVictimIP,
+			"top_victim_host": res.TopVictimHost,
+			"db_size":         res.DbSize,
+			"histogram":       res.Histogram,
+			"logs":            res.Logs,
+			"current_page":    res.CurrentPage,
+			"total_pages":     res.TotalPages,
+		})
 	})
 	
 }

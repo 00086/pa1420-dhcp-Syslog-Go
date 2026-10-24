@@ -1,0 +1,617 @@
+{% extends "base.html" %}
+
+{% block title %}PA-1420 資安威脅日誌分析系統{% endblock %}
+
+{% block extra_styles %}
+.table-sticky-header th { 
+    position: sticky; 
+    top: 0; 
+    background-color: #f8f9fa; 
+    z-index: 2; 
+    white-space: nowrap; 
+}
+.table-scroll-container { 
+    overflow-y: scroll; 
+    flex-grow: 1; 
+}
+
+/* 固定欄寬、文字截斷 (...) 與微調字級邊距 (1:1 依照 traffic 設計) */
+.threat-table-fixed {
+    table-layout: fixed;
+    width: 100%;
+    min-width: 1720px;
+    margin-bottom: 0;
+}
+.threat-table-fixed th, 
+.threat-table-fixed td {
+    vertical-align: middle;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-top: 3px;
+    padding-bottom: 3px;
+    padding-left: 6px;
+    padding-right: 6px;
+    line-height: 1.35;
+}
+
+/* 接收時間欄位完整顯示 */
+.threat-col-time {
+    text-overflow: clip !important;
+}
+
+/* 阻擋/丟棄事件粉橘色底色標註 */
+.row-drop-deny {
+    background-color: #fde8e5 !important;
+}
+.row-drop-deny > td {
+    background-color: transparent !important;
+}
+.row-drop-deny:hover {
+    background-color: #fcd5cf !important;
+}
+
+.badge-critical { background-color: #721c24; color: #fff; }
+.badge-high { background-color: #dc3545; color: #fff; }
+.badge-medium { background-color: #fd7e14; color: #fff; }
+.badge-low { background-color: #0dcaf0; color: #000; }
+.badge-informational { background-color: #198754; color: #fff; }
+
+/* 重新整理旋轉動畫 */
+.spin-anim {
+    animation: spin 0.6s linear infinite;
+}
+@keyframes spin {
+    100% { transform: rotate(360deg); }
+}
+{% endblock %}
+
+{% block content %}
+<!-- 🌟 頂部精簡標題列：同一列並排，極致壓縮列高 -->
+<div class="d-flex justify-content-between align-items-center mb-1 flex-shrink-0" style="min-height: 26px;">
+    <div class="d-flex align-items-center gap-2">
+        <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-shield-shaded text-danger me-1"></i>PA-1420 資安威脅分析 (Threat Engine)</span>
+        <span class="text-muted text-nowrap" style="font-size: 11.5px;">整合 Palo Alto 次世代防火牆防護日誌與內部 DHCP 主機關聯比對</span>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+        <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
+        <button class="btn btn-outline-danger btn-sm py-0 px-2 d-flex align-items-center gap-1 shadow-sm text-nowrap" onclick="fetchThreatNow()" id="btnFetchNow" style="font-size: 11px; height: 22px;">
+            <i class="bi bi-cloud-arrow-down"></i>立即擷取威脅
+        </button>
+    </div>
+</div>
+
+<!-- 威脅查詢工具列 (依照 traffic 設計) -->
+<div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
+    <div class="col-12">
+        <div class="card shadow-sm border-0 bg-white" style="overflow: visible;">
+            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-wrap gap-2" style="overflow: visible;">
+                
+                <!-- 條件篩選輸入組 -->
+                <div class="d-flex align-items-center gap-1 flex-wrap">
+                    <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-danger"></i> 條件篩選：</span>
+                    <input type="date" class="form-control form-control-sm font-monospace" style="width: 125px;" id="threat-date">
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="來源 (SRC IP)" style="width: 120px;" id="threat-src">
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="目的 (DST IP)" style="width: 125px;" id="threat-dst">
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="威脅特徵/類型" style="width: 130px;" id="threat-name">
+                    <select class="form-select form-select-sm" style="width: 110px;" id="threat-severity">
+                        <option value="all">嚴重性: 全部</option>
+                        <option value="critical">critical (嚴重)</option>
+                        <option value="high">high (高)</option>
+                        <option value="medium">medium (中)</option>
+                        <option value="low">low (低)</option>
+                        <option value="informational">informational</option>
+                    </select>
+                    <select class="form-select form-select-sm" style="width: 95px;" id="threat-action">
+                        <option value="all">動作: 全部</option>
+                        <option value="alert">alert</option>
+                        <option value="drop">drop</option>
+                        <option value="reset">reset</option>
+                        <option value="block">block</option>
+                    </select>
+
+                    <button class="btn btn-outline-secondary btn-sm px-2 text-nowrap ms-1" onclick="resetThreatFilters()">重置</button>
+                    <button class="btn btn-primary btn-sm px-2 shadow-sm text-nowrap" onclick="queryThreatLogs(1)">
+                        <i class="bi bi-search me-1"></i>執行檢索
+                    </button>
+
+                    <!-- 重新顯示時間下拉群組 -->
+                    <div class="input-group input-group-sm ms-1" style="width: auto; position: relative;">
+                        <button class="btn btn-outline-secondary dropdown-toggle fw-bold d-flex align-items-center gap-1 bg-light text-dark py-1" type="button" id="refreshIntervalDropdown" data-bs-toggle="dropdown" aria-expanded="false" title="設定重新顯示週期">
+                            <span id="currentIntervalLabel">30 秒</span>
+                            <span id="countdownBadge" class="badge bg-danger text-white font-monospace" style="font-size: 10px;">30s</span>
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-end shadow border" aria-labelledby="refreshIntervalDropdown" style="z-index: 1060; min-width: 110px;">
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-10" onclick="setRefreshInterval(10, '10 秒')">10 秒</a></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-30" onclick="setRefreshInterval(30, '30 秒')">30 秒</a></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-60" onclick="setRefreshInterval(60, '60 秒')">60 秒</a></li>
+                            <li><hr class="dropdown-divider my-1"></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-manual" onclick="setRefreshInterval(0, '手動')">手動</a></li>
+                        </ul>
+                        <button class="btn btn-outline-danger px-2 shadow-sm d-flex align-items-center justify-content-center" id="refresh-threat-btn" onclick="refreshDisplayNow()" title="立即重新顯示最新威脅">
+                            <i class="bi bi-arrow-clockwise fs-6" id="refresh-icon"></i>
+                        </button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 威脅事件直方圖面板 (支援開合收折) -->
+<div class="row mb-2 flex-shrink-0" id="histogram-card-row">
+    <div class="col-12">
+        <div class="card shadow-sm border-0 bg-white">
+            <div class="card-header bg-white py-1 px-3 d-flex justify-content-between align-items-center border-bottom-0">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="small fw-bold text-dark"><i class="bi bi-bar-chart-fill text-danger me-1"></i>威脅事件 24 小時時間分佈直方圖</span>
+                    <button class="btn btn-outline-secondary btn-sm py-0 px-2 d-flex align-items-center gap-1 border-0" id="chart-toggle-btn" onclick="toggleHistogram()" style="font-size: 11px; height: 22px;" title="收合或展開直方圖">
+                        <i class="bi bi-chevron-up" id="chart-toggle-icon"></i>
+                        <span id="chart-toggle-text">收合圖表</span>
+                    </button>
+                </div>
+                <span class="small text-muted font-monospace" id="chart-time-range">時段：00:00 ~ 23:00</span>
+            </div>
+            <div class="card-body py-1 px-3" id="histogram-card-body" style="position: relative; height: 115px; width: 100%;">
+                <canvas id="threatHistogramChart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 威脅概況五大指標卡片 -->
+<div class="row g-2 mb-2 flex-shrink-0">
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">已擷取威脅總數</small>
+            <h5 class="mb-0 fw-bold font-monospace text-primary" id="metric-total-threats">-- 筆</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">當日資料庫容量</small>
+            <h5 class="mb-0 fw-bold font-monospace text-info" id="metric-db-size">--</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">高危險/重大威脅 (High/Crit)</small>
+            <h5 class="mb-0 fw-bold font-monospace text-danger" id="metric-critical-high">-- 筆</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">最常觸發受駭端設備</small>
+            <h5 class="mb-0 fw-bold font-monospace text-dark text-truncate px-1" id="metric-top-victim" title="--">--</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">Top 1 威脅名稱</small>
+            <h5 class="mb-0 fw-bold font-monospace text-secondary text-truncate px-1" id="metric-top-threat" title="--">--</h5>
+        </div>
+    </div>
+</div>
+
+<!-- 13 大欄位明細清單 (完全比照 traffic 圖二之容器與分頁設計) -->
+<div class="row flex-grow-1 overflow-hidden">
+    <div class="col-12 h-100">
+        <div class="card shadow-sm h-100 d-flex flex-column border-0">
+            <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <span class="fw-bold small"><i class="bi bi-list-columns-reverse text-danger me-1"></i>所有威脅紀錄明細 (Parquet 列式儲存 + DuckDB 向量加速)</span>
+                <!-- 🌟 依照 traffic 圖二：右上角顯示「共 X 筆 (頁次 Y / Z)」徽章 -->
+                <span class="badge bg-secondary font-monospace" id="threat-count-badge">共 0 筆</span>
+            </div>
+            <div class="card-body p-0 table-scroll-container">
+                <div class="table-responsive h-100">
+                    <table class="table table-hover table-striped table-sm table-sticky-header font-monospace threat-table-fixed" style="font-size: 14.5px;">
+                        <colgroup>
+                            <col style="width: 175px;"> <!-- 1. 接收時間 -->
+                            <col style="width: 90px;">  <!-- 2. 類型 -->
+                            <col style="width: 230px;"> <!-- 3. 威脅 ID/名稱 -->
+                            <col style="width: 75px;">  <!-- 4. 來源區 -->
+                            <col style="width: 75px;">  <!-- 5. 目的區 -->
+                            <col style="width: 190px;"> <!-- 6. 來源位址 (中毒端) -->
+                            <col style="width: 140px;"> <!-- 7. 目的地位址 -->
+                            <col style="width: 75px;">  <!-- 8. 連接埠 -->
+                            <col style="width: 110px;"> <!-- 9. 應用程式 -->
+                            <col style="width: 75px;">  <!-- 10. 動作 -->
+                            <col style="width: 110px;"> <!-- 11. 嚴重性 -->
+                            <col style="width: 200px;"> <!-- 12. URL / 附加特徵 -->
+                            <col style="width: 80px;">  <!-- 13. 工作階段 ID -->
+                        </colgroup>
+                        <thead>
+                            <tr class="table-light">
+                                <th>接收時間</th>
+                                <th>類型</th>
+                                <th>威脅 ID/名稱</th>
+                                <th>來源區</th>
+                                <th>目的區</th>
+                                <th>來源位址 (中毒端)</th>
+                                <th>目的地位址</th>
+                                <th>目的連接埠</th>
+                                <th>應用程式</th>
+                                <th>動作</th>
+                                <th>嚴重性</th>
+                                <th>URL / 附加特徵</th>
+                                <th>連線 ID</th>
+                            </tr>
+                        </thead>
+                        <tbody id="threat-table-body">
+                            <tr>
+                                <td colspan="13" class="text-center py-5 text-muted">
+                                    <i class="bi bi-inbox fs-2 d-block mb-2 text-secondary"></i>
+                                    載入威脅資料中...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <!-- 🌟 依照 traffic 圖二：固定於底部的頁尾與分頁導覽列 -->
+            <div class="card-footer bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <span class="small text-muted"><i class="bi bi-info-circle me-1"></i>Palo Alto 次世代防火牆威脅防護日誌；滑鼠懸停於內容上方可檢視完整數值。</span>
+                <nav><ul class="pagination pagination-sm mb-0" id="threat-pagination-ul"></ul></nav>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function getLocalDateString() {
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+
+    const todayStr = getLocalDateString();
+    let currentThreatPage = 1;
+    let threatHistogramChartInstance = null;
+    let countdownTimer = null;
+    let currentIntervalSeconds = 30;
+    let remainingSeconds = 30;
+
+    document.getElementById('threat-date').value = todayStr;
+
+    function toggleHistogram() {
+        const body = document.getElementById('histogram-card-body');
+        const icon = document.getElementById('chart-toggle-icon');
+        const text = document.getElementById('chart-toggle-text');
+        const isHidden = body.classList.contains('d-none');
+
+        if (isHidden) {
+            body.classList.remove('d-none');
+            icon.className = 'bi bi-chevron-up';
+            text.innerText = '收合圖表';
+            localStorage.setItem('threat_chart_collapsed', 'false');
+            if (threatHistogramChartInstance) {
+                threatHistogramChartInstance.resize();
+            }
+        } else {
+            body.classList.add('d-none');
+            icon.className = 'bi bi-chevron-down';
+            text.innerText = '展開圖表';
+            localStorage.setItem('threat_chart_collapsed', 'true');
+        }
+    }
+
+    function initHistogramCollapseState() {
+        const isCollapsed = localStorage.getItem('threat_chart_collapsed') === 'true';
+        if (isCollapsed) {
+            document.getElementById('histogram-card-body').classList.add('d-none');
+            document.getElementById('chart-toggle-icon').className = 'bi bi-chevron-down';
+            document.getElementById('chart-toggle-text').innerText = '展開圖表';
+        }
+    }
+
+    function setRefreshInterval(seconds, label) {
+        currentIntervalSeconds = seconds;
+        remainingSeconds = seconds;
+        localStorage.setItem('threat_display_interval', seconds.toString());
+
+        document.querySelectorAll('.dropdown-item').forEach(el => el.classList.remove('active'));
+        const labelElem = document.getElementById('currentIntervalLabel');
+        const badge = document.getElementById('countdownBadge');
+
+        if (seconds > 0) {
+            labelElem.innerText = label;
+            const activeItem = document.getElementById(`item-${seconds}`);
+            if (activeItem) activeItem.classList.add('active');
+
+            badge.classList.remove('d-none');
+            badge.innerText = `${remainingSeconds}s`;
+
+            if (countdownTimer) clearInterval(countdownTimer);
+            countdownTimer = setInterval(() => {
+                remainingSeconds--;
+                if (remainingSeconds <= 0) {
+                    remainingSeconds = currentIntervalSeconds;
+                    triggerSilentRefresh();
+                }
+                badge.innerText = `${remainingSeconds}s`;
+            }, 1000);
+        } else {
+            labelElem.innerText = '手動';
+            document.getElementById('item-manual').classList.add('active');
+            badge.classList.add('d-none');
+            if (countdownTimer) {
+                clearInterval(countdownTimer);
+                countdownTimer = null;
+            }
+        }
+    }
+
+    function refreshDisplayNow() {
+        const icon = document.getElementById('refresh-icon');
+        icon.classList.add('spin-anim');
+
+        remainingSeconds = currentIntervalSeconds;
+        const badge = document.getElementById('countdownBadge');
+        if (currentIntervalSeconds > 0) badge.innerText = `${remainingSeconds}s`;
+
+        queryThreatLogs(currentThreatPage, true, () => {
+            setTimeout(() => icon.classList.remove('spin-anim'), 400);
+        });
+    }
+
+    function triggerSilentRefresh() {
+        const icon = document.getElementById('refresh-icon');
+        icon.classList.add('spin-anim');
+        queryThreatLogs(currentThreatPage, true, () => {
+            setTimeout(() => icon.classList.remove('spin-anim'), 400);
+        });
+    }
+
+    function resetThreatFilters() {
+        document.getElementById('threat-src').value = '';
+        document.getElementById('threat-dst').value = '';
+        document.getElementById('threat-name').value = '';
+        document.getElementById('threat-severity').value = 'all';
+        document.getElementById('threat-action').value = 'all';
+        queryThreatLogs(1);
+    }
+
+    function getSeverityBadge(sev) {
+        const s = (sev || '').toLowerCase();
+        switch (s) {
+            case 'critical': return '<span class="badge badge-critical px-2 py-1">critical</span>';
+            case 'high': return '<span class="badge badge-high px-2 py-1">high</span>';
+            case 'medium': return '<span class="badge badge-medium px-2 py-1">medium</span>';
+            case 'low': return '<span class="badge badge-low px-2 py-1">low</span>';
+            case 'informational': return '<span class="badge badge-informational px-2 py-1">informational</span>';
+            default: return `<span class="badge bg-secondary px-2 py-1">${sev || '-'}</span>`;
+        }
+    }
+
+    function getActionBadge(act) {
+        const a = (act || '').toLowerCase();
+        if (a.includes('drop') || a.includes('block') || a.includes('reset')) {
+            return `<span class="badge bg-danger">${act}</span>`;
+        }
+        return `<span class="badge bg-warning text-dark">${act}</span>`;
+    }
+
+    function renderThreatHistogram(histogram) {
+        if (!histogram || histogram.length === 0) return;
+        const labels = histogram.map(h => h.time_bucket);
+        const dataVals = histogram.map(h => h.count);
+
+        if (!threatHistogramChartInstance) {
+            const ctx = document.getElementById('threatHistogramChart').getContext('2d');
+            threatHistogramChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '威脅事件數',
+                        data: dataVals,
+                        backgroundColor: '#dc3545',
+                        hoverBackgroundColor: '#b02a37',
+                        borderRadius: 2,
+                        barPercentage: 0.85,
+                        categoryPercentage: 0.95
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) { return `威脅筆數: ${context.parsed.y.toLocaleString()} 筆`; }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+                        y: {
+                            beginAtZero: true,
+                            grid: { color: '#f1f5f9' },
+                            ticks: {
+                                font: { size: 10 },
+                                callback: function(value) { return value >= 1000 ? (value/1000) + 'k' : value; }
+                            }
+                        }
+                    }
+                }
+            });
+        } else {
+            let hasChanged = false;
+            const currentData = threatHistogramChartInstance.data.datasets[0].data;
+            for (let i = 0; i < dataVals.length; i++) {
+                if (currentData[i] !== dataVals[i]) {
+                    currentData[i] = dataVals[i];
+                    hasChanged = true;
+                }
+            }
+            if (hasChanged) {
+                threatHistogramChartInstance.update('none');
+            }
+        }
+    }
+
+    function queryThreatLogs(page = 1, silent = false, callback = null) {
+        currentThreatPage = page;
+        const date = document.getElementById('threat-date').value || todayStr;
+        const src = document.getElementById('threat-src').value.trim();
+        const dst = document.getElementById('threat-dst').value.trim();
+        const threatName = document.getElementById('threat-name').value.trim();
+        const severity = document.getElementById('threat-severity').value;
+        const action = document.getElementById('threat-action').value;
+
+        const tbody = document.getElementById('threat-table-body');
+        if (!silent) {
+            tbody.innerHTML = '<tr><td colspan="13" class="text-center py-4 text-danger"><div class="spinner-border spinner-border-sm me-2"></div>正在透過 DuckDB 引擎極速載入...</td></tr>';
+        }
+
+        const url = `/api/threat-query?date=${date}&src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&threat_name=${encodeURIComponent(threatName)}&severity=${severity}&action=${action}&page=${page}&per_page=50&_t=${Date.now()}`;
+
+        fetch(url)
+            .then(res => res.json())
+            .then(data => {
+                if (data.status !== 'success') {
+                    tbody.innerHTML = `<tr><td colspan="13" class="text-center text-danger py-4">查詢失敗：${data.message}</td></tr>`;
+                    return;
+                }
+
+                const totalThreats = data.total_threats || 0;
+                const totalPages = data.total_pages || 1;
+                const currentPage = data.current_page || 1;
+                const logsList = data.logs || [];
+
+                document.getElementById('metric-total-threats').innerText = `${totalThreats.toLocaleString()} 筆`;
+                document.getElementById('metric-db-size').innerText = data.db_size || '0 B';
+                document.getElementById('metric-critical-high').innerText = `${(data.critical_high || 0).toLocaleString()} 筆`;
+
+                const topVictimText = data.top_victim_host && data.top_victim_host !== '-' 
+                    ? `${data.top_victim_host} (${data.top_victim_ip})` 
+                    : (data.top_victim_ip || '-');
+                document.getElementById('metric-top-victim').innerText = topVictimText;
+                document.getElementById('metric-top-victim').title = topVictimText;
+
+                document.getElementById('metric-top-threat').innerText = data.top_threat || '-';
+                document.getElementById('metric-top-threat').title = data.top_threat || '-';
+
+                // 🌟 1:1 依照 traffic 圖二：在右上角標籤顯示「共 X 筆 (頁次 Y / Z)」
+                document.getElementById('threat-count-badge').innerText = `共 ${totalThreats.toLocaleString()} 筆 (頁次 ${currentPage} / ${totalPages})`;
+
+                renderThreatHistogram(data.histogram || []);
+
+                tbody.innerHTML = '';
+                if (logsList.length === 0) {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="13" class="text-center py-5 text-muted">
+                                <i class="bi bi-inbox fs-2 d-block mb-2 text-secondary"></i>
+                                該日期/條件查無資安威脅紀錄。
+                            </td>
+                        </tr>`;
+                    renderThreatPagination(1, 1);
+                    return;
+                }
+
+                logsList.forEach(row => {
+                    const tr = document.createElement('tr');
+                    const actionStr = (row.action || '').toLowerCase();
+                    const isDeny = ['deny', 'drop', 'block', 'reset-both', 'reset-server', 'reset-client'].includes(actionStr);
+
+                    if (isDeny) {
+                        tr.className = 'row-drop-deny';
+                    }
+
+                    const hostDisplay = (row.src_hostname && row.src_hostname !== '-') 
+                        ? `<span class="badge bg-light text-dark border ms-1">${row.src_hostname}</span>` 
+                        : '';
+                    const fullSrcTitle = (row.src_hostname && row.src_hostname !== '-') 
+                        ? `${row.source} (${row.src_hostname})` 
+                        : row.source;
+
+                    tr.innerHTML = `
+                        <td class="threat-col-time text-danger" title="${row.timestamp}">${row.timestamp}</td>
+                        <td title="${row.subtype || '-'}"><span class="badge bg-secondary">${row.subtype || '-'}</span></td>
+                        <td class="fw-bold text-dark text-truncate" title="${row.threat_name}">${row.threat_name}</td>
+                        <td title="${row.from_zone || '-'}">${row.from_zone || '-'}</td>
+                        <td title="${row.to_zone || '-'}">${row.to_zone || '-'}</td>
+                        <td title="${fullSrcTitle}"><strong class="text-primary">${row.source}</strong>${hostDisplay}</td>
+                        <td class="font-monospace" title="${row.destination}">${row.destination}</td>
+                        <td class="fw-bold text-primary" title="${row.to_port && row.to_port > 0 ? row.to_port : '-'}">${row.to_port && row.to_port > 0 ? row.to_port : '-'}</td>
+                        <td title="${row.application || '-'}"><span class="text-primary">${row.application || '-'}</span></td>
+                        <td title="${row.action}">${getActionBadge(row.action)}</td>
+                        <td title="${row.severity}">${getSeverityBadge(row.severity)}</td>
+                        <td class="text-truncate text-secondary" title="${row.url}">${row.url || '-'}</td>
+                        <td class="font-monospace text-muted" title="${row.session_id || '-'}">${row.session_id || '-'}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+
+                // 🌟 依照 traffic 圖二繪製完整頁碼列 (« < 1 2 3 ... > »)
+                renderThreatPagination(currentPage, totalPages);
+            })
+            .catch(err => {
+                if (!silent) {
+                    tbody.innerHTML = `<tr><td colspan="13" class="text-center text-danger py-4">網路傳輸異常：${err}</td></tr>`;
+                }
+            })
+            .finally(() => {
+                if (callback) callback();
+            });
+    }
+
+    // 🌟 1:1 依照 traffic 圖二的分頁元件演算法 (含雙箭頭與當前高亮)
+    function renderThreatPagination(current, total) {
+        const ul = document.getElementById('threat-pagination-ul');
+        ul.innerHTML = '';
+        if (!total || total <= 1) return;
+
+        const maxVisible = 10;
+        let startPage = Math.max(1, current - Math.floor(maxVisible / 2));
+        let endPage = startPage + maxVisible - 1;
+        if (endPage > total) { endPage = total; startPage = Math.max(1, endPage - maxVisible + 1); }
+
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryThreatLogs(1); return false;"><i class="bi bi-chevron-double-left"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryThreatLogs(${current - 1}); return false;"><i class="bi bi-chevron-left"></i></a></li>`;
+
+        for (let i = startPage; i <= endPage; i++) {
+            ul.innerHTML += `<li class="page-item ${i === current ? 'active' : ''}"><a class="page-link" href="#" onclick="queryThreatLogs(${i}); return false;">${i}</a></li>`;
+        }
+
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryThreatLogs(${current + 1}); return false;"><i class="bi bi-chevron-right"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryThreatLogs(${total}); return false;"><i class="bi bi-chevron-double-right"></i></a></li>`;
+    }
+
+    function fetchThreatNow() {
+        const btn = document.getElementById('btnFetchNow');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>擷取中...';
+        fetch('/api/threat-fetch-now', { method: 'POST' })
+            .then(r => r.json())
+            .then(res => {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i>立即擷取威脅';
+                queryThreatLogs(1);
+            })
+            .catch(err => {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i>立即擷取威脅';
+                alert('擷取失敗: ' + err);
+            });
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        initHistogramCollapseState();
+
+        const savedSec = parseInt(localStorage.getItem('threat_display_interval') || '30', 10);
+        const labelMap = { 10: '10 秒', 30: '30 秒', 60: '60 秒', 0: '手動' };
+        setRefreshInterval(savedSec, labelMap[savedSec] || '30 秒');
+
+        queryThreatLogs(1);
+    });
+</script>
+{% endblock %}
