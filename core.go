@@ -33,6 +33,26 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// 1. 新增專屬目錄變數 (於 var 區塊)
+var (
+	webhookTrafficDir = filepath.Join(appDir, "webhook_traffic_logs")
+	webhookRawDir     = filepath.Join(appDir, "webhook_raw_logs")
+)
+
+// 2. 在 initCore() 內建立實體目錄
+_ = os.MkdirAll(webhookTrafficDir, 0755)
+_ = os.MkdirAll(webhookRawDir, 0755)
+
+// 3. 獨立的 Webhook 批次存檔函式
+func saveWebhookTrafficFast(rows []TrafficParquetRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	todayStr := time.Now().Format("2006-01-02")
+	chunkPath := filepath.Join(webhookTrafficDir, fmt.Sprintf("webhook_traffic_%s_%d.parquet", todayStr, time.Now().UnixNano()))
+	return parquet.WriteFile(chunkPath, rows)
+}
+
 var (
 	appDir       string
 	paConfigFile string

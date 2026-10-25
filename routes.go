@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json" // 👈 🌟 補上這行 (解決 undefined: json)
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -14,12 +15,51 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic" // 👈 🌟 必須是 sync/atomic（包含子目錄路徑）
 	"time"
 
 	"github.com/flosch/pongo2/v6"
 	"github.com/gin-gonic/gin"
 	"github.com/parquet-go/parquet-go" // 👈 補上：供 route 16 讀取目前最舊連線紀錄
 )
+
+// -------------------------------------------------------------
+// 🌟 Palo Alto HTTP Webhook JSON 結構定義
+// -------------------------------------------------------------
+type PAWebhookTrafficPayload struct {
+	Type             string `json:"type"`
+	TimeGenerated    string `json:"time_generated"`
+	FromZone         string `json:"from"`
+	ToZone           string `json:"to"`
+	Source           string `json:"src"`
+	NatSourceIP      string `json:"natsrc"`
+	Destination      string `json:"dst"`
+	NatDestIP        string `json:"natdst"`
+	ToPort           string `json:"dport"`
+	Application      string `json:"app"`
+	Action           string `json:"action"`
+	Rule             string `json:"rule"`
+	SessionEndReason string `json:"session_end_reason"`
+	Bytes            string `json:"bytes"`
+	SessionID        string `json:"sessionid"`
+}
+
+type PAWebhookThreatPayload struct {
+	Subtype       string `json:"subtype"`
+	TimeGenerated string `json:"time_generated"`
+	ThreatID      string `json:"threatid"`
+	ThreatName    string `json:"threat_name"`
+	FromZone      string `json:"from"`
+	ToZone        string `json:"to"`
+	Source        string `json:"src"`
+	Destination   string `json:"dst"`
+	ToPort        string `json:"dport"`
+	Application   string `json:"app"`
+	Action        string `json:"action"`
+	Severity      string `json:"severity"`
+	URL           string `json:"url"`
+	SessionID     string `json:"sessionid"`
+}
 
 func renderPongo(c *gin.Context, tplName string, ctx pongo2.Context) {
 	tpl, err := pongoSet.FromFile(tplName)
@@ -1067,6 +1107,121 @@ func registerRoutes(r *gin.Engine) {
 
 		sendMsg("🏁 [Threat 回補] 完成！共執行 %d 輪，熱檔新增: %d 筆，冷資料 (Raw Log) 備份: %d 筆，時間已推進至 %s。\n", 
 			successfulRounds, totalNew, totalRaw, lastTime)
+	})
+	
+	// 🌟 18. Palo Alto 原生 HTTP/JSON Webhook 接收端點 (Traffic)
+	r.POST("/api/webhook/traffic", func(c *gin.Context) {
+		// 讀取 Raw Body 供冷資料備份
+		rawBytes, err := io.ReadAll(c.Request.Body)
+		if err != nil || len(rawBytes) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "empty body"})
+			return
+		}
+
+		var payload PAWebhookTrafficPayload
+		if err := json.Unmarshal(rawBytes, &payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+			return
+		}
+
+		// 格式正規化 (日期斜線轉橫線、型別轉換)
+		ts := strings.ReplaceAll(strings.TrimSpace(payload.TimeGenerated), "/", "-")
+		portVal, _ := strconv.Atoi(payload.ToPort)
+		bytesVal, _ := strconv.ParseInt(payload.Bytes, 10, 64)
+
+		row := TrafficParquetRow{
+			Timestamp:        ts,
+			Type:             payload.Type,
+			FromZone:         payload.FromZone,
+			ToZone:           payload.ToZone,
+			Source:           payload.Source,
+			NatSourceIP:      payload.NatSourceIP,
+			Destination:      payload.Destination,
+			NatDestIP:        payload.NatDestIP,
+			ToPort:           int32(portVal),
+			Application:      payload.Application,
+			Action:           payload.Action,
+			Rule:             payload.Rule,
+			SessionEndReason: payload.SessionEndReason,
+			Bytes:            bytesVal,
+			SessionID:        payload.SessionID,
+		}
+
+		// 1. 推入熱資料寫入佇列
+		select {
+		case syslogQueue <- row:
+			atomic.AddInt64(&syslogReceivedCount, 1)
+		default:
+		}
+
+		// 2. 推入冷資料寫入佇列 (備份原始 JSON 內容)
+		select {
+		case rawTrafficQueue <- RawLogParquetRow{
+			Timestamp:  ts,
+			SessionID:  payload.SessionID,
+			RawContent: string(rawBytes),
+		}:
+		default:
+		}
+
+		// 即時秒回 HTTP 200，避免 PA 防火牆等待導致佇列堵塞
+		c.Status(http.StatusOK)
+	})
+
+	// 🌟 19. Palo Alto 原生 HTTP/JSON Webhook 接收端點 (Threat)
+	r.POST("/api/webhook/threat", func(c *gin.Context) {
+		rawBytes, err := io.ReadAll(c.Request.Body)
+		if err != nil || len(rawBytes) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "empty body"})
+			return
+		}
+
+		var payload PAWebhookThreatPayload
+		if err := json.Unmarshal(rawBytes, &payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+			return
+		}
+
+		ts := strings.ReplaceAll(strings.TrimSpace(payload.TimeGenerated), "/", "-")
+		portVal, _ := strconv.Atoi(payload.ToPort)
+		tName := payload.ThreatName
+		if tName == "" {
+			tName = payload.ThreatID
+		}
+
+		row := ThreatParquetRow{
+			Timestamp:   ts,
+			Subtype:     payload.Subtype,
+			ThreatID:    payload.ThreatID,
+			ThreatName:  tName,
+			FromZone:    payload.FromZone,
+			ToZone:      payload.ToZone,
+			Src:         payload.Source,
+			Dst:         payload.Destination,
+			ToPort:      int32(portVal),
+			Application: payload.Application,
+			Action:      payload.Action,
+			Severity:    strings.ToLower(payload.Severity),
+			URL:         payload.URL,
+			SessionID:   payload.SessionID,
+		}
+
+		select {
+		case threatSyslogQueue <- row:
+			atomic.AddInt64(&threatSyslogReceivedCount, 1)
+		default:
+		}
+
+		select {
+		case rawThreatQueue <- RawLogParquetRow{
+			Timestamp:  ts,
+			SessionID:  payload.SessionID,
+			RawContent: string(rawBytes),
+		}:
+		default:
+		}
+
+		c.Status(http.StatusOK)
 	})
 	
 	// 威脅日誌分析主頁面
