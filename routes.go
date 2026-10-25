@@ -815,6 +815,7 @@ func registerRoutes(r *gin.Engine) {
 		sendMsg("[流量回補] 🚀 啟動回溯作業，預計回溯 %d 輪 (目標: %d 筆)...\n", rounds, rounds*5000)
 
 		totalNew := 0
+		totalRaw := 0           // 👈 🌟 補上：冷資料累計計數器
 		successfulRounds := 0
 
 		for r := 0; r < rounds; r++ {
@@ -843,6 +844,7 @@ func registerRoutes(r *gin.Engine) {
 				sendMsg("[流量回補] ❌ 存入磁碟發生錯誤：%v\n", err)
 			} else {
 				totalNew += ins
+				totalRaw += len(entries) // 👈 🌟 累加冷資料筆數
 				successfulRounds++
 			}
 
@@ -855,6 +857,9 @@ func registerRoutes(r *gin.Engine) {
 
 			sendMsg("[流量回補] ✅ [%d/%d] 完成！耗時: %.1fs，抓取: %d 筆，新增: %d 筆 (當日累計: %d 筆)，時間推進至: %s\n",
 				r+1, rounds, time.Since(startT).Seconds(), len(entries), ins, tot, oldest)
+				
+		    // 🌟 核心新增：向批次檔視窗 (curl) 推送冷資料落盤戰報
+			sendMsg("   ↳ ❄️ [Raw Log 備份] 原始 XML 已落盤: %d 筆 ➔ traffic_raw_logs/\n", len(entries))
 
 			t, err := time.Parse("2006-01-02 15:04:05", oldest)
 			if err == nil {
@@ -876,7 +881,8 @@ func registerRoutes(r *gin.Engine) {
 			}
 		}
 
-		sendMsg("🏁 [流量回補] 完成！共執行 %d 輪，補入 %d 筆紀錄，歷史時間已向前推進至 %s。\n", successfulRounds, totalNew, lastTime)
+		sendMsg("🏁 [流量回補] 完成！共執行 %d 輪，熱檔新增: %d 筆，冷資料 (Raw Log) 備份: %d 筆，歷史時間已向前推進至 %s。\n", 
+			successfulRounds, totalNew, totalRaw, lastTime)
 	})
 
 	// 17. 🌟 智慧接力回溯：向 PA-1420 擷取歷史資安威脅 (即時分輪串流輸出)
@@ -992,6 +998,7 @@ func registerRoutes(r *gin.Engine) {
 		sendMsg("[Threat 回補] 🚀 啟動資安威脅回溯，預計回溯 %d 輪 (目標: %d 筆)...\n", rounds, rounds*5000)
 
 		totalNew := 0
+		totalRaw := 0           // 👈 🌟 補上：威脅冷資料累計計數器
 		successfulRounds := 0
 
 		for r := 0; r < rounds; r++ {
@@ -1021,6 +1028,7 @@ func registerRoutes(r *gin.Engine) {
 				sendMsg("[Threat 回補] ❌ 存入磁碟發生錯誤：%v\n", err)
 			} else {
 				totalNew += ins
+				totalRaw += len(entries) // 👈 🌟 累加筆數
 				successfulRounds++
 			}
 
@@ -1033,6 +1041,9 @@ func registerRoutes(r *gin.Engine) {
 
 			sendMsg("[Threat 回補] ✅ [%d/%d] 完成！耗時: %.1fs，抓取: %d 筆，新增: %d 筆 (累計: %d 筆)，時間推至: %s\n",
 				r+1, rounds, time.Since(startT).Seconds(), len(entries), ins, tot, oldest)
+				
+			// 🌟 核心新增：向批次檔視窗推送威脅冷資料進度
+			sendMsg("   ↳ ❄️ [Raw Log 備份] 原始 XML 已落盤: %d 筆 ➔ threat_raw_logs/\n", len(entries))
 
 			t, err := time.Parse("2006-01-02 15:04:05", oldest)
 			if err == nil {
@@ -1054,7 +1065,8 @@ func registerRoutes(r *gin.Engine) {
 			}
 		}
 
-		sendMsg("🏁 [Threat 回補] 完成！共執行 %d 輪，補入 %d 筆紀錄，時間已推進至 %s。\n", successfulRounds, totalNew, lastTime)
+		sendMsg("🏁 [Threat 回補] 完成！共執行 %d 輪，熱檔新增: %d 筆，冷資料 (Raw Log) 備份: %d 筆，時間已推進至 %s。\n", 
+			successfulRounds, totalNew, totalRaw, lastTime)
 	})
 	
 	// 威脅日誌分析主頁面

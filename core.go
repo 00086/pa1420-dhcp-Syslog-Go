@@ -330,7 +330,9 @@ type TrafficAnalyticsResult struct {
 	TotalPages  int               `json:"total_pages"`
 }
 
-// 🌟 獨立冷資料快速落盤機制 (Atomic .tmp 替換 + 依真實日期歸檔)
+var rawTrafficChunkCounter int64
+
+// 🌟 獨立冷資料快速落盤機制 (Atomic .tmp 替換 + 依真實日期歸檔 + 即時戰報輸出)
 func saveRawLogBatchFast(logType string, rows []RawLogParquetRow) error {
 	if len(rows) == 0 {
 		return nil
@@ -362,7 +364,18 @@ func saveRawLogBatchFast(logType string, rows []RawLogParquetRow) error {
 			return err
 		}
 
-		_ = os.Rename(tmpPath, chunkPath)
+		if err := os.Rename(tmpPath, chunkPath); err != nil {
+			fmt.Printf("[冷資料更名失敗] ❌ %s: %v\n", chunkPath, err)
+			return err
+		}
+
+		// 🌟 核心增補：即時於 CLI 終端機顯示 Raw Log 存檔進度
+		var sizeStr string
+		if info, err := os.Stat(chunkPath); err == nil {
+			sizeStr = fmt.Sprintf("%.2f MB", float64(info.Size())/(1024*1024))
+		}
+		fmt.Printf("   ↳ ❄️ [Raw Log 備份] %s 原始 XML 已儲存: %d 筆 ➔ %s (%s)\n",
+			logType, len(dateRows), filepath.Base(chunkPath), sizeStr)
 	}
 
 	return nil
@@ -2324,16 +2337,33 @@ func ConsolidateRawParquetFiles(logType string) (int, error) {
 	return totalMerged, nil
 }
 
-// 🌟 每小時自動執行一次冷資料整併 (定時 60 分鐘循環)
+// 🌟 冷資料自動維護排程器：開機 10 秒預先整併 + 對齊時鐘整點 (XX:00:00) 循環
 func startHourlyRawConsolidator() {
 	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
+		// 1. 開機暖機 10 秒後，立刻對現存歷史碎檔執行一次全面整併
+		time.Sleep(10 * time.Second)
+		fmt.Printf("[%s] 🚀 [冷資料整併] 啟動初次歷史碎片清掃...\n", time.Now().Format("15:04:05"))
+		ConsolidateRawParquetFiles("traffic")
+		ConsolidateRawParquetFiles("threat")
 
-		for range ticker.C {
-			fmt.Printf("[%s] ⏱️ 冷資料每小時維護排程觸發...\n", time.Now().Format("15:04:05"))
-			go ConsolidateRawParquetFiles("traffic")
-			go ConsolidateRawParquetFiles("threat")
+		for {
+			// 2. 精準計算距離下一個「時鐘整點 (XX:00:00)」的剩餘時間
+			now := time.Now()
+			nextHour := now.Truncate(time.Hour).Add(1 * time.Hour)
+			sleepDuration := time.Until(nextHour)
+
+			// 避免剛好在整點時 sleep 0 秒
+			if sleepDuration <= 0 {
+				sleepDuration = 1 * time.Hour
+			}
+
+			time.Sleep(sleepDuration)
+
+			// 3. 抵達時鐘整點，準時觸發整併
+			fmt.Printf("[%s] ⏱️ [時鐘整點 %02d:00] 冷資料維護排程觸發...\n", 
+				time.Now().Format("15:04:05"), time.Now().Hour())
+			ConsolidateRawParquetFiles("traffic")
+			ConsolidateRawParquetFiles("threat")
 		}
 	}()
 }
