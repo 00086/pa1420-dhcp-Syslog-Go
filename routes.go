@@ -1224,6 +1224,65 @@ func registerRoutes(r *gin.Engine) {
 		c.Status(http.StatusOK)
 	})
 	
+	// 🌟 20. CLI 高速匯出自動化 API (支援 CMD 每一秒即時動態串流，免傳帳密)
+	r.POST("/api/cli-export", func(c *gin.Context) {
+		var req CLIExportRequest
+		if err := c.ShouldBind(&req); err != nil {
+			c.String(http.StatusBadRequest, "❌ 參數解析失敗: %v\n", err)
+			return
+		}
+
+		if req.Date == "" || req.FTPFolder == "" {
+			c.String(http.StatusBadRequest, "❌ 缺少必要參數 (需具備 date 與 ftp_folder)\n")
+			return
+		}
+
+		if req.LogType != "threat" {
+			req.LogType = "traffic"
+		}
+
+		// 🌟 若不是純轉換模式，自動從 pa1420key.txt 讀出 FTP 帳密
+		if !req.ConvertOnly {
+			ftpUser := "ftpuser"
+			ftpPass := "ftppass"
+			if content, err := os.ReadFile(paConfigFile); err == nil {
+				var lines []string
+				for _, l := range strings.Split(string(content), "\n") {
+					trimmed := strings.TrimSpace(l)
+					if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+						lines = append(lines, trimmed)
+					}
+				}
+				if len(lines) >= 7 {
+					ftpUser = lines[5]
+					ftpPass = lines[6]
+				}
+			}
+			// 自動將本機 IP (192.50.1.55) 寫死或由設定檔擴展
+			req.FTPHost = fmt.Sprintf("%s:%s@192.50.1.55", ftpUser, ftpPass)
+		}
+
+		c.Header("Content-Type", "text/plain; charset=utf-8")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Status(http.StatusOK)
+		c.Writer.Flush()
+
+		logStream := func(format string, a ...any) {
+			msg := fmt.Sprintf(format, a...)
+			fmt.Print(msg)
+			_, _ = fmt.Fprint(c.Writer, msg)
+			c.Writer.Flush()
+		}
+
+		err := performCLIExportAndConvert(req, logStream)
+		if err != nil {
+			logStream("\n❌ 任務失敗: %v\n", err)
+			return
+		}
+	})
+	
 	// 威脅日誌分析主頁面
 	r.GET("/threat", func(c *gin.Context) {
 		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")

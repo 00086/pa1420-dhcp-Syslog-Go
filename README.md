@@ -33,6 +33,25 @@
 * **跨格式無縫融合**：
   透過 API 回溯的原生 XML 日誌，經過 Go 引擎正規化後，能與 Webhook 即時寫入的 JSON 日誌完美融合於同一張 Parquet 數據表中，對前端查詢完全透明。
 
+### 5. 內建輕量化 FTP 伺服器與 CLI 高速自動化匯出 🌟 (新架構)
+針對單日百萬筆歷史日誌的「大補帖式」還原，系統已整合 **Go 原生內建 FTP 伺服器** 與 **SSH 模擬登入自動化** 引擎，達成零外部依賴的極速管線：
+* **純 Go 內建 FTP 接收器 (Port 21)**：直接於 `PA1420_Monitor.exe` 內部接管 Port 21 (支援 PASV / PORT 模式)，徹底免除安裝 Python 或第三方 FTP 軟體的需求。
+* **自動化 PTY 虛擬終端登入**：自動透過 SSH 連線至 PA 防火牆、請求 PTY 虛擬終端，並模擬管理員敲擊 `ftp export log...` 指令，將 200 多萬筆資料觸發串流傾印。
+* **全自動湖倉整合**：自動監控並接收防火牆切分的 34 個 CSV 區塊（避開 PA 記憶體單檔 6 萬筆上限），接收完畢後 0.1 秒內由 DuckDB 向量化引擎自動接手，執行全核心平行處理，數秒內完成冷熱分離與 Parquet 落盤，並自動清理暫存。
+
+---
+
+## 📊 四種匯出方式綜合評比 (PA-1420 日誌提取策略)
+
+在 Palo Alto 系統中提取日誌有多種方式，本系統目前已將最快的 **CLI FTP Export** 與自動化的 **XML API** 完美融合。各方式優劣對比如下：
+
+| 匯出方式 | 適合情境 | 速度評比 | 限制與優缺點 |
+| :--- | :--- | :--- | :--- |
+| **CLI (SCP / FTP Export)** | 大量歷史補檔、整天百萬筆還原 | ⚡ **極快** (幾分鐘搞定) | 需要有可連線的網路路由與本機 SCP/FTP 伺服器接收。 |
+| **Scheduled Export** | 全自動每日離線備份 | ⚡ **極快** (背景排程傳輸) | 屬於定期排程機制，無法當下隨按隨抓。 |
+| **WebUI CSV 匯出** | 臨時調查、單一 IP/事件調閱 | 🚀 **中等** | 受限於單次最大匯出筆數上限，超大資料無法一次匯出。 |
+| **XML API (自動接力回溯)** | 即時斷點續傳、自動整合進湖倉 | 🐢 **最慢** (每輪 5000 筆輪詢) | 程式整合度最高，但對 Management CPU 運算與網路往返負擔較大。 |
+
 ---
 
 ## 🆚 架構升級：HTTP Webhook vs. UDP Syslog
@@ -69,16 +88,19 @@
 
 ```text
 dhcpxml-go/
-├── main.go                     # 程式進入點、排程器與 HTTP 路由
+├── main.go                     # 程式進入點、排程器、HTTP 路由與內建 FTP 伺服器啟動
 ├── core.go                     # 核心邏輯 (多執行緒、Parquet、DuckDB、Syslog/Webhook JSON)
-├── routes.go                   # Web API 端點、Webhook 接收器與分塊串流
+├── routes.go                   # Web API 端點、Webhook 接收器與 HTTP Chunked 串流
+├── cli_export.go               # PA-1420 虛擬終端 PTY 自動化登入與 DuckDB 湖倉轉換核心
+├── ftp_server.go               # Go 原生輕量化 FTP 伺服器 (支援 PASV / PORT)
 ├── go.mod / go.sum             # Go 模組依賴清單
 ├── duckdb.exe                  # 🦆 DuckDB 向量化查詢引擎 (需手動下載)
-├── auto_backfill_day.bat       # 單日歷史接力回溯批次檔
-├── auto_backfill_to_limit.bat  # 全自動跨日歷史推進批次檔
-├── backfill_status.txt         # 回溯狀態 IPC 中繼檔
-├── pa1420key.txt               # 防火牆 IP、介面與 API Key 配置檔
+├── ftppa.bat                   # CLI 高速串流匯出與自動整合批次檔 (支援 Autofill)
+├── auto_backfill_day.bat       # 單日歷史接力回溯批次檔 (XML API 方案)
+├── auto_backfill_to_limit.bat  # 全自動跨日歷史推進批次檔 (XML API 方案)
+├── pa1420key.txt               # 系統防護庫 (存放 PA IP、API Key、SSH 帳密與 FTP 帳密)
 ├── dhcp_records.db             # SQLite 資料庫 (DHCP、ARP、系統狀態)
+├── ftp_data/                   # FTP 臨時接收資料夾 (分塊 CSV 落地處，轉檔後自動清理)
 ├── traffic_logs/               # 流量「熱資料」目錄 (結構化 Parquet)
 ├── traffic_raw_logs/           # 流量「冷資料」目錄 (原始 JSON/XML Parquet)
 ├── threat_logs/                # 威脅「熱資料」目錄
@@ -94,13 +116,17 @@ dhcpxml-go/
 
 ## ⚙️ 防火牆連線配置 (`pa1420key.txt`)
 
-首次啟動時系統自動建立範本檔，請依序配置三行內容：
+首次啟動時系統自動建立範本檔，為確保 API 連線與自動化 SSH / FTP 功能正常運作，請依序配置七行內容：
 ```text
-192.168.1.1
-ethernet1/1
+192.50.1.254
+ethernet1/16
 LUFRPT14MW55QW...（您的 PA-1420 API Key）...==
+newtp1
+（您的防火牆 SSH 密碼）
+ftpuser
+ftppass
 ```
-*(第 1 行: 防火牆 IP | 第 2 行: 監控 DHCP 介面 | 第 3 行: API 金鑰)*
+*(第 1 行: 防火牆 IP | 第 2 行: 監控介面 | 第 3 行: API 金鑰 | 第 4-5 行: PA SSH 帳密 | 第 6-7 行: 內建 FTP 帳密)*
 
 ---
 
@@ -137,24 +163,33 @@ LUFRPT14MW55QW...（您的 PA-1420 API Key）...==
 
 ---
 
-## 🔄 歷史日誌自動化回溯腳本 (.bat)
+## 🔄 自動化日誌匯出與回溯腳本 (.bat)
 
 專為 Windows 環境設計的斷點續傳純 CMD 自動化腳本：
 
-1. **單日目標回溯：`auto_backfill_day.bat`**
-   遞迴推進，直到跨越當日 00:00:00 自動停機。
-   ```cmd
-   auto_backfill_day.bat 2026-10-24
-   auto_backfill_day.bat 2026-10-24 18:30:00  (指定倒推起點)
-   auto_backfill_day.bat 2026-10-24 threat    (威脅日誌專用)
-   ```
+### 1. CLI 高速匯出與湖倉自動整合（推薦使用🌟）
+透過內建 FTP 伺服器與 PTY 虛擬終端，單日百萬筆連線僅需 2~3 分鐘即可完成匯出、冷熱分離與 DuckDB 壓縮落盤。
+* **腳本：`ftppa.bat`**
+  ```cmd
+  ftppa.bat 2026-10-24           (預設匯出 traffic 流量日誌)
+  ftppa.bat 2026-10-24 threat    (指定匯出 threat 威脅日誌)
+  ftppa.bat                      (無參數執行時將提供互動式選單)
+  ```
 
-2. **全自動跨日歷史推進：`auto_backfill_to_limit.bat`**
-   系統自動深挖過往天數，直到遭遇防火牆實體硬體儲存 FIFO 極限 (自動探測 `LIMIT`)。
-   ```cmd
-   auto_backfill_to_limit.bat
-   auto_backfill_to_limit.bat threat
-   ```
+### 2. XML API 歷史回溯方案
+採用 API 輪詢機制，適合即時少量補檔或斷點續傳。
+* **單日目標回溯：`auto_backfill_day.bat`**
+  遞迴推進，直到跨越當日 00:00:00 自動停機。
+  ```cmd
+  auto_backfill_day.bat 2026-10-24
+  auto_backfill_day.bat 2026-10-24 18:30:00  (指定倒推起點)
+  auto_backfill_day.bat 2026-10-24 threat    (威脅日誌專用)
+  ```
+* **全自動跨日歷史推進：`auto_backfill_to_limit.bat`**
+  系統自動深挖過往天數，直到遭遇防火牆實體硬體儲存 FIFO 極限。
+  ```cmd
+  auto_backfill_to_limit.bat
+  ```
 
 ---
 
@@ -166,7 +201,7 @@ LUFRPT14MW55QW...（您的 PA-1420 API Key）...==
    go build -trimpath -ldflags="-s -w" -o PA1420_Monitor.exe .
    ```
 2. **準備 DuckDB 查詢引擎**：前往 [DuckDB 官方 GitHub Releases](https://github.com/duckdb/duckdb/releases/latest) 下載 `duckdb_cli-windows-amd64.zip`，解壓縮出 `duckdb.exe` 並放入專案根目錄。
-3. **啟動服務**：確保配置檔與前端樣板就緒後，直接雙擊 `PA1420_Monitor.exe`。系統即在背景啟動 HTTP (Port 5006) 與 UDP (Port 514) 雙引擎監聽。
+3. **啟動服務**：確保配置檔與前端樣板就緒後，直接雙擊 `PA1420_Monitor.exe`。系統即在背景自動啟動 HTTP (Port 5006)、UDP Syslog (Port 514) 以及 FTP 接收端 (Port 21)。
 4. 使用瀏覽器訪問 `http://localhost:5006`。
 
 ---
