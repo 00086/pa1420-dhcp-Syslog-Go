@@ -33,26 +33,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// 1. 新增專屬目錄變數 (於 var 區塊)
-var (
-	webhookTrafficDir = filepath.Join(appDir, "webhook_traffic_logs")
-	webhookRawDir     = filepath.Join(appDir, "webhook_raw_logs")
-)
-
-// 2. 在 initCore() 內建立實體目錄
-_ = os.MkdirAll(webhookTrafficDir, 0755)
-_ = os.MkdirAll(webhookRawDir, 0755)
-
-// 3. 獨立的 Webhook 批次存檔函式
-func saveWebhookTrafficFast(rows []TrafficParquetRow) error {
-	if len(rows) == 0 {
-		return nil
-	}
-	todayStr := time.Now().Format("2006-01-02")
-	chunkPath := filepath.Join(webhookTrafficDir, fmt.Sprintf("webhook_traffic_%s_%d.parquet", todayStr, time.Now().UnixNano()))
-	return parquet.WriteFile(chunkPath, rows)
-}
-
 var (
 	appDir       string
 	paConfigFile string
@@ -2032,6 +2012,27 @@ func runDuckDBQuery(query string) ([]map[string]interface{}, error) {
 	return res, nil
 }
 
+// 🌟 安全解析 DuckDB JSON 欄位（相容 float64、int 與 HUGEINT 字串）
+func parseDuckDBNumber(val interface{}) int64 {
+	if val == nil {
+		return 0
+	}
+	switch v := val.(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case string:
+		// 解決 DuckDB 將 HUGEINT 序列化為字串的問題
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return int64(f)
+		}
+	}
+	return 0
+}
+
 // -------------------------------------------------------------
 // 🌟 聚合查詢：DuckDB 向量化極速引擎 (並行化與翻頁解耦版)
 // -------------------------------------------------------------
@@ -2103,7 +2104,15 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			statsQuery := fmt.Sprintf(`SELECT COUNT(*) AS total_flows, COALESCE(SUM(bytes), 0) AS total_bytes, COALESCE(SUM(CASE WHEN action IN ('deny','drop') OR action LIKE 'reset%%' THEN 1 ELSE 0 END), 0) AS deny_flows, MODE(application) AS top_app FROM '%s' WHERE %s`, duckdbPattern, whereClause)
+			// 🌟 優化 SQL：將 SUM(bytes) 轉為 DOUBLE，並使用 COUNT 替代 SUM(CASE) 保持 BIGINT
+			statsQuery := fmt.Sprintf(`
+				SELECT 
+					COUNT(*) AS total_flows, 
+					CAST(COALESCE(SUM(bytes), 0) AS DOUBLE) AS total_bytes, 
+					COUNT(CASE WHEN LOWER(action) IN ('deny','drop') OR LOWER(action) LIKE 'reset%%' THEN 1 END) AS deny_flows, 
+					MODE(application) AS top_app 
+				FROM '%s' WHERE %s
+			`, duckdbPattern, whereClause)
 			statsRes, errStats = runDuckDBQuery(statsQuery)
 		}()
 		go func() {
@@ -2136,10 +2145,12 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 	topApp := "-"
 
 	if !onlyLogs && len(statsRes) > 0 {
-		if v, ok := statsRes[0]["total_flows"].(float64); ok { totalFlows = int(v) }
-		if v, ok := statsRes[0]["total_bytes"].(float64); ok { totalBytesNum = int64(v) }
-		if v, ok := statsRes[0]["deny_flows"].(float64); ok { denyFlows = int(v) }
-		if v, ok := statsRes[0]["top_app"].(string); ok && v != "" { topApp = v }
+		totalFlows = int(parseDuckDBNumber(statsRes[0]["total_flows"]))
+		totalBytesNum = parseDuckDBNumber(statsRes[0]["total_bytes"])
+		denyFlows = int(parseDuckDBNumber(statsRes[0]["deny_flows"]))
+		if v, ok := statsRes[0]["top_app"].(string); ok && v != "" { 
+			topApp = v 
+		}
 	}
 
 	var totalBytesStr string
@@ -2628,8 +2639,8 @@ func queryThreatAnalytics(queryDate, src, dst, severity, action, threatName stri
 	topVictimIP := "-"
 
 	if !onlyLogs && len(statsRes) > 0 {
-		if v, ok := statsRes[0]["total_threats"].(float64); ok { totalThreats = int(v) }
-		if v, ok := statsRes[0]["critical_high"].(float64); ok { criticalHigh = int(v) }
+		totalThreats = int(parseDuckDBNumber(statsRes[0]["total_threats"]))
+		criticalHigh = int(parseDuckDBNumber(statsRes[0]["critical_high"]))
 		if v, ok := statsRes[0]["top_threat"].(string); ok && v != "" { topThreat = v }
 		if v, ok := statsRes[0]["top_victim"].(string); ok && v != "" { topVictimIP = v }
 	}
