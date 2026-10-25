@@ -28,9 +28,9 @@
   透過 SQL 視窗函數 `ROW_NUMBER() OVER (PARTITION BY timestamp, source, destination, to_port, session_id)`，系統能自動在背景將「連線 Start/End 重複報送」、「Syslog 與 API 雙重抓取」的冗餘雜訊徹底清洗（例如將 380 萬筆原始紀錄壓實為 200 萬筆真實獨立會話），確保統計數據絕對精準。
 
 ### 4. 智慧接力歷史回溯 (Smart Backfill Engine)
-* **當日智慧斷點續傳（Smart Resume）**
+* **當日智慧斷點續傳（Smart Resume）**：
   指定日期回溯時，系統探測該日 Parquet 檔案中最舊的時間點，自動接關往前回溯，不浪費 API 額度重抓已有資料。
-* **跨格式無縫融合**
+* **跨格式無縫融合**：
   透過 API 回溯的原生 XML 日誌，經過 Go 引擎正規化後，能與 Webhook 即時寫入的 JSON 日誌完美融合於同一張 Parquet 數據表中。
 
 ---
@@ -41,9 +41,9 @@
 
 | 評比維度 | Syslog (UDP 514) | HTTP JSON Webhook (TCP 5006) 🌟 |
 | :--- | :--- | :--- |
-| **傳輸可靠度** | ❌ **不保證（靜默掉包）**。高流量時 Windows Socket 緩衝區易滿載，封包被 OS 丟棄且防火牆不知情。 | ✔️ **極高（TCP ACK保證）**。帶有流量控制與自動重傳機制，保證 100% 不掉日誌。 |
+| **傳輸可靠度** | ❌ **不保證（靜默掉包）**。高流量時 Socket 緩衝易滿載，封包被丟棄且防火牆不知情。 | ✔️ **極高（TCP ACK 保證）**。帶有流量控制與自動重傳機制，保證 100% 不掉日誌。 |
 | **後端解析效能** | ❌ **開銷極大**。需使用 CSV 解析器、防跳脫、字串切割與大量正規表示式。 | ✔️ **極簡高效**。Go 原生 `json.Unmarshal` 直接對齊記憶體 Struct，耗時僅數百微秒。 |
-| **版本容錯性** | ❌ **脆弱**。PAN-OS 升級若插入新欄位，後端 Index 全面錯位導致解析崩潰。 | ✔️ **強健 (Key-Value)**。欄位完全解耦，新增未知欄位會被 Go 引擎優雅忽略，業務邏輯不中斷。 |
+| **版本容錯性** | ❌ **脆弱**。PAN-OS 升級若插入新欄位，後端 Index 全面錯位導致解析崩潰。 | ✔️ **強健 (Key-Value)**。欄位完全解耦，新增未知欄位會被 Go 引擎優雅忽略，業務不中斷。 |
 | **冷資料原貌** | ⚠️ 雜亂的逗號分隔字串，肉眼難以閱讀排查。 | ✔️ 結構清晰的 JSON 封包，利於日後第三方 SIEM 系統匯入。 |
 
 ---
@@ -51,13 +51,9 @@
 ## ⚡ 高併發與多執行緒架構 (Goroutines & Concurrency)
 
 本系統深入運用 Go 語言原生的高併發優勢，透過 Goroutines 將任務分派至多核心平行運算：
-
-1. **DuckDB 3 路並行化 (`sync.WaitGroup`)**
-   日誌檢索同時發動 3 個獨立 Goroutine：算總數與 Top排行、算直方圖、撈取分頁明細。三個最耗時的 I/O 任務完全重疊，將查詢延遲縮減 30%~50%。
-2. **15 執行緒非同步 DNS 工作池 (Worker Pool)**
-   解析數千筆 IP 時，建立包含 15 個併發 Worker 的通道佇列，遇到 DNS 逾時的 IP 不會卡死主執行緒，確保解析流暢。
-3. **記憶體佇列與消費者管線 (Lock-Free Atomics)**
-   主監聽執行緒只負責快速接收 JSON/UDP 解碼，以無鎖原子操作推進萬級 Channel；後端 Consumer Goroutine 每 3 秒定時落盤，讀寫完全解耦，保障最高網路吞吐。
+1. **DuckDB 3 路並行化 (`sync.WaitGroup`)**：日誌檢索同時發動 3 個獨立 Goroutine 處理總數、直方圖與分頁明細。三個最耗時的 I/O 任務完全重疊，將查詢延遲縮減 30%~50%。
+2. **15 執行緒非同步 DNS 工作池 (Worker Pool)**：建立包含 15 個併發 Worker 的通道佇列，遇到 DNS 逾時不會卡死主執行緒。
+3. **記憶體佇列與消費者管線 (Lock-Free Atomics)**：主監聽只負責快速接收解碼，以無鎖原子操作推進 Channel；後端 Consumer 每 3 秒定時落盤，讀寫完全解耦，保障最高網路吞吐。
 
 ---
 
@@ -79,27 +75,60 @@ dhcpxml-go/
 ├── threat_logs/                # 威脅「熱資料」目錄
 ├── threat_raw_logs/            # 威脅「冷資料」目錄
 └── templates/                  # 前端 Web 介面 (Pongo2 樣板引擎)
-    ├── base.html               # 核心共用框架
-    ├── dhcp.html               # DHCP 租約與 ARP 聯防管理前端
-    ├── traffic.html            # 流量分析前端
-    └── threat.html             # 威脅分析前端
 ```
 
 ---
 
-## 🔄 關鍵 API 端點參考
+## 🔄 API 端點與命令列 (CURL) 呼叫參考
 
-系統提供完整 HTTP API，防火牆或外部系統可直接呼叫：
+系統提供完整 HTTP API，防火牆或外部系統可直接呼叫，亦可透過 Windows `curl.exe` 執行自動化排程：
 
 ### 1. Webhook 接收端點 (供 PA-1420 Log Forwarding 設定)
 * **流量日誌 (Traffic)**：`POST http://<伺服器IP>:5006/api/webhook/traffic`
 * **威脅日誌 (Threat)**：`POST http://<伺服器IP>:5006/api/webhook/threat`
-*(接收到 Payload 後，伺服器會立即回傳 HTTP 200 OK，並於背景執行冷熱分流落盤)*
+  *(接收到 Payload 後，伺服器會立即回傳 HTTP 200 OK，並於背景非同步執行冷熱分流落盤)*
 
-### 2. 歷史日誌單輪回溯 (Backfill)
-觸發背景引擎執行 1 輪 (`1 round = 5,000 筆`) 的歷史回溯，自動偵測斷點向過去深挖。
-* **回溯歷史流量**：`curl -X POST http://127.0.0.1:5006/api/traffic-backfill -d "rounds=1&date=2026-10-24"`
-* **回溯歷史威脅**：`curl -X POST http://127.0.0.1:5006/api/threat-backfill -d "rounds=1"`
+### 2. 即時最新日誌擷取 API (Fetch Now)
+立即向防火牆拉取「當下」最新產生的高達 5000 筆日誌並寫入 Parquet（適用於無 Webhook 轉發時的排程抓取）。
+* **擷取最新流量 (Traffic)**：
+  ```cmd
+  curl.exe -X POST http://127.0.0.1:5006/api/traffic-fetch-now -d "count=5000"
+  ```
+* **擷取最新資安威脅 (Threat)**：
+  ```cmd
+  curl.exe -X POST http://127.0.0.1:5006/api/threat-fetch-now -d "count=5000"
+  ```
+
+### 3. 歷史日誌單輪回溯 API (Backfill)
+觸發背景引擎執行 1 輪 (`1 round = 5,000 筆`) 的歷史回溯，自動偵測 Parquet 最舊斷點向過去深挖。
+* **回溯歷史流量 (需指定日期)**：
+  ```cmd
+  curl.exe -X POST http://127.0.0.1:5006/api/traffic-backfill -d "rounds=1&date=2026-10-24"
+  ```
+* **回溯歷史威脅 (全自動銜接，無須指定日期)**：
+  ```cmd
+  curl.exe -X POST http://127.0.0.1:5006/api/threat-backfill -d "rounds=1"
+  ```
+
+---
+
+## 🔄 歷史日誌自動化回溯腳本 (.bat)
+
+專為 Windows 環境設計的斷點續傳純 CMD 自動化腳本：
+
+1. **單日目標回溯：`auto_backfill_day.bat`**
+   遞迴推進，直到跨越當日 00:00:00 自動停機。
+   ```cmd
+   auto_backfill_day.bat 2026-10-24
+   auto_backfill_day.bat 2026-10-24 18:30:00  (指定倒推起點)
+   auto_backfill_day.bat 2026-10-24 threat    (威脅日誌專用)
+   ```
+2. **全自動跨日歷史推進：`auto_backfill_to_limit.bat`**
+   系統自動深挖過往天數，直到遭遇防火牆實體硬體儲存 FIFO 極限 (自動探測 `LIMIT`)。
+   ```cmd
+   auto_backfill_to_limit.bat
+   auto_backfill_to_limit.bat threat
+   ```
 
 ---
 
@@ -111,9 +140,8 @@ dhcpxml-go/
    go build -trimpath -ldflags="-s -w" -o PA1420_Monitor.exe .
    ```
 2. **準備 DuckDB 查詢引擎**：前往 [DuckDB 官方 GitHub Releases](https://github.com/duckdb/duckdb/releases/latest) 下載 `duckdb_cli-windows-amd64.zip`，解壓縮出 `duckdb.exe` 並放入根目錄。
-3. **啟動服務**：確保 `pa1420key.txt` 配置檔與前端樣板就緒後，直接雙擊 `PA1420_Monitor.exe`。
-4. 系統即在背景啟動 HTTP (Port 5006) 與 UDP (Port 514) 雙引擎監聽，請使用瀏覽器訪問 `http://localhost:5006`。
+3. **啟動服務**：確保配置檔與前端樣板就緒後，直接雙擊 `PA1420_Monitor.exe`。系統即在背景啟動 HTTP (Port 5006) 與 UDP (Port 514) 雙引擎監聽。
+4. 使用瀏覽器訪問 `http://localhost:5006`。
 
 ---
 **License**: [MIT License](https://opensource.org/licenses/MIT)
-`
