@@ -38,6 +38,8 @@ var (
 	paConfigFile string
 	trafficDir   string
 	threatDir    string // 👈 威脅日誌專屬目錄路徑
+	trafficRawDir string // 👈 新增：流量原始冷資料目錄
+	threatRawDir  string // 👈 新增：威脅原始冷資料目錄
 	dbConn       *sql.DB
 	dbMutex      sync.Mutex
 	
@@ -62,6 +64,10 @@ var (
 		Done:      0,
 	}
 	dnsMutex sync.RWMutex
+	
+	// 🌟 冷資料 Raw 專屬批次寫入佇列
+	rawTrafficQueue = make(chan RawLogParquetRow, 50000)
+	rawThreatQueue  = make(chan RawLogParquetRow, 10000)
 
 	// 🌟 Syslog 即時接收佇列與 Flush 狀態統計
 	syslogQueue                = make(chan TrafficParquetRow, 50000)
@@ -194,6 +200,7 @@ type TrafficEntry struct {
 	SessionEndReason string `xml:"session_end_reason"`
 	Bytes            int64  `xml:"bytes"`
 	SessionID        string `xml:"sessionid"`
+	RawXML           string `xml:",innerxml"` // 🌟 核心關鍵：將防火牆回傳的整段原始 XML 內容完整截獲
 }
 
 type TrafficParquetRow struct {
@@ -230,6 +237,14 @@ type ThreatEntry struct {
 	Severity      string `xml:"severity"`
 	URL           string `xml:"misc"`
 	SessionID     string `xml:"sessionid"`
+	RawXML        string `xml:",innerxml"` // 👈 補上這行，解決 e.RawXML 編譯錯誤！
+}
+
+// 🌟 冷資料備份用：極度精簡，只靠時間與 SessionID 定位，存放完整的 XML/Syslog
+type RawLogParquetRow struct {
+	Timestamp  string `parquet:"timestamp,zstd"`
+	SessionID  string `parquet:"session_id,zstd"`
+	RawContent string `parquet:"raw_content,zstd"`
 }
 
 type ThreatParquetRow struct {
@@ -314,6 +329,45 @@ type TrafficAnalyticsResult struct {
 	CurrentPage int               `json:"current_page"`
 	TotalPages  int               `json:"total_pages"`
 }
+
+// 🌟 獨立冷資料快速落盤機制 (Atomic .tmp 替換 + 依真實日期歸檔)
+func saveRawLogBatchFast(logType string, rows []RawLogParquetRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	targetDir := trafficRawDir
+	if logType == "threat" {
+		targetDir = threatRawDir
+	}
+
+	todayStr := time.Now().Format("2006-01-02")
+	entriesByDate := make(map[string][]RawLogParquetRow)
+
+	for _, r := range rows {
+		recordDate := todayStr
+		if len(r.Timestamp) >= 10 {
+			recordDate = r.Timestamp[:10]
+		}
+		entriesByDate[recordDate] = append(entriesByDate[recordDate], r)
+	}
+
+	for dateKey, dateRows := range entriesByDate {
+		chunkPath := filepath.Join(targetDir, fmt.Sprintf("%s_raw_%s_%d.parquet", logType, dateKey, time.Now().UnixNano()))
+		tmpPath := chunkPath + ".tmp"
+
+		if err := parquet.WriteFile(tmpPath, dateRows); err != nil {
+			_ = os.Remove(tmpPath)
+			fmt.Printf("[冷資料寫入失敗] ❌ %s: %v\n", chunkPath, err)
+			return err
+		}
+
+		_ = os.Rename(tmpPath, chunkPath)
+	}
+
+	return nil
+}
+
 // 🌟 支援時間條件向後回溯的 Threat API 擷取函式 (最多 5,000 筆)
 func fetchPAThreatLogsWithFilter(count int, filter string) ([]ThreatEntry, error) {
 	if count <= 0 {
@@ -405,9 +459,20 @@ func initCore() {
 	// 🌟 1. 建立威脅日誌專屬目錄 threat_logs
 	threatDir = filepath.Join(appDir, "threat_logs")
 	_ = os.MkdirAll(threatDir, 0755)
+	
+	// 🌟 新增建立 Raw 日誌專屬備份目錄
+	trafficRawDir = filepath.Join(appDir, "traffic_raw_logs")
+	_ = os.MkdirAll(trafficRawDir, 0755)
+
+	threatRawDir = filepath.Join(appDir, "threat_raw_logs")
+	_ = os.MkdirAll(threatRawDir, 0755)
 
 	// 🌟 2. 自動將根目錄現有的 threat_*.parquet 搬移歸位到 threat_logs/
 	rootThreatFiles, _ := filepath.Glob(filepath.Join(appDir, "threat_*.parquet"))
+	
+	// 🌟 啟動冷資料每小時自動維護整合排程
+	startHourlyRawConsolidator()
+	
 	for _, rf := range rootThreatFiles {
 		targetPath := filepath.Join(threatDir, filepath.Base(rf))
 		if _, err := os.Stat(targetPath); os.IsNotExist(err) {
@@ -1282,15 +1347,19 @@ func ConsolidateParquetFiles() (int, int, error) {
 		globPath := filepath.ToSlash(filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", dateKey)))
 		tmpSlash := filepath.ToSlash(tmpFile)
 
-		// 🦆 讓 DuckDB 執行 SQL：分組排序 -> 去重 (Row_Num=1) -> 存為 ZSTD Parquet
+		// 🦆 讓 DuckDB 執行 SQL：開啟 union_by_name=true，確保新舊結構無縫相容
 		copyQuery := fmt.Sprintf(`
 			COPY (
-				SELECT * EXCLUDE (row_num) FROM (
+				SELECT 
+					timestamp, type, from_zone, to_zone, source, nat_source_ip, 
+					destination, nat_dest_ip, to_port, application, action, rule, 
+					session_end_reason, bytes, session_id
+				FROM (
 					SELECT *, ROW_NUMBER() OVER (
 						PARTITION BY timestamp, source, destination, to_port, session_id 
 						ORDER BY timestamp DESC
 					) as row_num
-					FROM '%s'
+					FROM read_parquet('%s', union_by_name=true)
 				) WHERE row_num = 1
 				ORDER BY timestamp DESC
 			) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
@@ -1431,20 +1500,113 @@ func saveSyslogBatchFast(rows []TrafficParquetRow) (int, int, error) {
 	return len(rows), int(atomic.LoadInt64(&syslogReceivedCount)), nil
 }
 
-// 🌟 Threat Syslog 專屬極速落盤：直接寫入即時分塊 (耗時僅 2~5ms)
-func saveThreatSyslogBatchFast(rows []ThreatParquetRow) (int, int, error) {
-	if len(rows) == 0 {
-		return 0, 0, nil
+func saveTrafficLogsToParquet(entries []TrafficEntry) (int, int, error) {
+	var rows []TrafficParquetRow
+	var rawRows []RawLogParquetRow // 👈 準備冷資料陣列
+
+	for _, e := range entries {
+		ts := strings.ReplaceAll(strings.TrimSpace(e.Timestamp), "/", "-")
+		if ts == "" { ts = strings.ReplaceAll(strings.TrimSpace(e.ReceiveTime), "/", "-") }
+		
+		rows = append(rows, TrafficParquetRow{
+			Timestamp:        ts,
+			Type:             e.Type,
+			FromZone:         e.FromZone,
+			ToZone:           e.ToZone,
+			Source:           e.Source,
+			NatSourceIP:      e.NatSourceIP,
+			Destination:      e.Destination,
+			NatDestIP:        e.NatDestIP,
+			ToPort:           int32(e.ToPort),
+			Application:      e.Application,
+			Action:           e.Action,
+			Rule:             e.Rule,
+			SessionEndReason: e.SessionEndReason,
+			Bytes:            e.Bytes,
+			SessionID:        e.SessionID,
+		})
+
+		// 🌟 備份完整 XML 到冷資料
+		if strings.TrimSpace(e.RawXML) != "" {
+			rawRows = append(rawRows, RawLogParquetRow{
+				Timestamp:  ts,
+				SessionID:  e.SessionID,
+				RawContent: "<entry>" + e.RawXML + "</entry>",
+			})
+		}
+	}
+	
+	// 非同步把冷資料寫進 traffic_raw_logs/，完全不阻擋主線
+	go saveRawLogBatchFast("traffic", rawRows)
+	
+	return saveParquetRowsDirect(rows)
+}
+
+// -------------------------------------------------------------
+// 🌟 Syslog UDP 514 接收與解析雙引擎 (含 RawMessage 完整保留)
+// -------------------------------------------------------------
+func parsePaloAltoSyslog(msg string) (*TrafficParquetRow, error) {
+	if !strings.Contains(msg, "TRAFFIC") {
+		return nil, errors.New("not traffic log")
 	}
 
-	todayStr := time.Now().Format("2006-01-02")
-	chunkPath := filepath.Join(threatDir, fmt.Sprintf("threat_%s_live_%d.parquet", todayStr, time.Now().UnixNano()))
-
-	if err := parquet.WriteFile(chunkPath, rows); err != nil {
-		return 0, 0, err
+	reader := csv.NewReader(strings.NewReader(msg))
+	reader.FieldsPerRecord = -1
+	reader.LazyQuotes = true
+	fields, err := reader.Read()
+	if err != nil {
+		return nil, err
 	}
 
-	return len(rows), int(atomic.LoadInt64(&threatSyslogReceivedCount)), nil
+	idx := -1
+	for i, f := range fields {
+		if strings.TrimSpace(f) == "TRAFFIC" {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 || len(fields) <= idx+28 {
+		return nil, errors.New("insufficient fields")
+	}
+
+	rawTime := strings.TrimSpace(fields[idx+3])
+	if rawTime == "" && idx >= 2 {
+		rawTime = strings.TrimSpace(fields[idx-2])
+	}
+	formattedTime := strings.ReplaceAll(rawTime, "/", "-")
+
+	toPort, _ := strconv.Atoi(strings.TrimSpace(fields[idx+22]))
+	bytesVal, _ := strconv.ParseInt(strings.TrimSpace(fields[idx+28]), 10, 64)
+
+	endReason := ""
+	if len(fields) > idx+43 {
+		endReason = strings.TrimSpace(fields[idx+43])
+	}
+
+	row := &TrafficParquetRow{
+		Timestamp:        formattedTime,
+		Type:             strings.TrimSpace(fields[idx+1]),
+		FromZone:         strings.TrimSpace(fields[idx+13]),
+		ToZone:           strings.TrimSpace(fields[idx+14]),
+		Source:           strings.TrimSpace(fields[idx+4]),
+		NatSourceIP:      strings.TrimSpace(fields[idx+6]),
+		Destination:      strings.TrimSpace(fields[idx+5]),
+		NatDestIP:        strings.TrimSpace(fields[idx+7]),
+		ToPort:           int32(toPort),
+		Application:      strings.TrimSpace(fields[idx+11]),
+		Action:           strings.TrimSpace(fields[idx+27]),
+		Rule:             strings.TrimSpace(fields[idx+8]),
+		SessionEndReason: endReason,
+		Bytes:            bytesVal,
+		SessionID:        strings.TrimSpace(fields[idx+19]),
+	}
+
+	if row.Source == "" || row.Destination == "" {
+		return nil, errors.New("empty src/dst")
+	}
+
+	return row, nil
 }
 
 // 🌟 解析 Palo Alto THREAT Syslog 封包
@@ -1516,98 +1678,21 @@ func parsePaloAltoThreatSyslog(msg string) (*ThreatParquetRow, error) {
 	return row, nil
 }
 
-func saveTrafficLogsToParquet(entries []TrafficEntry) (int, int, error) {
-	var rows []TrafficParquetRow
-	for _, e := range entries {
-		rows = append(rows, TrafficParquetRow{
-			Timestamp:        e.Timestamp,
-			Type:             e.Type,
-			FromZone:         e.FromZone,
-			ToZone:           e.ToZone,
-			Source:           e.Source,
-			NatSourceIP:      e.NatSourceIP,
-			Destination:      e.Destination,
-			NatDestIP:        e.NatDestIP,
-			ToPort:           int32(e.ToPort),
-			Application:      e.Application,
-			Action:           e.Action,
-			Rule:             e.Rule,
-			SessionEndReason: e.SessionEndReason,
-			Bytes:            e.Bytes,
-			SessionID:        e.SessionID,
-		})
+// 🌟 威脅日誌極速分塊存檔
+func saveThreatSyslogBatchFast(rows []ThreatParquetRow) (int, int, error) {
+	if len(rows) == 0 {
+		return 0, 0, nil
 	}
-	// 👈 僅執行存檔與回傳，絕不碰觸 Syslog 狀態變數！
-	return saveParquetRowsDirect(rows)
+	todayStr := time.Now().Format("2006-01-02")
+	chunkPath := filepath.Join(threatDir, fmt.Sprintf("threat_%s_live_%d.parquet", todayStr, time.Now().UnixNano()))
+
+	if err := parquet.WriteFile(chunkPath, rows); err != nil {
+		return 0, 0, err
+	}
+	return len(rows), int(atomic.LoadInt64(&threatSyslogReceivedCount)), nil
 }
 
-// -------------------------------------------------------------
-// 🌟 Syslog UDP 514 接收與解析引擎
-// -------------------------------------------------------------
-func parsePaloAltoSyslog(msg string) (*TrafficParquetRow, error) {
-	if !strings.Contains(msg, "TRAFFIC") {
-		return nil, errors.New("not traffic log")
-	}
-
-	reader := csv.NewReader(strings.NewReader(msg))
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-	fields, err := reader.Read()
-	if err != nil {
-		return nil, err
-	}
-
-	idx := -1
-	for i, f := range fields {
-		if strings.TrimSpace(f) == "TRAFFIC" {
-			idx = i
-			break
-		}
-	}
-
-	if idx == -1 || len(fields) <= idx+28 {
-		return nil, errors.New("insufficient fields")
-	}
-
-	rawTime := strings.TrimSpace(fields[idx+3])
-	if rawTime == "" && idx >= 2 {
-		rawTime = strings.TrimSpace(fields[idx-2])
-	}
-	formattedTime := strings.ReplaceAll(rawTime, "/", "-")
-
-	toPort, _ := strconv.Atoi(strings.TrimSpace(fields[idx+22]))
-	bytesVal, _ := strconv.ParseInt(strings.TrimSpace(fields[idx+28]), 10, 64)
-
-	endReason := ""
-	if len(fields) > idx+43 {
-		endReason = strings.TrimSpace(fields[idx+43])
-	}
-
-	row := &TrafficParquetRow{
-		Timestamp:        formattedTime,
-		Type:             strings.TrimSpace(fields[idx+1]),
-		FromZone:         strings.TrimSpace(fields[idx+13]),
-		ToZone:           strings.TrimSpace(fields[idx+14]),
-		Source:           strings.TrimSpace(fields[idx+4]),
-		NatSourceIP:      strings.TrimSpace(fields[idx+6]),
-		Destination:      strings.TrimSpace(fields[idx+5]),
-		NatDestIP:        strings.TrimSpace(fields[idx+7]),
-		ToPort:           int32(toPort),
-		Application:      strings.TrimSpace(fields[idx+11]),
-		Action:           strings.TrimSpace(fields[idx+27]),
-		Rule:             strings.TrimSpace(fields[idx+8]),
-		SessionEndReason: endReason,
-		Bytes:            bytesVal,
-		SessionID:        strings.TrimSpace(fields[idx+19]),
-	}
-
-	if row.Source == "" || row.Destination == "" {
-		return nil, errors.New("empty src/dst")
-	}
-
-	return row, nil
-}
-
+// 🌟 雙引擎 Syslog 接收器 (熱資料與冷資料雙佇列分流)
 func startSyslogReceiver(port int) {
 	addr := &net.UDPAddr{Port: port}
 	conn, err := net.ListenUDP("udp", addr)
@@ -1630,11 +1715,22 @@ func startSyslogReceiver(port int) {
 		if strings.Contains(rawMsg, "THREAT") {
 			tRow, err := parsePaloAltoThreatSyslog(rawMsg)
 			if err == nil && tRow != nil {
+				// 1. 推入威脅熱資料佇列
 				select {
 				case threatSyslogQueue <- *tRow:
 					atomic.AddInt64(&threatSyslogReceivedCount, 1)
 				default:
 					atomic.AddInt64(&threatSyslogReceivedCount, 1)
+				}
+
+				// 2. 推入威脅冷資料佇列 (非同步備份原始字串)
+				select {
+				case rawThreatQueue <- RawLogParquetRow{
+					Timestamp:  tRow.Timestamp,
+					SessionID:  tRow.SessionID,
+					RawContent: strings.TrimSpace(rawMsg),
+				}:
+				default:
 				}
 			}
 			continue
@@ -1644,29 +1740,44 @@ func startSyslogReceiver(port int) {
 		if strings.Contains(rawMsg, "TRAFFIC") {
 			row, err := parsePaloAltoSyslog(rawMsg)
 			if err == nil && row != nil {
+				// 1. 推入流量熱資料佇列
 				select {
 				case syslogQueue <- *row:
 					atomic.AddInt64(&syslogReceivedCount, 1)
 				default:
 					atomic.AddInt64(&syslogReceivedCount, 1)
 				}
+
+				// 2. 推入流量冷資料佇列 (非同步備份原始字串)
+				select {
+				case rawTrafficQueue <- RawLogParquetRow{
+					Timestamp:  row.Timestamp,
+					SessionID:  row.SessionID,
+					RawContent: strings.TrimSpace(rawMsg),
+				}:
+				default:
+				}
 			}
 		}
 	}
 }
 
+// 🌟 雙引擎 Syslog 落盤排程器 (熱分析資料 + 冷原始資料 統一批次落盤)
 func startSyslogBatchFlusher() {
 	go func() {
-		ticker := time.NewTicker(3 * time.Second) // 3 秒極速 Flush
+		ticker := time.NewTicker(3 * time.Second) // 每 3 秒固定 Flush 一次
 		defer ticker.Stop()
 
 		var batch []TrafficParquetRow
 		var threatBatch []ThreatParquetRow
+		var rawTrafficBatch []RawLogParquetRow
+		var rawThreatBatch []RawLogParquetRow
+
 		chunkCounter := 0
 		threatChunkCounter := 0
 
 		flushNow := func() {
-			// 1. 處理流量批次落盤
+			// 1. 流量熱資料落盤
 			if len(batch) > 0 {
 				ins, tot, err := saveSyslogBatchFast(batch)
 				if err == nil {
@@ -1688,12 +1799,12 @@ func startSyslogBatchFlusher() {
 				batch = nil
 			}
 
-			// 2. 處理威脅批次落盤
+			// 2. 威脅熱資料落盤
 			if len(threatBatch) > 0 {
 				ins, tot, err := saveThreatSyslogBatchFast(threatBatch)
 				if err == nil {
 					syslogStatusMutex.Lock()
-					threatSyslogLastFlushCount = ins // 👈 記錄威脅本批入庫筆數
+					threatSyslogLastFlushCount = ins
 					threatSyslogLastFlushTime = time.Now()
 					syslogStatusMutex.Unlock()
 
@@ -1708,6 +1819,18 @@ func startSyslogBatchFlusher() {
 				}
 				threatBatch = nil
 			}
+
+			// 🌟 3. 流量冷資料 (Raw Parquet) 批次落盤
+			if len(rawTrafficBatch) > 0 {
+				_ = saveRawLogBatchFast("traffic", rawTrafficBatch)
+				rawTrafficBatch = nil
+			}
+
+			// 🌟 4. 威脅冷資料 (Raw Parquet) 批次落盤
+			if len(rawThreatBatch) > 0 {
+				_ = saveRawLogBatchFast("threat", rawThreatBatch)
+				rawThreatBatch = nil
+			}
 		}
 
 		for {
@@ -1719,7 +1842,17 @@ func startSyslogBatchFlusher() {
 				}
 			case tRow := <-threatSyslogQueue:
 				threatBatch = append(threatBatch, tRow)
-				if len(threatBatch) >= 50 { // 威脅事件較精確，累積滿 50 筆即提早入庫
+				if len(threatBatch) >= 50 {
+					flushNow()
+				}
+			case rawRow := <-rawTrafficQueue:
+				rawTrafficBatch = append(rawTrafficBatch, rawRow)
+				if len(rawTrafficBatch) >= 1000 {
+					flushNow()
+				}
+			case rawTRow := <-rawThreatQueue:
+				rawThreatBatch = append(rawThreatBatch, rawTRow)
+				if len(rawThreatBatch) >= 50 {
 					flushNow()
 				}
 			case <-ticker.C:
@@ -2078,12 +2211,15 @@ func ConsolidateThreatParquetFiles() (int, int, error) {
 
 		copyQuery := fmt.Sprintf(`
 			COPY (
-				SELECT * EXCLUDE (row_num) FROM (
+				SELECT 
+					timestamp, subtype, threat_id, threat_name, from_zone, to_zone, 
+					src, dst, to_port, application, action, severity, url, session_id
+				FROM (
 					SELECT *, ROW_NUMBER() OVER (
 						PARTITION BY timestamp, src, dst, threat_name, action 
 						ORDER BY timestamp DESC
 					) as row_num
-					FROM '%s'
+					FROM read_parquet('%s', union_by_name=true)
 				) WHERE row_num = 1
 				ORDER BY timestamp DESC
 			) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
@@ -2113,26 +2249,123 @@ func ConsolidateThreatParquetFiles() (int, int, error) {
 	return totalMergedFiles, 0, nil
 }
 
-// 🌟 Threat 每日單一主檔寫入 (Atomic .tmp 替換，支援 ZSTD 列式儲存)
+// 🌟 冷資料 Raw Parquet 多檔自動整併器 (DuckDB 向量引擎接管)
+func ConsolidateRawParquetFiles(logType string) (int, error) {
+	targetDir := trafficRawDir
+	if logType == "threat" {
+		targetDir = threatRawDir
+	}
+
+	entries, err := os.ReadDir(targetDir)
+	if err != nil {
+		return 0, err
+	}
+
+	dateFiles := make(map[string][]string)
+	re := regexp.MustCompile(fmt.Sprintf(`^%s_raw_(\d{4}-\d{2}-\d{2})`, logType))
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".parquet") || strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		if m := re.FindStringSubmatch(e.Name()); len(m) > 1 {
+			dateFiles[m[1]] = append(dateFiles[m[1]], filepath.Join(targetDir, e.Name()))
+		}
+	}
+
+	totalMerged := 0
+	for dateKey, files := range dateFiles {
+		targetMainFile := filepath.Join(targetDir, fmt.Sprintf("%s_raw_%s.parquet", logType, dateKey))
+		// 如果目錄裡只有該日期唯一的已整併主檔，跳過不重做
+		if len(files) <= 1 && files[0] == targetMainFile {
+			continue
+		}
+
+		fmt.Printf("[冷資料整併] ⏳ 正在整併 %s %s 原始資料 (%d 個檔案)...\n", dateKey, logType, len(files))
+
+		tmpFile := targetMainFile + ".tmp"
+		globPath := filepath.ToSlash(filepath.Join(targetDir, fmt.Sprintf("%s_raw_%s*.parquet", logType, dateKey)))
+		tmpSlash := filepath.ToSlash(tmpFile)
+
+		copyQuery := fmt.Sprintf(`
+			COPY (
+				SELECT timestamp, session_id, raw_content FROM (
+					SELECT *, ROW_NUMBER() OVER (
+						PARTITION BY timestamp, session_id 
+						ORDER BY timestamp DESC
+					) as row_num
+					FROM read_parquet('%s', union_by_name=true)
+				) WHERE row_num = 1
+				ORDER BY timestamp DESC
+			) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
+		`, globPath, tmpSlash)
+
+		_, err := runDuckDBQuery(copyQuery)
+		if err != nil {
+			_ = os.Remove(tmpFile)
+			fmt.Printf("[冷資料整併] ❌ 失敗: %v\n", err)
+			continue
+		}
+
+		_ = os.Remove(targetMainFile)
+		if err := os.Rename(tmpFile, targetMainFile); err == nil {
+			for _, f := range files {
+				if f != targetMainFile {
+					_ = os.Remove(f)
+					totalMerged++
+				}
+			}
+			fmt.Printf("[冷資料整併] ✅ %s %s 成功合併為主檔，已清除 %d 個分塊。\n", dateKey, logType, len(files)-1)
+		} else {
+			_ = os.Remove(tmpFile)
+		}
+	}
+
+	return totalMerged, nil
+}
+
+// 🌟 每小時自動執行一次冷資料整併 (定時 60 分鐘循環)
+func startHourlyRawConsolidator() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			fmt.Printf("[%s] ⏱️ 冷資料每小時維護排程觸發...\n", time.Now().Format("15:04:05"))
+			go ConsolidateRawParquetFiles("traffic")
+			go ConsolidateRawParquetFiles("threat")
+		}
+	}()
+}
+
+// 🌟 Threat 每日單一主檔寫入 (主分析檔維持純淨欄位 + 原始 XML 獨立寫入備份檔)
 func saveThreatLogsToParquet(entries []ThreatEntry) (int, int, error) {
-	if len(entries) == 0 { return 0, 0, nil }
+	if len(entries) == 0 {
+		return 0, 0, nil
+	}
 
 	threatFileMutex.Lock()
 	defer threatFileMutex.Unlock()
 
+	var rawRows []RawLogParquetRow // 👈 收集獨立冷資料 (Raw XML)
 	entriesByDate := make(map[string][]ThreatParquetRow)
+
 	for _, e := range entries {
 		tName := strings.TrimSpace(e.ThreatName)
-		if tName == "" { tName = strings.TrimSpace(e.ThreatID) }
+		if tName == "" {
+			tName = strings.TrimSpace(e.ThreatID)
+		}
 
-		// 👈 關鍵修正：從 TimeGenerated 提取時間，若為空則以 ReceiveTime 備援
+		// 從 TimeGenerated 提取時間，若為空則以 ReceiveTime 備援
 		ts := strings.TrimSpace(e.TimeGenerated)
 		if ts == "" {
 			ts = strings.TrimSpace(e.ReceiveTime)
 		}
+		ts = strings.ReplaceAll(ts, "/", "-")
 
+		// 1. 組裝純淨的分析主檔記錄 (不混雜巨大 XML)
 		row := ThreatParquetRow{
-			Timestamp:   ts, // 👈 帶入正確提取的時間字串
+			Timestamp:   ts,
 			Subtype:     strings.TrimSpace(e.Subtype),
 			ThreatID:    strings.TrimSpace(e.ThreatID),
 			ThreatName:  tName,
@@ -2149,8 +2382,26 @@ func saveThreatLogsToParquet(entries []ThreatEntry) (int, int, error) {
 		}
 
 		recordDate := time.Now().Format("2006-01-02")
-		if len(row.Timestamp) >= 10 { recordDate = row.Timestamp[:10] }
+		if len(row.Timestamp) >= 10 {
+			recordDate = row.Timestamp[:10]
+		}
 		entriesByDate[recordDate] = append(entriesByDate[recordDate], row)
+
+		// 2. 🌟 收集完整原始 XML 資料串到冷資料陣列
+		if strings.TrimSpace(e.RawXML) != "" {
+			rawRows = append(rawRows, RawLogParquetRow{
+				Timestamp:  ts,
+				SessionID:  strings.TrimSpace(e.SessionID),
+				RawContent: "<entry>" + e.RawXML + "</entry>",
+			})
+		}
+	}
+
+	// 3. 🌟 非同步將完整 XML 寫入 threat_raw_logs/，完全不拖慢主執行緒
+	if len(rawRows) > 0 {
+		go func(r []RawLogParquetRow) {
+			_ = saveRawLogBatchFast("threat", r)
+		}(rawRows)
 	}
 
 	totalInserted := 0
@@ -2418,7 +2669,4 @@ func queryThreatAnalytics(queryDate, src, dst, severity, action, threatName stri
 		TotalPages:    totalPages,
 	}, nil
 }
-
-
-
 
