@@ -314,11 +314,14 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 	}
 
 	// 清理臨時 CSV
-	log("[4/4 空間清理] 🧹 正在清理 %d 個臨時 CSV 檔案...", len(matches))
+	// 🌟 清理臨時 CSV 並一併移除當日空資料夾
+	log("[4/4 空間清理] 🧹 正在清理臨時 CSV 檔案與目錄...")
 	for _, f := range matches {
 		_ = os.Remove(f)
 	}
-	log(" 清理完成！\n")
+	// 移除該日期的暫存資料夾 (若資料夾內 CSV 都已清空，可直接移除)
+	_ = os.Remove(req.FTPFolder)
+	log(" 清理完成！(已移除 %s)\n", filepath.Base(req.FTPFolder))
 
 	// 🌟 核心新增：轉檔完成後，立刻啟動 DuckDB 去重整併 (將歷史舊檔與新分塊無縫去重合併)
 	log("[5/5 資料整併] 🔄 正在由 DuckDB 自動執行去重整併...\n")

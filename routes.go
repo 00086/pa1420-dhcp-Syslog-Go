@@ -1233,8 +1233,22 @@ func registerRoutes(r *gin.Engine) {
 			return
 		}
 
-		if req.Date == "" || req.FTPFolder == "" {
-			c.String(http.StatusBadRequest, "❌ 缺少必要參數 (需具備 date 與 ftp_folder)\n")
+		if req.Date == "" {
+			c.String(http.StatusBadRequest, "❌ 缺少必要參數 (需具備 date)\n")
+			return
+		}
+
+		// 🌟 1. 改為專案目錄下的相對路徑 ftp_data/<日期>，不再寫死任何磁碟代號
+		if req.FTPFolder == "" {
+			req.FTPFolder = filepath.Join("ftp_data", req.Date)
+		}
+		if !filepath.IsAbs(req.FTPFolder) {
+			req.FTPFolder = filepath.Join(appDir, req.FTPFolder)
+		}
+
+		// 🌟 2. 自動檢查並建立 ftp_data 及當前日期子目錄
+		if err := os.MkdirAll(req.FTPFolder, 0755); err != nil {
+			c.String(http.StatusInternalServerError, "❌ 建立 FTP 匯出目錄失敗: %v\n", err)
 			return
 		}
 

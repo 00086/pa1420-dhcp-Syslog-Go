@@ -6,9 +6,18 @@
 
 ---
 
+## 🆕 更新亮點
+* **🌐 NAS 歷史日誌多檔案智能匯入**：Web 介面支援按住 `Ctrl/Shift` 一次選取多個 Synology NAS 匯出檔 (.txt/.csv)。系統會全自動解析檔案內的所有日期與日誌類型 (Traffic/Threat)，**「逐日自動切分落盤」**，完全不需人工輸入日期！
+* **🎯 百萬級精確報文錨定解析**：捨棄傳統死板的字元偏移量，改以 `,TRAFFIC,` 與 `,THREAT,` 特徵錨定技術，並動態補正 117 欄位，徹底解決 Synology 匯出格式前綴變動導致的漏抓問題（實測將 340 萬筆被誤濾的日誌 100% 完美還原）。
+* **🔄 DuckDB 全自動背景整併 (Auto-Consolidation)**：新增每小時整點觸發的背景維護引擎，以及 CLI 匯出後的即時整併。系統會自動將零碎的即時串流塊 (`_live_`) 與臨時檔 (`_nas_`) 執行嚴格去重，合併為每日單一純淨 ZSTD 主檔。
+* **📅 極致流暢的原生 UI 體驗**：前端查詢日期輸入全面升級為 HTML5 原生月曆挑選器 (`showPicker`)，點擊即彈出，捨棄繁瑣的手動輸入與肥大的下拉選單。
+* **📂 動態相對路徑支援**：CLI FTP 高速匯出 (`ftppa.bat`) 已全面解耦絕對路徑，採用動態生成與自動銷毀的 `ftp_data/` 相對目錄，程式搬到任何磁碟機皆可隨插即用。
+
+---
+
 ## 🌟 系統核心功能特性
 
-### 1. DHCP 網路租約與 ARP 聯防 (dhcp.html)
+### 1. DHCP 網路租約與 ARP 聯防
 **本系統最初開發的核心基礎模組**，專注於內部網路的實體設備與 IP 分配安全：
 * **DHCP 租約追蹤**：排程自動透過 XML API 擷取防火牆最新 DHCP 租約，自動排除重複紀錄並建立完整的設備歷史上線軌跡。
 * **ARP 交叉聯防比對**：即時比對防火牆的 `show arp all` 紀錄，精準揪出「手動設定固定 IP 的未授權私設設備」或「IP/MAC 衝突」的潛在管理盲區。
@@ -33,11 +42,11 @@
 * **跨格式無縫融合**：
   透過 API 回溯的原生 XML 日誌，經過 Go 引擎正規化後，能與 Webhook 即時寫入的 JSON 日誌完美融合於同一張 Parquet 數據表中，對前端查詢完全透明。
 
-### 5. 內建輕量化 FTP 伺服器與 CLI 高速自動化匯出 🌟 (新架構)
+### 5. 內建輕量化 FTP 伺服器與 CLI 高速自動化匯出 🌟 
 針對單日百萬筆歷史日誌的「大補帖式」還原，系統已整合 **Go 原生內建 FTP 伺服器** 與 **SSH 模擬登入自動化** 引擎，達成零外部依賴的極速管線：
 * **純 Go 內建 FTP 接收器 (Port 21)**：直接於 `PA1420_Monitor.exe` 內部接管 Port 21 (支援 PASV / PORT 模式)，徹底免除安裝 Python 或第三方 FTP 軟體的需求。
 * **自動化 PTY 虛擬終端登入**：自動透過 SSH 連線至 PA 防火牆、請求 PTY 虛擬終端，並模擬管理員敲擊 `ftp export log...` 指令，將 200 多萬筆資料觸發串流傾印。
-* **全自動湖倉整合**：自動監控並接收防火牆切分的 34 個 CSV 區塊（避開 PA 記憶體單檔 6 萬筆上限），接收完畢後 0.1 秒內由 DuckDB 向量化引擎自動接手，執行全核心平行處理，數秒內完成冷熱分離與 Parquet 落盤，並自動清理暫存。
+* **全自動湖倉整合與空間清理**：自動監控並接收防火牆切分的 CSV 區塊。接收完畢後 0.1 秒內由 DuckDB 向量化引擎自動接手，執行全核心平行冷熱分離，**並於完成後自動刪除臨時 CSV 與 `ftp_data` 資料夾，隨即呼叫背景執行緒完成終極去重整併。**
 
 ---
 
@@ -89,18 +98,18 @@
 ```text
 dhcpxml-go/
 ├── main.go                     # 程式進入點、排程器、HTTP 路由與內建 FTP 伺服器啟動
-├── core.go                     # 核心邏輯 (多執行緒、Parquet、DuckDB、Syslog/Webhook JSON)
-├── routes.go                   # Web API 端點、Webhook 接收器與 HTTP Chunked 串流
-├── cli_export.go               # PA-1420 虛擬終端 PTY 自動化登入與 DuckDB 湖倉轉換核心
+├── core.go                     # 核心邏輯 (多執行緒、Parquet 落盤、背景去重、解析引擎)
+├── routes.go                   # Web API 端點、Webhook 接收器與動態相對路徑處理
+├── cli_export.go               # PA-1420 虛擬終端自動化登入與 DuckDB 湖倉轉換核心
 ├── ftp_server.go               # Go 原生輕量化 FTP 伺服器 (支援 PASV / PORT)
 ├── go.mod / go.sum             # Go 模組依賴清單
 ├── duckdb.exe                  # 🦆 DuckDB 向量化查詢引擎 (需手動下載)
-├── ftppa.bat                   # CLI 高速串流匯出與自動整合批次檔 (支援 Autofill)
+├── ftppa.bat                   # CLI 高速串流匯出批次檔 (相對路徑支援，自動去重)
 ├── auto_backfill_day.bat       # 單日歷史接力回溯批次檔 (XML API 方案)
 ├── auto_backfill_to_limit.bat  # 全自動跨日歷史推進批次檔 (XML API 方案)
 ├── pa1420key.txt               # 系統防護庫 (存放 PA IP、API Key、SSH 帳密與 FTP 帳密)
 ├── dhcp_records.db             # SQLite 資料庫 (DHCP、ARP、系統狀態)
-├── ftp_data/                   # FTP 臨時接收資料夾 (分塊 CSV 落地處，轉檔後自動清理)
+├── ftp_data/                   # FTP 臨時接收資料夾 (動態建立，任務完成後自動銷毀)
 ├── traffic_logs/               # 流量「熱資料」目錄 (結構化 Parquet)
 ├── traffic_raw_logs/           # 流量「冷資料」目錄 (原始 JSON/XML Parquet)
 ├── threat_logs/                # 威脅「熱資料」目錄
@@ -108,8 +117,9 @@ dhcpxml-go/
 └── templates/                  # 前端 Web 介面 (Pongo2 樣板引擎)
     ├── base.html               
     ├── dhcp.html               # DHCP 租約與 ARP 聯防管理前端
-    ├── traffic.html            # 流量分析前端 
+    ├── traffic.html            # 流量分析前端 (原生 HTML5 月曆)
     └── threat.html             # 威脅分析前端
+
 ```
 
 ---
@@ -117,6 +127,7 @@ dhcpxml-go/
 ## ⚙️ 防火牆連線配置 (`pa1420key.txt`)
 
 首次啟動時系統自動建立範本檔，為確保 API 連線與自動化 SSH / FTP 功能正常運作，請依序配置七行內容：
+
 ```text
 192.168.1.1
 ethernet1/1
@@ -125,7 +136,9 @@ FWusername
 （您的防火牆 SSH 密碼）
 username
 password
+
 ```
+
 *(第 1 行: 防火牆 IP | 第 2 行: 監控介面 | 第 3 行: API 金鑰 | 第 4-5 行: PA SSH 帳密 | 第 6-7 行: 內建 FTP 帳密)*
 
 ---
@@ -135,31 +148,50 @@ password
 系統提供完整 HTTP API，防火牆或外部系統可直接呼叫，亦可透過 Windows `curl.exe` 執行自動化排程：
 
 ### 1. Webhook 接收端點 (供 PA-1420 Log Forwarding 設定)
+
 * **流量日誌 (Traffic)**：`POST http://<伺服器IP>:5006/api/webhook/traffic`
 * **威脅日誌 (Threat)**：`POST http://<伺服器IP>:5006/api/webhook/threat`
-  *(伺服器接收到 JSON Payload 後會立即秒回 HTTP 200 OK，並於背景非同步執行冷熱分流落盤)*
+*(伺服器接收到 JSON Payload 後會立即秒回 HTTP 200 OK，並於背景非同步執行冷熱分流落盤)*
 
 ### 2. 即時最新日誌擷取 API (Fetch Now)
+
 立即向防火牆拉取「當下」最新產生的高達 5000 筆日誌並寫入 Parquet（適用於無 Webhook 轉發時的定時排程抓取）。
+
 * **擷取最新流量 (Traffic)**：
-  ```cmd
-  curl.exe -X POST http://127.0.0.1:5006/api/traffic-fetch-now -d "count=5000"
-  ```
+
+```cmd
+  curl.exe -X POST [http://127.0.0.1:5006/api/traffic-fetch-now](http://127.0.0.1:5006/api/traffic-fetch-now) -d "count=5000"
+  
+
+```
+
 * **擷取最新資安威脅 (Threat)**：
-  ```cmd
-  curl.exe -X POST http://127.0.0.1:5006/api/threat-fetch-now -d "count=5000"
-  ```
+
+```cmd
+  curl.exe -X POST [http://127.0.0.1:5006/api/threat-fetch-now](http://127.0.0.1:5006/api/threat-fetch-now) -d "count=5000"
+  
+
+```
 
 ### 3. 歷史日誌單輪回溯 API (Backfill)
+
 觸發背景引擎執行 1 輪 (`1 round = 5,000 筆`) 的歷史回溯，自動偵測 Parquet 最舊斷點向過去深挖。
+
 * **回溯歷史流量 (需指定日期)**：
-  ```cmd
-  curl.exe -X POST http://127.0.0.1:5006/api/traffic-backfill -d "rounds=1&date=2026-10-24"
-  ```
+
+```cmd
+  curl.exe -X POST [http://127.0.0.1:5006/api/traffic-backfill](http://127.0.0.1:5006/api/traffic-backfill) -d "rounds=1&date=2026-10-24"
+  
+
+```
+
 * **回溯歷史威脅 (全自動銜接，無須指定日期)**：
-  ```cmd
-  curl.exe -X POST http://127.0.0.1:5006/api/threat-backfill -d "rounds=1"
-  ```
+
+```cmd
+  curl.exe -X POST [http://127.0.0.1:5006/api/threat-backfill](http://127.0.0.1:5006/api/threat-backfill) -d "rounds=1"
+  
+
+```
 
 ---
 
@@ -168,41 +200,60 @@ password
 專為 Windows 環境設計的斷點續傳純 CMD 自動化腳本：
 
 ### 1. CLI 高速匯出與湖倉自動整合（推薦使用🌟）
+
 透過內建 FTP 伺服器與 PTY 虛擬終端，單日百萬筆連線僅需 2~3 分鐘即可完成匯出、冷熱分離與 DuckDB 壓縮落盤。
-* **腳本：`ftppa.bat`**
-  ```cmd
+
+* **腳本：`ftppa.bat**`
+
+```cmd
   ftppa.bat 2026-10-24           (預設匯出 traffic 流量日誌)
   ftppa.bat 2026-10-24 threat    (指定匯出 threat 威脅日誌)
   ftppa.bat                      (無參數執行時將提供互動式選單)
-  ```
+  
+
+```
 
 ### 2. XML API 歷史回溯方案
+
 採用 API 輪詢機制，適合即時少量補檔或斷點續傳。
-* **單日目標回溯：`auto_backfill_day.bat`**
-  遞迴推進，直到跨越當日 00:00:00 自動停機。
-  ```cmd
+
+* **單日目標回溯：`auto_backfill_day.bat**`
+遞迴推進，直到跨越當日 00:00:00 自動停機。
+
+```cmd
   auto_backfill_day.bat 2026-10-24
   auto_backfill_day.bat 2026-10-24 18:30:00  (指定倒推起點)
   auto_backfill_day.bat 2026-10-24 threat    (威脅日誌專用)
-  ```
-* **全自動跨日歷史推進：`auto_backfill_to_limit.bat`**
-  系統自動深挖過往天數，直到遭遇防火牆實體硬體儲存 FIFO 極限。
-  ```cmd
+  
+
+```
+
+* **全自動跨日歷史推進：`auto_backfill_to_limit.bat**`
+系統自動深挖過往天數，直到遭遇防火牆實體硬體儲存 FIFO 極限。
+
+```cmd
   auto_backfill_to_limit.bat
-  ```
+  
+
+```
 
 ---
 
 ## 🚀 專案部署與啟動指南
 
 1. **編譯 Go 後端程式**：
-   ```cmd
+
+```cmd
    go mod tidy
    go build -trimpath -ldflags="-s -w" -o PA1420_Monitor.exe .
-   ```
+   
+
+```
+
 2. **準備 DuckDB 查詢引擎**：前往 [DuckDB 官方 GitHub Releases](https://github.com/duckdb/duckdb/releases/latest) 下載 `duckdb_cli-windows-amd64.zip`，解壓縮出 `duckdb.exe` 並放入專案根目錄。
 3. **啟動服務**：確保配置檔與前端樣板就緒後，直接雙擊 `PA1420_Monitor.exe`。系統即在背景自動啟動 HTTP (Port 5006)、UDP Syslog (Port 514) 以及 FTP 接收端 (Port 21)。
 4. 使用瀏覽器訪問 `http://localhost:5006`。
 
 ---
+
 **License**: [MIT License](https://opensource.org/licenses/MIT)

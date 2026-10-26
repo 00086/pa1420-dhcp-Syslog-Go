@@ -53,7 +53,6 @@ echo.
 curl.exe -N -X POST http://127.0.0.1:5006/api/cli-export ^
   -d "log_type=%TARGET_TYPE%" ^
   -d "date=%TARGET_DATE%" ^
-  -d "ftp_folder=C:\python\dhcpxml-go\ftp_data"
 
 echo.
 echo ========================================================
