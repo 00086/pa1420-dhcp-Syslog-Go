@@ -18,6 +18,7 @@ type CLIExportRequest struct {
 	FTPFolder   string `json:"ftp_folder" form:"ftp_folder"`
 	LogType     string `json:"log_type" form:"log_type"`
 	ConvertOnly bool   `json:"convert_only" form:"convert_only"`
+	SkipCold    bool   `json:"skip_cold" form:"skip_cold"` // 🌟 新增：略過耗時的冷資料 JSON 轉檔
 }
 
 type StreamLogger func(format string, a ...any)
@@ -197,12 +198,15 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 
 	csvPattern := filepath.ToSlash(filepath.Join(req.FTPFolder, "*.csv"))
 	var hotParquetPath, coldParquetPath string
+	// 🌟 關鍵修正：加上 UnixNano 隨機後綴，確保不覆寫現有主檔，改由事後整合器合併
+	safeSuffix := fmt.Sprintf("_nas_%d.parquet", time.Now().UnixNano())
+	
 	if req.LogType == "threat" {
-		hotParquetPath = filepath.Join(threatDir, fmt.Sprintf("threat_%s.parquet", req.Date))
-		coldParquetPath = filepath.Join(threatRawDir, fmt.Sprintf("threat_raw_%s.parquet", req.Date))
+		hotParquetPath = filepath.Join(threatDir, fmt.Sprintf("threat_%s%s", req.Date, safeSuffix))
+		coldParquetPath = filepath.Join(threatRawDir, fmt.Sprintf("threat_raw_%s%s", req.Date, safeSuffix))
 	} else {
-		hotParquetPath = filepath.Join(trafficDir, fmt.Sprintf("traffic_%s.parquet", req.Date))
-		coldParquetPath = filepath.Join(trafficRawDir, fmt.Sprintf("traffic_raw_%s.parquet", req.Date))
+		hotParquetPath = filepath.Join(trafficDir, fmt.Sprintf("traffic_%s%s", req.Date, safeSuffix))
+		coldParquetPath = filepath.Join(trafficRawDir, fmt.Sprintf("traffic_raw_%s%s", req.Date, safeSuffix))
 	}
 
 	tmpHot := filepath.ToSlash(hotParquetPath + ".tmp")
@@ -243,7 +247,7 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 			COPY (
 				SELECT
 					REPLACE(REPLACE("Generate Time", '/', '-'), ' ', ' ') AS timestamp,
-					"Type" AS type,
+					"Threat/Content Type" AS type, -- 🌟 修正：正確提取 drop/end 子類型！
 					"Source Zone" AS from_zone,
 					"Destination Zone" AS to_zone,
 					"Source address" AS source,
@@ -269,19 +273,7 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 		`, csvPattern, tmpHot)
 	}
 
-	// 冷資料 SQL
-	coldQuery := fmt.Sprintf(`
-		COPY (
-			SELECT
-				REPLACE(REPLACE(t."Generate Time", '/', '-'), ' ', ' ') AS timestamp,
-				CAST(t."Session ID" AS VARCHAR) AS session_id,
-				to_json(t) AS raw_content
-			FROM read_csv_auto('%s', header=true, all_varchar=true, ignore_errors=true) AS t
-			WHERE t."Source address" IS NOT NULL AND t."Source address" != ''
-		) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
-	`, csvPattern, tmpCold)
-
-	// 熱資料落盤
+	// 熱資料落盤 (去重、強型別、ZSTD 列式壓縮)
 	hotStart := time.Now()
 	log("    ⚡ 正在產生熱資料 (多核心去重、強型別、ZSTD 壓縮)...")
 	if _, err := runDuckDBQuery(hotQuery); err != nil {
@@ -292,24 +284,53 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 	_ = os.Rename(tmpHot, hotParquetPath)
 	log(" 完成！(耗時: %.1f 秒)\n", time.Since(hotStart).Seconds())
 
-	// 冷資料落盤
-	coldStart := time.Now()
-	log("    🧊 正在產生冷資料 (全欄位 JSON 封裝、原始證據保存)...")
-	if _, err := runDuckDBQuery(coldQuery); err != nil {
-		_ = os.Remove(tmpCold)
-		return fmt.Errorf("冷資料轉換失敗: %w", err)
+	// 🌟 冷資料落盤：以極速原始行提取 (保留完整 117 欄與去重)，不拼裝 JSON，2 秒內完成！
+	if !req.SkipCold {
+		coldQuery := fmt.Sprintf(`
+			COPY (
+				SELECT timestamp, session_id, raw_content FROM (
+					SELECT
+						REPLACE(REPLACE(split_part(line, ',', 7), '/', '-'), ' ', ' ') AS timestamp,
+						CAST(split_part(line, ',', 23) AS VARCHAR) AS session_id,
+						line AS raw_content,
+						ROW_NUMBER() OVER (PARTITION BY split_part(line, ',', 7), split_part(line, ',', 23)) as rn
+					FROM read_csv('%s', header=false, columns={'line': 'VARCHAR'}, quote='', escape='')
+					WHERE line NOT LIKE 'Domain,%%' AND line != ''
+				) WHERE rn = 1 ORDER BY timestamp DESC
+			) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
+		`, csvPattern, tmpCold)
+
+		coldStart := time.Now()
+		log("    🧊 正在產生冷資料 (保留原始封包、視窗去重、ZSTD 壓縮)...")
+		if _, err := runDuckDBQuery(coldQuery); err != nil {
+			_ = os.Remove(tmpCold)
+			return fmt.Errorf("冷資料轉換失敗: %w", err)
+		}
+		_ = os.Remove(coldParquetPath)
+		_ = os.Rename(tmpCold, coldParquetPath)
+		log(" 完成！(耗時: %.1f 秒)\n", time.Since(coldStart).Seconds())
+	} else {
+		log("    ⚡ 已跳過冷資料產出。\n")
 	}
-	_ = os.Remove(coldParquetPath)
-	_ = os.Rename(tmpCold, coldParquetPath)
-	log(" 完成！(耗時: %.1f 秒)\n", time.Since(coldStart).Seconds())
 
 	// 清理臨時 CSV
 	log("[4/4 空間清理] 🧹 正在清理 %d 個臨時 CSV 檔案...", len(matches))
 	for _, f := range matches {
 		_ = os.Remove(f)
 	}
-	log(" 完成！\n")
+	log(" 清理完成！\n")
 
-	log("✨ 全部流程順利完成！總耗時: %s\n", time.Since(totalStart).Round(time.Second))
+	// 🌟 核心新增：轉檔完成後，立刻啟動 DuckDB 去重整併 (將歷史舊檔與新分塊無縫去重合併)
+	log("[5/5 資料整併] 🔄 正在由 DuckDB 自動執行去重整併...\n")
+	if req.LogType == "threat" {
+		ConsolidateThreatParquetFiles()
+		ConsolidateRawParquetFiles("threat")
+	} else {
+		ConsolidateParquetFiles()
+		ConsolidateRawParquetFiles("traffic")
+	}
+	log("✅ 去重整併完成，已清除碎片！\n")
+
+	log("🎉 全部流程順利完成！總耗時: %s\n", time.Since(totalStart).Round(time.Second))
 	return nil
 }

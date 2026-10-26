@@ -68,9 +68,10 @@
             <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-wrap gap-2" style="overflow: visible;">
                 
                 <!-- 條件篩選輸入組 -->
+                <!-- 條件篩選輸入組 -->
                 <div class="d-flex align-items-center gap-1 flex-wrap">
                     <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-primary"></i> 條件篩選：</span>
-                    <input type="date" class="form-control form-control-sm font-monospace" style="width: 125px;" id="traffic-date">
+                    <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold" style="width: 130px; cursor: pointer;" id="traffic-date" onclick="this.showPicker()">
                     <input type="text" class="form-control form-control-sm font-monospace" placeholder="來源 (SRC)" style="width: 120px;" id="traffic-src">
                     <input type="text" class="form-control form-control-sm font-monospace" placeholder="目的地 (DST)" style="width: 125px;" id="traffic-dst">
                     <input type="text" class="form-control form-control-sm font-monospace" placeholder="應用 (APP)" style="width: 110px;" id="traffic-app">
@@ -152,7 +153,7 @@
             <h5 class="mb-0 fw-bold font-monospace text-primary" id="metric-total-flows">-- 筆</h5>
         </div>
     </div>
-    <!-- 🌟 新增：當日 Parquet 檔案大小 -->
+    <!-- 🌟 當日 Parquet 檔案大小 -->
     <div class="col">
         <div class="card border-0 shadow-sm p-2 bg-white text-center">
             <small class="text-muted">當日資料庫容量</small>
@@ -190,12 +191,11 @@
             <div class="card-body p-0 table-scroll-container">
                 <div class="table-responsive h-100">
                     <table class="table table-hover table-striped table-sm table-sticky-header font-monospace traffic-table-fixed" style="font-size: 14.5px;">
-                        <!-- 🌟 重新調校之 14 欄位精確寬度配置 -->
                         <colgroup>
-                            <col style="width: 185px;"> <!-- 1. 接收時間 (拓寬以完整顯示) -->
-                            <col style="width: 55px;">  <!-- 2. 類型 (縮小) -->
-                            <col style="width: 75px;">  <!-- 3. 來源區域 (縮小) -->
-                            <col style="width: 75px;">  <!-- 4. 目的地區 (縮小) -->
+                            <col style="width: 185px;"> <!-- 1. 接收時間 -->
+                            <col style="width: 55px;">  <!-- 2. 類型 -->
+                            <col style="width: 75px;">  <!-- 3. 來源區域 -->
+                            <col style="width: 75px;">  <!-- 4. 目的地區 -->
                             <col style="width: 180px;"> <!-- 5. 來源 -->
                             <col style="width: 135px;"> <!-- 6. NAT 來源 IP -->
                             <col style="width: 155px;"> <!-- 7. 目的地 -->
@@ -203,8 +203,8 @@
                             <col style="width: 95px;">  <!-- 9. 目的連接埠 -->
                             <col style="width: 135px;"> <!-- 10. 應用程式 -->
                             <col style="width: 80px;">  <!-- 11. 動作 -->
-                            <col style="width: 145px;"> <!-- 12. 規則 (縮小) -->
-                            <col style="width: 125px;"> <!-- 13. 工作階段結束原因 (縮小) -->
+                            <col style="width: 145px;"> <!-- 12. 規則 -->
+                            <col style="width: 125px;"> <!-- 13. 工作階段結束原因 -->
                             <col style="width: 95px;">  <!-- 14. 位元組 -->
                         </colgroup>
                         <thead>
@@ -261,8 +261,6 @@
     let countdownTimer = null;
     let currentIntervalSeconds = 10;
     let remainingSeconds = 10;
-
-    document.getElementById('traffic-date').value = todayStr;
 
     function toggleHistogram() {
         const body = document.getElementById('histogram-card-body');
@@ -355,13 +353,11 @@
         refreshSyslogStatus();
     }
 
-    // 🌟 只顯示最新一個批次 Flush 入庫的筆數 (數值維持在當批的數十至數百筆，不無限累加)
     function refreshSyslogStatus() {
         fetch(`/api/syslog-status?_t=${Date.now()}`)
             .then(res => res.json())
             .then(res => {
                 if (res.status === 'success' && res.data) {
-                    // 🌟 取用「當批入庫筆數」，維持顯示當次進來的數十筆，不再無限累加
                     const batchIns = (res.data.last_flush_insert || 0).toLocaleString();
                     const textElem = document.getElementById('syslog-flush-text');
                     if (textElem) {
@@ -480,15 +476,22 @@
                 const logsList = data.logs || [];
 
                 document.getElementById('metric-total-flows').innerText = `${totalFlows.toLocaleString()} 筆`;
-                document.getElementById('metric-db-size').innerText = data.db_size || '0 B'; // 👈 讀取 API 傳來的容量
+                document.getElementById('metric-db-size').innerText = data.db_size || '0 B';
 				document.getElementById('metric-total-bytes').innerText = data.total_bytes || '0 B';
                 document.getElementById('metric-top-app').innerText = data.top_app || '-';
                 document.getElementById('metric-deny-flows').innerText = `${(data.deny_flows || 0).toLocaleString()} 筆`;
                 document.getElementById('traffic-count-badge').innerText = `共 ${totalFlows.toLocaleString()} 筆 (頁次 ${currentPage} / ${totalPages})`;
 
-                renderMessageCountChart(data.histogram || []);
-
+                // 🌟 1. 先清空等待載入提示文字
                 tbody.innerHTML = '';
+
+                // 🌟 2. 安全繪製直方圖 (容錯保護)
+                try {
+                    renderMessageCountChart(data.histogram || []);
+                } catch (e) {
+                    console.warn("直方圖繪製略過:", e);
+                }
+
                 if (logsList.length === 0) {
                     tbody.innerHTML = `
                         <tr>
@@ -577,10 +580,16 @@
         const labelMap = { 10: '10 秒', 30: '30 秒', 60: '60 秒', 0: '手動' };
         setRefreshInterval(savedSec, labelMap[savedSec] || '10 秒');
 
+        // 🌟 預設為今日，點選月曆更換日期時自動執行檢索
+        const dateInput = document.getElementById('traffic-date');
+        dateInput.value = todayStr;
+        dateInput.addEventListener('change', () => queryTrafficLogs(1));
+
         queryTrafficLogs(1);
         refreshSyslogStatus();
     });
-
+	
     setInterval(refreshSyslogStatus, 3000);
+	
 </script>
 {% endblock %}

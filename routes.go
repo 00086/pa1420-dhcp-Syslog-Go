@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath" // 👈 補上：供 route 16 組合 Parquet 檔案路徑
+	"regexp" // 🌟 補上這行，解決 undefined: regexp
 	"sort"
 	"strconv"
 	"strings"
@@ -1281,6 +1282,129 @@ func registerRoutes(r *gin.Engine) {
 			logStream("\n❌ 任務失敗: %v\n", err)
 			return
 		}
+	})
+	
+	// 🌟 21. NAS 歷史日誌匯入 API (支援單檔或多檔案批次上傳)
+	r.POST("/api/import-nas", func(c *gin.Context) {
+		form, err := c.MultipartForm()
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "解析上傳檔案失敗：" + err.Error()})
+			return
+		}
+
+		// 同時相容 nas_files 與 nas_file 欄位名稱
+		files := form.File["nas_files"]
+		if len(files) == 0 {
+			files = form.File["nas_file"]
+		}
+		if len(files) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "未收到任何上傳檔案"})
+			return
+		}
+
+		logType := c.PostForm("log_type")
+		if logType != "threat" && logType != "traffic" {
+			logType = "all"
+		}
+
+		tmpDir := filepath.Join(os.TempDir(), "pa_nas_import")
+		_ = os.MkdirAll(tmpDir, 0755)
+
+		var tmpFilePaths []string
+		for i, file := range files {
+			tmpPath := filepath.Join(tmpDir, fmt.Sprintf("nas_%d_%d_%s", time.Now().Unix(), i, file.Filename))
+			if err := c.SaveUploadedFile(file, tmpPath); err == nil {
+				tmpFilePaths = append(tmpFilePaths, tmpPath)
+			}
+		}
+
+		if len(tmpFilePaths) == 0 {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "暫存檔案儲存失敗"})
+			return
+		}
+
+		// 背景執行多檔案串流掃描與 DuckDB 轉換
+		go processNASImport(tmpFilePaths, logType)
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "success",
+			"message": fmt.Sprintf("成功接收 %d 個日誌檔案！系統正在背景自動依日誌內容逐日分流與建立湖倉。", len(tmpFilePaths)),
+		})
+	})
+	
+	// 🌟 22. NAS 匯入即時狀態與進度查詢 API
+	r.GET("/api/nas-import-status", func(c *gin.Context) {
+		globalNASProgress.RLock()
+		defer globalNASProgress.RUnlock()
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "success",
+			"is_running":     globalNASProgress.IsRunning,
+			"stage":          globalNASProgress.Stage,
+			"file_name":      globalNASProgress.FileName,
+			"total_lines":    globalNASProgress.TotalLines,
+			"valid_lines":    globalNASProgress.ValidLines,
+			"current_date":   globalNASProgress.CurrentDate,
+			"processed_days": globalNASProgress.ProcessedDays,
+			"total_days":     globalNASProgress.TotalDays,
+			"percent":        globalNASProgress.Percent,
+			"logs":           globalNASProgress.Logs,
+			"error":          globalNASProgress.Error,
+		})
+	})
+	
+	// 🌟 23. 獲取資料庫已存在的有效日期列表 (供前端下拉選單自動產生)
+	r.GET("/api/available-dates", func(c *gin.Context) {
+		logType := c.DefaultQuery("type", "traffic") // 接收 "traffic" 或 "threat"
+		var targetDir string
+		var prefix string
+		
+		if logType == "threat" {
+			targetDir = threatDir
+			prefix = "threat_"
+		} else {
+			targetDir = trafficDir
+			prefix = "traffic_"
+		}
+
+		dateSet := make(map[string]bool)
+		entries, err := os.ReadDir(targetDir)
+		if err == nil {
+			for _, e := range entries {
+				name := e.Name()
+				if !e.IsDir() && strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".parquet") && !strings.HasSuffix(name, ".tmp") {
+					// 從檔名萃取日期 (例如 traffic_2026-10-10_nas_123.parquet)
+					part := strings.TrimPrefix(name, prefix)
+					if len(part) >= 10 {
+						dateStr := part[:10]
+						// 簡易 Regex 確保格式為 YYYY-MM-DD
+						if matched, _ := regexp.MatchString(`^\d{4}-\d{2}-\d{2}$`, dateStr); matched {
+							dateSet[dateStr] = true
+						}
+					}
+				}
+			}
+		}
+
+		var dates []string
+		for d := range dateSet {
+			dates = append(dates, d)
+		}
+		// 日期由新到舊排序
+		sort.Slice(dates, func(i, j int) bool {
+			return dates[i] > dates[j]
+		})
+
+		// 若資料夾是空的，預設給予今天日期
+		todayStr := time.Now().Format("2006-01-02")
+		if len(dates) == 0 {
+			dates = append(dates, todayStr)
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status": "success",
+			"dates":  dates,
+		})
 	})
 	
 	// 威脅日誌分析主頁面

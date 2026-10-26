@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio" // 🌟 補上此行，解決 undefined: bufio 錯誤
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -2205,10 +2206,16 @@ func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, 
 		} else if bytesVal >= 1024 { bFmt = fmt.Sprintf("%.1f KB", float64(bytesVal)/1024)
 		} else { bFmt = fmt.Sprintf("%d B", bytesVal) }
 
+		// 🌟 安全解析 Port，防止 nil 引發 panic
+		portVal := 0
+		if p, ok := r["to_port"].(float64); ok {
+			portVal = int(p)
+		}
+
 		logs = append(logs, TrafficLogItem{
 			Timestamp: safeStr(r["timestamp"]), Type: safeStr(r["type"]), FromZone: safeStr(r["from_zone"]), ToZone: safeStr(r["to_zone"]),
 			Source: safeStr(r["source"]), SrcHostname: dhcpMap[safeStr(r["source"])], NatSourceIP: safeStr(r["nat_source_ip"]), Destination: safeStr(r["destination"]),
-			NatDestIP: safeStr(r["nat_dest_ip"]), ToPort: int(r["to_port"].(float64)), Application: safeStr(r["application"]), Action: safeStr(r["action"]),
+			NatDestIP: safeStr(r["nat_dest_ip"]), ToPort: portVal, Application: safeStr(r["application"]), Action: safeStr(r["action"]),
 			Rule: safeStr(r["rule"]), SessionEndReason: safeStr(r["session_end_reason"]), Bytes: bytesVal, BytesFormatted: bFmt,
 		})
 	}
@@ -2729,5 +2736,368 @@ func queryThreatAnalytics(queryDate, src, dst, severity, action, threatName stri
 		CurrentPage:   page,
 		TotalPages:    totalPages,
 	}, nil
+}
+
+// 🌟 NAS 匯入全域即時進度追蹤器
+type NASImportProgress struct {
+	sync.RWMutex
+	IsRunning     bool     `json:"is_running"`
+	Stage         string   `json:"stage"` // "idle", "reading", "converting", "done", "error"
+	FileName      string   `json:"file_name"`
+	TotalLines    int      `json:"total_lines"`
+	ValidLines    int      `json:"valid_lines"`
+	CurrentDate   string   `json:"current_date"`
+	ProcessedDays int      `json:"processed_days"`
+	TotalDays     int      `json:"total_days"`
+	Percent       int      `json:"percent"`
+	Logs          []string `json:"logs"`
+	Error         string   `json:"error"`
+}
+
+var globalNASProgress NASImportProgress
+
+func (p *NASImportProgress) addLog(msg string) {
+	p.Lock()
+	defer p.Unlock()
+	p.Logs = append(p.Logs, fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg))
+	if len(p.Logs) > 100 {
+		p.Logs = p.Logs[len(p.Logs)-100:]
+	}
+}
+
+// 🌟 處理 NAS 上傳檔案 (支援多檔案批次讀取、自動識別 TRAFFIC 與 THREAT、逐日分流落盤)
+func processNASImport(nasFilePaths []string, logType string) {
+	if len(nasFilePaths) == 0 {
+		return
+	}
+
+	globalNASProgress.Lock()
+	globalNASProgress.IsRunning = true
+	globalNASProgress.Stage = "reading"
+	globalNASProgress.FileName = fmt.Sprintf("共 %d 個檔案批次匯入", len(nasFilePaths))
+	globalNASProgress.TotalLines = 0
+	globalNASProgress.ValidLines = 0
+	globalNASProgress.ProcessedDays = 0
+	globalNASProgress.TotalDays = 0
+	globalNASProgress.Percent = 10
+	globalNASProgress.Error = ""
+	globalNASProgress.Logs = []string{
+		fmt.Sprintf("[%s] 🚀 開始批次解析 %d 個日誌檔案...", time.Now().Format("15:04:05"), len(nasFilePaths)),
+		fmt.Sprintf("[%s] 🌐 自動按日誌日期與類型逐日自動切分落盤", time.Now().Format("15:04:05")),
+	}
+	globalNASProgress.Unlock()
+
+	defer func() {
+		for _, p := range nasFilePaths {
+			_ = os.Remove(p)
+		}
+	}()
+
+	baseTmpDir := filepath.Join(os.TempDir(), fmt.Sprintf("nas_batch_%d", time.Now().UnixNano()))
+	_ = os.MkdirAll(baseTmpDir, 0755)
+	defer os.RemoveAll(baseTmpDir)
+
+	type BatchTarget struct {
+		LogType string
+		Date    string
+		Dir     string
+		File    *os.File
+		Count   int
+	}
+
+	batches := make(map[string]*BatchTarget)
+	allDetectedDates := make(map[string]bool)
+
+	trafficBaseHeaders := []string{
+		"Domain", "Receive Time", "Serial", "Type", "Threat/Content Type", "Config Version",
+		"Generate Time", "Source address", "Destination address", "NAT Source IP", "NAT Destination IP",
+		"Rule", "Source User", "Destination User", "Application", "Virtual System", "Source Zone",
+		"Destination Zone", "Inbound Interface", "Outbound Interface", "Log Action", "Time Logged",
+		"Session ID", "Repeat Count", "Source Port", "Destination Port", "NAT Source Port",
+		"NAT Destination Port", "Flags", "IP Protocol", "Action", "Bytes", "Bytes Sent",
+		"Bytes Received", "Packets", "Start Time", "Elapsed Time", "Category", "padding", "seqno",
+		"actionflags", "Source Country", "Destination Country", "cpadding", "pkts_sent",
+		"pkts_received", "Session End Reason", "dg_hier_level_1", "dg_hier_level_2",
+		"dg_hier_level_3", "dg_hier_level_4", "vsys_name", "device_name", "action_source",
+		"tunnelid/imsi", "monitor_tag/imei", "parent_session_id", "parent_start_time", "tunnel",
+		"sctp_association_id", "sctp_chunks", "sctp_chunks_sent", "sctp_chunks_received",
+	}
+
+	threatBaseHeaders := []string{
+		"Domain", "Receive Time", "Serial", "Type", "Threat/Content Type", "Config Version",
+		"Generate Time", "Source address", "Destination address", "NAT Source IP", "NAT Destination IP",
+		"Rule", "Source User", "Destination User", "Application", "Virtual System", "Source Zone",
+		"Destination Zone", "Inbound Interface", "Outbound Interface", "Log Action", "Time Logged",
+		"Session ID", "Repeat Count", "Source Port", "Destination Port", "NAT Source Port",
+		"NAT Destination Port", "Flags", "IP Protocol", "Action", "Misc", "Threat/Content Name",
+		"Category", "Severity", "Direction", "Sequence Number", "Action Flags", "Source Country",
+		"Destination Country", "cpadding", "contenttype", "pcap_id", "filedigest", "cloud",
+		"url_idx", "user_agent", "filetype", "xff", "referer", "sender", "subject", "recipient",
+		"reportid", "dg_hier_level_1", "dg_hier_level_2", "dg_hier_level_3", "dg_hier_level_4",
+		"vsys_name", "device_name", "file_url",
+	}
+
+	lineCounter := 0
+	validCounter := 0
+
+	// 🌟 核心：外層迴圈遍歷所有上傳的檔案
+	for fileIdx, filePath := range nasFilePaths {
+		inFile, err := os.Open(filePath)
+		if err != nil {
+			globalNASProgress.addLog(fmt.Sprintf("⚠️ 無法開啟第 %d 個檔案: %v (略過)", fileIdx+1, err))
+			continue
+		}
+
+		globalNASProgress.addLog(fmt.Sprintf("📖 [%d/%d] 正在讀取檔案：%s", fileIdx+1, len(nasFilePaths), filepath.Base(filePath)))
+
+		scanner := bufio.NewScanner(inFile)
+		buf := make([]byte, 0, 1024*1024)
+		scanner.Buffer(buf, 1024*1024)
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			lineCounter++
+
+			if lineCounter%50000 == 0 {
+				globalNASProgress.Lock()
+				globalNASProgress.TotalLines = lineCounter
+				globalNASProgress.ValidLines = validCounter
+				globalNASProgress.Unlock()
+				globalNASProgress.addLog(fmt.Sprintf("   ↳ 已累積掃描 %d 行 (有效 %d 筆)...", lineCounter, validCounter))
+			}
+			
+			// 🌟 1. 改以 Palo Alto 標準日誌型態特徵錨定，徹底相容所有 Synology NAS 匯出格式
+			isTraffic := strings.Contains(line, ",TRAFFIC,")
+			isThreat := strings.Contains(line, ",THREAT,")
+			if !isTraffic && !isThreat {
+				continue
+			}
+
+			// 尋找 Palo Alto 訊息本體的起始位置 (去除 Synology 的時間與主機前綴)
+			idx := -1
+			if isTraffic {
+				trafficPos := strings.Index(line, ",TRAFFIC,")
+				lastTab := strings.LastIndex(line[:trafficPos], "\t")
+				if lastTab != -1 {
+					idx = lastTab + 1
+				} else {
+					idx = strings.LastIndex(line[:trafficPos], " 1,20")
+					if idx == -1 { idx = strings.LastIndex(line[:trafficPos], " ") }
+					if idx != -1 { idx++ } else { idx = 0 }
+				}
+			} else {
+				threatPos := strings.Index(line, ",THREAT,")
+				lastTab := strings.LastIndex(line[:threatPos], "\t")
+				if lastTab != -1 {
+					idx = lastTab + 1
+				} else {
+					idx = strings.LastIndex(line[:threatPos], " 1,20")
+					if idx == -1 { idx = strings.LastIndex(line[:threatPos], " ") }
+					if idx != -1 { idx++ } else { idx = 0 }
+				}
+			}
+
+			if idx < 0 || idx >= len(line) {
+				continue
+			}
+
+			cleanCSVLine := strings.ReplaceAll(line[idx:], "\t", " ")
+			parts := strings.Split(cleanCSVLine, ",")
+			if len(parts) < 6 {
+				continue
+			}
+
+			// 🌟 2. 動態定位 TYPE 欄位所在索引 (TRAFFIC 或 THREAT)
+			typeIdx := -1
+			var currentType string
+			for pIdx, pVal := range parts {
+				uVal := strings.ToUpper(strings.TrimSpace(pVal))
+				if uVal == "TRAFFIC" {
+					typeIdx = pIdx
+					currentType = "traffic"
+					break
+				} else if uVal == "THREAT" {
+					typeIdx = pIdx
+					currentType = "threat"
+					break
+				}
+			}
+
+			if typeIdx == -1 || typeIdx+3 >= len(parts) {
+				continue
+			}
+
+			// 🌟 關鍵補正：若前面缺少 Domain 欄位 (如 10-01 只有 2 欄即到 TRAFFIC)，自動在前方補 "1," 讓 117 欄標頭精確對齊！
+			if typeIdx == 2 {
+				cleanCSVLine = "1," + cleanCSVLine
+				parts = strings.Split(cleanCSVLine, ",")
+				typeIdx = 3
+			}
+
+			if logType != "" && logType != "all" && currentType != logType {
+				continue
+			}
+
+			// 🌟 3. 在 Palo Alto 規範中，Generate Time 永遠在 Type 後面第 3 個欄位
+			rawTime := strings.TrimSpace(parts[typeIdx+3])
+			sub := strings.Split(rawTime, " ")
+			if len(sub) == 0 {
+				continue
+			}
+			dateKey := strings.ReplaceAll(sub[0], "/", "-")
+			allDetectedDates[dateKey] = true
+
+			validCounter++
+
+			batchKey := fmt.Sprintf("%s_%s", currentType, dateKey)
+			b, exists := batches[batchKey]
+			if !exists {
+				dayDir := filepath.Join(baseTmpDir, currentType, dateKey)
+				_ = os.MkdirAll(dayDir, 0755)
+
+				dayCsvPath := filepath.Join(dayDir, fmt.Sprintf("%s_%s.csv", currentType, dateKey))
+				outF, createErr := os.Create(dayCsvPath)
+				if createErr != nil {
+					continue
+				}
+
+				base := trafficBaseHeaders
+				if currentType == "threat" {
+					base = threatBaseHeaders
+				}
+				headerCols := append([]string{}, base...)
+				for len(headerCols) < len(parts) {
+					headerCols = append(headerCols, fmt.Sprintf("extra_col_%d", len(headerCols)+1))
+				}
+				outF.WriteString(strings.Join(headerCols, ",") + "\n")
+
+				b = &BatchTarget{
+					LogType: currentType,
+					Date:    dateKey,
+					Dir:     dayDir,
+					File:    outF,
+					Count:   0,
+				}
+				batches[batchKey] = b
+
+				globalNASProgress.addLog(fmt.Sprintf("📅 識別到分流目標: [%s] %s", strings.ToUpper(currentType), dateKey))
+			}
+
+			b.File.WriteString(cleanCSVLine + "\n")
+			b.Count++
+		}
+		inFile.Close()
+	}
+
+	for _, b := range batches {
+		_ = b.File.Close()
+	}
+
+	globalNASProgress.Lock()
+	globalNASProgress.TotalLines = lineCounter
+	globalNASProgress.ValidLines = validCounter
+	globalNASProgress.Unlock()
+
+	if len(batches) == 0 {
+		var foundList []string
+		for d := range allDetectedDates {
+			foundList = append(foundList, d)
+		}
+		errMsg := fmt.Sprintf("所有檔案中皆未找到相符的日誌紀錄！偵測到的日期為：%s。", strings.Join(foundList, ", "))
+		globalNASProgress.Lock()
+		globalNASProgress.Stage = "error"
+		globalNASProgress.Error = errMsg
+		globalNASProgress.IsRunning = false
+		globalNASProgress.Unlock()
+		globalNASProgress.addLog("❌ 錯誤: " + errMsg)
+		return
+	}
+
+	totalBatches := len(batches)
+	globalNASProgress.Lock()
+	globalNASProgress.Stage = "converting"
+	globalNASProgress.TotalDays = totalBatches
+	globalNASProgress.Percent = 40
+	globalNASProgress.Unlock()
+
+	globalNASProgress.addLog(fmt.Sprintf("📊 全部 %d 個檔案掃描完畢 (共 %d 行)，辨識出 %d 個獨立批次，開始逐批進行 DuckDB 轉換...",
+		len(nasFilePaths), lineCounter, totalBatches))
+
+	var sortedKeys []string
+	for k := range batches {
+		sortedKeys = append(sortedKeys, k)
+	}
+	sort.Strings(sortedKeys)
+
+	hasConvertError := false
+	batchIndex := 0
+	for _, k := range sortedKeys {
+		b := batches[k]
+		batchIndex++
+
+		typeName := "流量 (Traffic)"
+		if b.LogType == "threat" {
+			typeName = "威脅 (Threat)"
+		}
+
+		globalNASProgress.Lock()
+		globalNASProgress.CurrentDate = fmt.Sprintf("%s [%s]", b.Date, typeName)
+		globalNASProgress.ProcessedDays = batchIndex - 1
+		globalNASProgress.Percent = 40 + int(float64(batchIndex)/float64(totalBatches)*55)
+		globalNASProgress.Unlock()
+
+		globalNASProgress.addLog(fmt.Sprintf("⚡ [%d/%d] 正在建立 [%s %s] 的 Parquet 湖倉 (共 %d 筆紀錄)...",
+			batchIndex, totalBatches, typeName, b.Date, b.Count))
+
+		req := CLIExportRequest{
+			Date:        b.Date,
+			LogType:     b.LogType,
+			FTPFolder:   b.Dir,
+			ConvertOnly: true,
+			SkipCold:    false,
+		}
+
+		err := performCLIExportAndConvert(req, func(format string, a ...any) {
+			msg := strings.TrimSpace(fmt.Sprintf(format, a...))
+			if msg != "" {
+				globalNASProgress.addLog("  " + msg)
+			}
+		})
+
+		if err != nil {
+			hasConvertError = true
+			globalNASProgress.addLog(fmt.Sprintf("  ❌ [%s %s] 轉換失敗: %v", typeName, b.Date, err))
+		} else {
+			globalNASProgress.addLog(fmt.Sprintf("  ✅ [%s %s] 落盤完成！", typeName, b.Date))
+		}
+	}
+
+	// 🌟 全部檔案轉換完畢後，立即啟動自動去重合併
+	if !hasConvertError {
+		globalNASProgress.addLog("🔄 啟動背景 DuckDB 去重整併作業，將新舊資料無縫融合...")
+		ConsolidateParquetFiles()
+		ConsolidateThreatParquetFiles()
+		ConsolidateRawParquetFiles("traffic")
+		ConsolidateRawParquetFiles("threat")
+	}
+
+	globalNASProgress.Lock()
+	if hasConvertError {
+		globalNASProgress.Stage = "error"
+		globalNASProgress.Error = "部分日期的 DuckDB 轉檔作業失敗，請檢視上方詳細日誌。"
+		globalNASProgress.IsRunning = false
+	} else {
+		globalNASProgress.Stage = "done"
+		globalNASProgress.ProcessedDays = totalBatches
+		globalNASProgress.Percent = 100
+		globalNASProgress.IsRunning = false
+	}
+	globalNASProgress.Unlock()
+
+	if hasConvertError {
+		globalNASProgress.addLog("❌ 部分批次轉檔發生異常，請檢視上方詳細日誌。")
+	} else {
+		globalNASProgress.addLog(fmt.Sprintf("🎉 全部 %d 個檔案批次轉檔與整合作業全數圓滿完成！", len(nasFilePaths)))
+	}
 }
 

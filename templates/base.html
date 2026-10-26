@@ -71,23 +71,31 @@
                         </div>
 
                         <!-- 模組功能切換按鈕群組 (無縫跳轉，高亮當前模組) -->
-                        <ul class="nav nav-pills gap-1">
-                            <li class="nav-item">
-                                <a class="nav-link {% if active_page == 'dhcp' %}active{% endif %}" href="/">
-                                    <i class="bi bi-ethernet me-1"></i>DHCP 租約管理
-                                </a>
-                            </li>
-                            <li class="nav-item">
-                                <a class="nav-link {% if active_page == 'traffic' %}active{% endif %}" href="/traffic">
-                                    <i class="bi bi-activity me-1"></i>流量紀錄分析
-                                </a>
-                            </li>
-							<li class="nav-item">
-								<a class="nav-link {% if page == 'threat' %}active fw-bold text-danger{% endif %}" href="/threat">
-									<i class="bi bi-shield-shaded"></i> 資安威脅分析
-								</a>
-							</li>
-                        </ul>
+                        <div class="d-flex align-items-center gap-2">
+                            <ul class="nav nav-pills gap-1">
+                                <li class="nav-item">
+                                    <a class="nav-link {% if active_page == 'dhcp' %}active{% endif %}" href="/">
+                                        <i class="bi bi-ethernet me-1"></i>DHCP 租約管理
+                                    </a>
+                                </li>
+                                <li class="nav-item">
+                                    <a class="nav-link {% if active_page == 'traffic' %}active{% endif %}" href="/traffic">
+                                        <i class="bi bi-activity me-1"></i>流量紀錄分析
+                                    </a>
+                                </li>
+                                <li class="nav-item">
+                                    <a class="nav-link {% if page == 'threat' %}active fw-bold text-danger{% endif %}" href="/threat">
+                                        <i class="bi bi-shield-shaded"></i> 資安威脅分析
+                                    </a>
+                                </li>
+                            </ul>
+                            <!-- 🌟 NAS 匯入按鈕 -->
+                            <div class="border-start ps-2 ms-1">
+                                <button class="btn btn-outline-secondary btn-sm" onclick="openNasImportModal()" title="從 Synology NAS 匯入歷史日誌">
+                                    <i class="bi bi-hdd-network text-primary"></i> 匯入 NAS
+                                </button>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- 下層：雙 CPU、記憶體、SSD 與活躍連線數 (點擊開啟圖表) -->
@@ -144,6 +152,94 @@
     <!-- 3. 子頁面主要內容注入區塊 -->
     {% block content %}{% endblock %}
 
+</div>
+
+<!-- ================= 共用彈出視窗：NAS 歷史日誌匯入 (全動態進度版) ================= -->
+<div class="modal fade" id="nasImportModal" tabindex="-1" aria-labelledby="nasImportModalLabel" aria-hidden="true" data-bs-backdrop="static">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content text-bg-dark border-secondary">
+            <div class="modal-header border-secondary py-2 d-flex align-items-center">
+                <h6 class="modal-title fw-bold mb-0" id="nasImportModalLabel">
+                    <i class="bi bi-hdd-network text-primary me-1"></i>匯入 Synology NAS 歷史日誌
+                </h6>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close" style="font-size: 12px;"></button>
+            </div>
+            <div class="modal-body">
+                
+                <!-- 1. 表單輸入區 -->
+                <form id="nasImportForm">
+                    <p class="text-muted small mb-3">請選擇從 NAS 下載的日誌檔案 (*.log, *.txt, *.csv)。系統將自動過濾 Syslog 標頭、視窗去重並按天轉為 Parquet 冷熱資料。</p>
+                    
+                    <div class="row g-2 mb-3">
+                        <div class="col-12">
+                            <label class="form-label small text-secondary mb-1">日誌類型 (預設自動識別檔案內所有日期，逐日切分落盤)</label>
+                            <select class="form-select form-select-sm bg-dark text-white border-secondary" id="nasLogType" name="log_type">
+                                <option value="traffic" selected>流量日誌 (Traffic)</option>
+                                <option value="threat">威脅日誌 (Threat)</option>
+                                <option value="all">自動識別雙軌 (Traffic + Threat)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label small text-secondary mb-1">
+                            選擇 NAS 日誌檔案 <span class="text-info">(支援按住 Ctrl / Shift 複選多個檔案)</span>
+                        </label>
+                        <input class="form-control form-control-sm bg-dark text-white border-secondary" type="file" id="nasFile" name="nas_files" accept=".log,.txt,.csv" multiple required>
+                    </div>
+                </form>
+
+                <!-- 2. 動態進度與即時儀表區 -->
+                <div id="nasProgressSection" class="d-none">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <span class="small fw-bold text-info" id="nasProgressStageText"><i class="spinner-border spinner-border-sm me-1"></i>準備中...</span>
+                        <span class="font-monospace fw-bold text-white small" id="nasProgressPercent">0%</span>
+                    </div>
+
+                    <!-- 主進度條 -->
+                    <div class="progress mb-3 bg-secondary" style="height: 12px;">
+                        <div id="nasProgressBar" class="progress-bar progress-bar-striped progress-bar-animated bg-primary" role="progressbar" style="width: 0%;"></div>
+                    </div>
+
+                    <!-- 統計資訊小卡 -->
+                    <div class="row g-2 mb-2 text-center small font-monospace">
+                        <div class="col-4">
+                            <div class="p-2 border border-secondary rounded bg-black">
+                                <div class="text-secondary" style="font-size: 11px;">掃描總行數</div>
+                                <div class="fw-bold text-white fs-6" id="stat-total-lines">0</div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="p-2 border border-secondary rounded bg-black">
+                                <div class="text-secondary" style="font-size: 11px;">有效日誌筆數</div>
+                                <div class="fw-bold text-success fs-6" id="stat-valid-lines">0</div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="p-2 border border-secondary rounded bg-black">
+                                <div class="text-secondary" style="font-size: 11px;">涵蓋日期天數</div>
+                                <div class="fw-bold text-info fs-6" id="stat-days-count">0 天</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 即時黑底終端機視窗 -->
+                    <div class="border border-secondary rounded bg-black p-2 mt-2" style="height: 180px; overflow-y: auto; font-family: Consolas, monospace; font-size: 12px;" id="nasConsoleBox">
+                        <div class="text-secondary">等待任務啟動...</div>
+                    </div>
+                </div>
+
+                <!-- 錯誤警告視窗 -->
+                <div id="nasErrorAlert" class="alert alert-danger d-none mt-3 small font-monospace" role="alert"></div>
+            </div>
+
+            <div class="modal-footer border-secondary py-2">
+                <button type="button" class="btn btn-secondary btn-sm" id="nasCancelBtn" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary btn-sm px-3" id="nasSubmitBtn" onclick="submitNasImport()">開始匯入整合</button>
+                <button type="button" class="btn btn-success btn-sm px-3 d-none" id="nasFinishBtn" onclick="location.reload()">完成，重新載入畫面</button>
+            </div>
+        </div>
+    </div>
 </div>
 
 <!-- ================= 共用彈出視窗：效能趨勢圖表 ================= -->
@@ -322,6 +418,146 @@
                 });
             })
             .catch(err => console.log('讀取歷史紀錄失敗', err));
+    }
+
+    // ================= 🌟 NAS 日誌匯入全動態輪詢邏輯 =================
+    let nasImportModalObj = null;
+    let nasPollTimer = null;
+
+    function openNasImportModal() {
+        if (!nasImportModalObj) {
+            nasImportModalObj = new bootstrap.Modal(document.getElementById('nasImportModal'));
+        }
+        document.getElementById('nasImportForm').classList.remove('d-none');
+        document.getElementById('nasProgressSection').classList.add('d-none');
+        document.getElementById('nasErrorAlert').classList.add('d-none');
+        document.getElementById('nasCancelBtn').classList.remove('d-none');
+        document.getElementById('nasSubmitBtn').classList.remove('d-none');
+        document.getElementById('nasSubmitBtn').disabled = false;
+        document.getElementById('nasFinishBtn').classList.add('d-none');
+        document.getElementById('nasLogType').value = 'traffic'; // 🌟 強制確保每次彈出都預設為 Traffic
+        document.getElementById('nasConsoleBox').innerHTML = '<div class="text-secondary">等待任務啟動...</div>';
+        nasImportModalObj.show();
+    }
+	
+    function submitNasImport() {
+        const fileInput = document.getElementById('nasFile');
+        if (!fileInput.files.length) {
+            alert("請先選擇要匯入的 NAS 檔案！");
+            return;
+        }
+
+        const formData = new FormData(document.getElementById('nasImportForm'));
+        const form = document.getElementById('nasImportForm');
+        const progressSection = document.getElementById('nasProgressSection');
+        const progressBar = document.getElementById('nasProgressBar');
+        const percentText = document.getElementById('nasProgressPercent');
+        const stageText = document.getElementById('nasProgressStageText');
+        const consoleBox = document.getElementById('nasConsoleBox');
+        const submitBtn = document.getElementById('nasSubmitBtn');
+        const cancelBtn = document.getElementById('nasCancelBtn');
+
+        form.classList.add('d-none');
+        progressSection.classList.remove('d-none');
+        submitBtn.classList.add('d-none');
+        cancelBtn.disabled = true;
+
+        stageText.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>正在上傳檔案至後端...';
+        consoleBox.innerHTML = '<div class="text-info">🚀 開始上傳檔案至伺服器...</div>';
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/import-nas', true);
+
+        xhr.upload.onprogress = function(e) {
+            if (e.lengthComputable) {
+                const pct = Math.round((e.loaded / e.total) * 100);
+                const mbLoaded = (e.loaded / 1024 / 1024).toFixed(1);
+                const mbTotal = (e.total / 1024 / 1024).toFixed(1);
+                progressBar.style.width = pct + '%';
+                percentText.innerText = pct + '%';
+                stageText.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>上傳中... (${mbLoaded} MB / ${mbTotal} MB)`;
+            }
+        };
+
+        xhr.onload = function() {
+            if (xhr.status === 200) {
+                stageText.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>檔案上傳完畢，啟動後端分析引擎...';
+                progressBar.style.width = '10%';
+                percentText.innerText = '10%';
+                startPollingStatus();
+            } else {
+                showNasError("上傳伺服器失敗: " + xhr.statusText);
+            }
+        };
+
+        xhr.onerror = function() {
+            showNasError("網路連線異常，無法連線至伺服器。");
+        };
+
+        xhr.send(formData);
+    }
+
+    function startPollingStatus() {
+        if (nasPollTimer) clearInterval(nasPollTimer);
+
+        nasPollTimer = setInterval(() => {
+            fetch(`/api/nas-import-status?_t=${Date.now()}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status !== 'success') return;
+
+                    const progressBar = document.getElementById('nasProgressBar');
+                    const percentText = document.getElementById('nasProgressPercent');
+                    const stageText = document.getElementById('nasProgressStageText');
+                    const consoleBox = document.getElementById('nasConsoleBox');
+
+                    document.getElementById('stat-total-lines').innerText = (data.total_lines || 0).toLocaleString();
+                    document.getElementById('stat-valid-lines').innerText = (data.valid_lines || 0).toLocaleString();
+                    document.getElementById('stat-days-count').innerText = `${data.processed_days || 0} / ${data.total_days || 0} 天`;
+
+                    progressBar.style.width = (data.percent || 10) + '%';
+                    percentText.innerText = (data.percent || 10) + '%';
+
+                    if (data.stage === 'reading') {
+                        stageText.innerHTML = '<span class="spinner-border spinner-border-sm text-warning me-1"></span>正在高速掃描與切分日誌文字檔...';
+                        progressBar.className = 'progress-bar progress-bar-striped progress-bar-animated bg-warning';
+                    } else if (data.stage === 'converting') {
+                        stageText.innerHTML = `<span class="spinner-border spinner-border-sm text-info me-1"></span>DuckDB 向量去重中 (正在處理 ${data.current_date})...`;
+                        progressBar.className = 'progress-bar progress-bar-striped progress-bar-animated bg-info';
+                    } else if (data.stage === 'done') {
+                        stageText.innerHTML = '<i class="bi bi-check-circle-fill text-success me-1"></i>匯入作業全數圓滿完成！';
+                        progressBar.className = 'progress-bar bg-success';
+                        progressBar.style.width = '100%';
+                        percentText.innerText = '100%';
+                        clearInterval(nasPollTimer);
+                        document.getElementById('nasCancelBtn').classList.add('d-none');
+                        document.getElementById('nasFinishBtn').classList.remove('d-none');
+                    } else if (data.stage === 'error') {
+                        clearInterval(nasPollTimer);
+                        showNasError(data.error);
+                    }
+
+                    if (data.logs && data.logs.length > 0) {
+                        consoleBox.innerHTML = data.logs.map(l => {
+                            let color = 'text-light';
+                            if (l.includes('✅') || l.includes('🎉')) color = 'text-success';
+                            if (l.includes('⚡') || l.includes('📅')) color = 'text-info';
+                            if (l.includes('❌') || l.includes('⚠️')) color = 'text-danger';
+                            return `<div class="${color}">${l}</div>`;
+                        }).join('');
+                        consoleBox.scrollTop = consoleBox.scrollHeight;
+                    }
+                })
+                .catch(err => console.log('輪詢異常', err));
+        }, 800);
+    }
+
+    function showNasError(msg) {
+        const errorAlert = document.getElementById('nasErrorAlert');
+        errorAlert.classList.remove('d-none');
+        errorAlert.innerText = msg;
+        document.getElementById('nasCancelBtn').disabled = false;
+        document.getElementById('nasCancelBtn').innerText = '關閉';
     }
 
     document.addEventListener('DOMContentLoaded', () => {
