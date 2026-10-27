@@ -75,28 +75,40 @@
 </div>
 -->
 
-<!-- 威脅查詢工具列 (1:1 依照 traffic 版面排版) -->
+<!-- 威脅查詢工具列 (強制同一列不折行 flex-nowrap) -->
 <div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white" style="overflow: visible;">
-            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-wrap gap-2" style="overflow: visible;">
+            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2" style="overflow-x: auto; overflow-y: hidden;">
                 
-                <!-- 條件篩選輸入組 -->
-                <div class="d-flex align-items-center gap-1 flex-wrap">
+                <!-- 條件篩選輸入組 (左側強制一列) -->
+                <div class="d-flex align-items-center gap-1 flex-nowrap flex-shrink-0">
                     <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-danger"></i> 條件篩選：</span>
-                    <input type="date" class="form-control form-control-sm font-monospace" style="width: 125px;" id="threat-date">
-                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="來源 (SRC IP)" style="width: 120px;" id="threat-src">
-                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="目的 (DST IP)" style="width: 125px;" id="threat-dst">
-                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="威脅特徵/類型" style="width: 130px;" id="threat-name">
-                    <select class="form-select form-select-sm" style="width: 110px;" id="threat-severity">
+                    
+                    <!-- 日期選擇器、星期顯示與前後日快捷按鈕群組 -->
+                    <div class="input-group input-group-sm flex-nowrap" style="width: auto;">
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeThreatDate(-1)" title="前一日 (快速切換)">
+                            <i class="bi bi-chevron-left"></i>
+                        </button>
+                        <input type="date" class="form-control form-control-sm font-monospace text-danger fw-bold" style="width: 125px; cursor: pointer;" id="threat-date" onclick="this.showPicker()">
+                        <span class="input-group-text bg-white text-danger fw-bold px-2 font-monospace" id="threat-weekday" style="font-size: 13px;">(六)</span>
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeThreatDate(1)" title="後一日 (快速切換)">
+                            <i class="bi bi-chevron-right"></i>
+                        </button>
+                    </div>
+
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="來源 (SRC IP)" style="width: 110px;" id="threat-src">
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="目的 (DST IP)" style="width: 115px;" id="threat-dst">
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="威脅特徵/類型" style="width: 110px;" id="threat-name">
+                    <select class="form-select form-select-sm" style="width: 105px;" id="threat-severity">
                         <option value="all">嚴重性: 全部</option>
-                        <option value="critical">critical (嚴重)</option>
-                        <option value="high">high (高)</option>
-                        <option value="medium">medium (中)</option>
-                        <option value="low">low (低)</option>
-                        <option value="informational">informational</option>
+                        <option value="critical">critical</option>
+                        <option value="high">high</option>
+                        <option value="medium">medium</option>
+                        <option value="low">low</option>
+                        <option value="informational">info</option>
                     </select>
-                    <select class="form-select form-select-sm" style="width: 95px;" id="threat-action">
+                    <select class="form-select form-select-sm" style="width: 90px;" id="threat-action">
                         <option value="all">動作: 全部</option>
                         <option value="alert">alert</option>
                         <option value="drop">drop</option>
@@ -128,8 +140,8 @@
                     </div>
                 </div>
 
-                <!-- 🌟 右側：DuckDB 向量加速與 Syslog 接收狀態徽章 (與 traffic 一致置於此行最右側) -->
-                <div class="d-flex align-items-center gap-2 ms-auto">
+                <!-- 右側狀態徽章 -->
+                <div class="d-flex align-items-center gap-2 ms-auto flex-shrink-0">
                     <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
                     <span class="badge bg-danger-subtle text-danger-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" style="font-size: 12px;">
                         <span class="spinner-grow spinner-grow-sm text-danger" style="width: 6px; height: 6px;"></span>
@@ -270,7 +282,34 @@
         const day = String(now.getDate()).padStart(2, '0');
         return `${year}-${month}-${day}`;
     }
+	
+	// 🌟 更新星期顯示
+    function updateThreatWeekday(dateVal) {
+        if (!dateVal) return;
+        const [y, m, d] = dateVal.split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        const weekdays = ['(日)', '(一)', '(二)', '(三)', '(四)', '(五)', '(六)'];
+        const el = document.getElementById('threat-weekday');
+        if (el) el.innerText = weekdays[dt.getDay()];
+    }
 
+    // 🌟 前一日 / 後一日切換
+    function changeThreatDate(deltaDays) {
+        const dateInput = document.getElementById('threat-date');
+        let curVal = dateInput.value || todayStr;
+        const [y, m, d] = curVal.split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        dt.setDate(dt.getDate() + deltaDays);
+
+        const newY = dt.getFullYear();
+        const newM = String(dt.getMonth() + 1).padStart(2, '0');
+        const newD = String(dt.getDate()).padStart(2, '0');
+        dateInput.value = `${newY}-${newM}-${newD}`;
+
+        updateThreatWeekday(dateInput.value);
+        queryThreatLogs(1);
+    }
+	
     const todayStr = getLocalDateString();
     let currentThreatPage = 1;
     let threatHistogramChartInstance = null;
@@ -607,9 +646,19 @@
         const labelMap = { 10: '10 秒', 30: '30 秒', 60: '60 秒', 0: '手動' };
         setRefreshInterval(savedSec, labelMap[savedSec] || '30 秒');
 
+        const dateInput = document.getElementById('threat-date');
+        dateInput.value = todayStr;
+        updateThreatWeekday(todayStr); // 🌟 載入當日星期
+
+        dateInput.addEventListener('change', () => {
+            updateThreatWeekday(dateInput.value); // 🌟 月曆選取後即時更新星期
+            queryThreatLogs(1);
+        });
+
         queryThreatLogs(1);
         refreshSyslogStatus();
         setInterval(refreshSyslogStatus, 3000);
     });
+	
 </script>
 {% endblock %}

@@ -1346,6 +1346,52 @@ func registerRoutes(r *gin.Engine) {
 		})
 	})
 	
+	// 🌟 21-A. 單檔循序匯入 API：匯入一個、處理一個、立即釋放空間
+	r.POST("/api/import-nas-single", func(c *gin.Context) {
+		file, err := c.FormFile("file")
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "未收到檔案內容: " + err.Error()})
+			return
+		}
+
+		logType := c.DefaultPostForm("log_type", "all")
+		fileIndex, _ := strconv.Atoi(c.DefaultPostForm("file_index", "1"))
+		totalFiles, _ := strconv.Atoi(c.DefaultPostForm("total_files", "1"))
+
+		tmpDir := filepath.Join(os.TempDir(), "pa_nas_import_single")
+		_ = os.MkdirAll(tmpDir, 0755)
+
+		tmpPath := filepath.Join(tmpDir, fmt.Sprintf("single_%d_%s", time.Now().UnixNano(), file.Filename))
+		if err := c.SaveUploadedFile(file, tmpPath); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "暫存檔案儲存失敗: " + err.Error()})
+			return
+		}
+		defer os.Remove(tmpPath) // 處理完立即清除暫存檔，磁碟零累積
+
+		// 同步執行單一檔案之串流掃描、分類切分與 DuckDB 湖倉轉檔
+		lines, valids, dates, err := processSingleNASImport(tmpPath, file.Filename, fileIndex, totalFiles, logType)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":      "success",
+			"file_lines":  lines,
+			"file_valids": valids,
+			"dates":       dates,
+		})
+	})
+
+	// 🌟 21-B. 佇列全數完成後的全域去重整併 API
+	r.GET("/api/nas-consolidate-all", func(c *gin.Context) {
+		ConsolidateParquetFiles()
+		ConsolidateThreatParquetFiles()
+		ConsolidateRawParquetFiles("traffic")
+		ConsolidateRawParquetFiles("threat")
+		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "全域整合完成"})
+	})
+	
 	// 🌟 22. NAS 匯入即時狀態與進度查詢 API
 	r.GET("/api/nas-import-status", func(c *gin.Context) {
 		globalNASProgress.RLock()

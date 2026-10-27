@@ -154,7 +154,7 @@
 
 </div>
 
-<!-- ================= 共用彈出視窗：NAS 歷史日誌匯入 (全動態進度版) ================= -->
+<!-- ================= 共用彈出視窗：NAS 歷史日誌匯入 (單檔佇列循序加速版) ================= -->
 <div class="modal fade" id="nasImportModal" tabindex="-1" aria-labelledby="nasImportModalLabel" aria-hidden="true" data-bs-backdrop="static">
     <div class="modal-dialog modal-lg">
         <div class="modal-content text-bg-dark border-secondary">
@@ -168,11 +168,11 @@
                 
                 <!-- 1. 表單輸入區 -->
                 <form id="nasImportForm">
-                    <p class="text-muted small mb-3">請選擇從 NAS 下載的日誌檔案 (*.log, *.txt, *.csv)。系統將自動過濾 Syslog 標頭、視窗去重並按天轉為 Parquet 冷熱資料。</p>
+                    <p class="text-muted small mb-2">選取從 NAS 下載的日誌檔案。系統將採用<b>單檔循序串流架構（傳一個、處理一個）</b>，即時轉換落盤，避免巨量檔案傳輸卡死。</p>
                     
-                    <div class="row g-2 mb-3">
+                    <div class="row g-2 mb-2">
                         <div class="col-12">
-                            <label class="form-label small text-secondary mb-1">日誌類型 (預設自動識別檔案內所有日期，逐日切分落盤)</label>
+                            <label class="form-label small text-secondary mb-1">日誌類型 (支援自動識別日期並切分湖倉)</label>
                             <select class="form-select form-select-sm bg-dark text-white border-secondary" id="nasLogType" name="log_type">
                                 <option value="traffic" selected>流量日誌 (Traffic)</option>
                                 <option value="threat">威脅日誌 (Threat)</option>
@@ -181,11 +181,16 @@
                         </div>
                     </div>
 
-                    <div class="mb-3">
+                    <div class="mb-2">
                         <label class="form-label small text-secondary mb-1">
-                            選擇 NAS 日誌檔案 <span class="text-info">(支援按住 Ctrl / Shift 複選多個檔案)</span>
+                            選擇 NAS 日誌檔案 <span class="text-info">(支援框選 30+ 個檔案，總量數十 GB 亦可順暢處理)</span>
                         </label>
-                        <input class="form-control form-control-sm bg-dark text-white border-secondary" type="file" id="nasFile" name="nas_files" accept=".log,.txt,.csv" multiple required>
+                        <input class="form-control form-control-sm bg-dark text-white border-secondary" type="file" id="nasFile" accept=".log,.txt,.csv" multiple required>
+                    </div>
+
+                    <!-- 檔案佇列預覽框 -->
+                    <div id="nasFileQueueBox" class="border border-secondary rounded bg-black p-2 mb-2 d-none" style="max-height: 140px; overflow-y: auto;">
+                        <ul class="list-unstyled mb-0 font-monospace small" id="nasQueueList"></ul>
                     </div>
                 </form>
 
@@ -205,20 +210,20 @@
                     <div class="row g-2 mb-2 text-center small font-monospace">
                         <div class="col-4">
                             <div class="p-2 border border-secondary rounded bg-black">
-                                <div class="text-secondary" style="font-size: 11px;">掃描總行數</div>
-                                <div class="fw-bold text-white fs-6" id="stat-total-lines">0</div>
+                                <div class="text-secondary" style="font-size: 11px;">整體檔案進度</div>
+                                <div class="fw-bold text-white fs-6" id="stat-file-idx">0 / 0 檔</div>
                             </div>
                         </div>
                         <div class="col-4">
                             <div class="p-2 border border-secondary rounded bg-black">
-                                <div class="text-secondary" style="font-size: 11px;">有效日誌筆數</div>
+                                <div class="text-secondary" style="font-size: 11px;">累積掃描行數</div>
+                                <div class="fw-bold text-primary fs-6" id="stat-total-lines">0</div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="p-2 border border-secondary rounded bg-black">
+                                <div class="text-secondary" style="font-size: 11px;">累積有效歸檔</div>
                                 <div class="fw-bold text-success fs-6" id="stat-valid-lines">0</div>
-                            </div>
-                        </div>
-                        <div class="col-4">
-                            <div class="p-2 border border-secondary rounded bg-black">
-                                <div class="text-secondary" style="font-size: 11px;">涵蓋日期天數</div>
-                                <div class="fw-bold text-info fs-6" id="stat-days-count">0 天</div>
                             </div>
                         </div>
                     </div>
@@ -230,12 +235,12 @@
                 </div>
 
                 <!-- 錯誤警告視窗 -->
-                <div id="nasErrorAlert" class="alert alert-danger d-none mt-3 small font-monospace" role="alert"></div>
+                <div id="nasErrorAlert" class="alert alert-danger d-none mt-2 small font-monospace" role="alert"></div>
             </div>
 
             <div class="modal-footer border-secondary py-2">
                 <button type="button" class="btn btn-secondary btn-sm" id="nasCancelBtn" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-primary btn-sm px-3" id="nasSubmitBtn" onclick="submitNasImport()">開始匯入整合</button>
+                <button type="button" class="btn btn-primary btn-sm px-3" id="nasSubmitBtn" onclick="submitNasImportQueue()">開始批次循序匯入</button>
                 <button type="button" class="btn btn-success btn-sm px-3 d-none" id="nasFinishBtn" onclick="location.reload()">完成，重新載入畫面</button>
             </div>
         </div>
@@ -420,26 +425,209 @@
             .catch(err => console.log('讀取歷史紀錄失敗', err));
     }
 
-    // ================= 🌟 NAS 日誌匯入全動態輪詢邏輯 =================
-    let nasImportModalObj = null;
-    let nasPollTimer = null;
+    // ================= 🌟 NAS 日誌單檔循序佇列上傳與轉檔 =================
+	let nasImportModalObj = null;
+	let nasPollTimer = null;
+	let selectedNasFiles = [];
+	let accumulatedLines = 0;
+	let accumulatedValids = 0;
 
-    function openNasImportModal() {
-        if (!nasImportModalObj) {
-            nasImportModalObj = new bootstrap.Modal(document.getElementById('nasImportModal'));
-        }
-        document.getElementById('nasImportForm').classList.remove('d-none');
-        document.getElementById('nasProgressSection').classList.add('d-none');
-        document.getElementById('nasErrorAlert').classList.add('d-none');
-        document.getElementById('nasCancelBtn').classList.remove('d-none');
-        document.getElementById('nasSubmitBtn').classList.remove('d-none');
-        document.getElementById('nasSubmitBtn').disabled = false;
-        document.getElementById('nasFinishBtn').classList.add('d-none');
-        document.getElementById('nasLogType').value = 'traffic'; // 🌟 強制確保每次彈出都預設為 Traffic
-        document.getElementById('nasConsoleBox').innerHTML = '<div class="text-secondary">等待任務啟動...</div>';
-        nasImportModalObj.show();
-    }
-	
+	function formatNasBytes(bytes) {
+		if (bytes === 0) return '0 B';
+		const k = 1024;
+		const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+		const i = Math.floor(Math.log(bytes) / Math.log(k));
+		return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+	}
+
+	function openNasImportModal() {
+		if (!nasImportModalObj) {
+			nasImportModalObj = new bootstrap.Modal(document.getElementById('nasImportModal'));
+		}
+		document.getElementById('nasImportForm').classList.remove('d-none');
+		document.getElementById('nasProgressSection').classList.add('d-none');
+		document.getElementById('nasErrorAlert').classList.add('d-none');
+		document.getElementById('nasCancelBtn').classList.remove('d-none');
+		document.getElementById('nasSubmitBtn').classList.remove('d-none');
+		document.getElementById('nasSubmitBtn').disabled = false;
+		document.getElementById('nasFinishBtn').classList.add('d-none');
+		document.getElementById('nasFileQueueBox').classList.add('d-none');
+		document.getElementById('nasLogType').value = 'traffic';
+		document.getElementById('nasFile').value = '';
+		document.getElementById('nasConsoleBox').innerHTML = '<div class="text-secondary">等待任務啟動...</div>';
+		nasImportModalObj.show();
+	}
+
+	// 監聽選取檔案：展示佇列清單
+	document.getElementById('nasFile').addEventListener('change', function(e) {
+		selectedNasFiles = Array.from(e.target.files);
+		const box = document.getElementById('nasFileQueueBox');
+		const ul = document.getElementById('nasQueueList');
+		
+		if (selectedNasFiles.length === 0) {
+			box.classList.add('d-none');
+			return;
+		}
+
+		ul.innerHTML = '';
+		let totalBytes = 0;
+		selectedNasFiles.forEach((f, idx) => {
+			totalBytes += f.size;
+			const li = document.createElement('li');
+			li.id = 'nas-q-item-' + idx;
+			li.className = 'py-1 border-bottom border-dark text-truncate d-flex justify-content-between';
+			li.innerHTML = `<span>#${idx + 1} <strong>${f.name}</strong> (${formatNasBytes(f.size)})</span><span class="badge bg-secondary" id="nas-q-badge-${idx}">等待中</span>`;
+			ul.appendChild(li);
+		});
+		box.classList.remove('d-none');
+	});
+
+	// 核心循環：逐一上傳並轉檔
+	async function submitNasImportQueue() {
+		if (!selectedNasFiles.length) {
+			alert("請先選擇要匯入的 NAS 檔案！");
+			return;
+		}
+
+		const form = document.getElementById('nasImportForm');
+		const progressSection = document.getElementById('nasProgressSection');
+		const progressBar = document.getElementById('nasProgressBar');
+		const percentText = document.getElementById('nasProgressPercent');
+		const stageText = document.getElementById('nasProgressStageText');
+		const submitBtn = document.getElementById('nasSubmitBtn');
+		const cancelBtn = document.getElementById('nasCancelBtn');
+		const logType = document.getElementById('nasLogType').value;
+
+		form.classList.add('d-none');
+		progressSection.classList.remove('d-none');
+		submitBtn.classList.add('d-none');
+		cancelBtn.disabled = true;
+
+		accumulatedLines = 0;
+		accumulatedValids = 0;
+		const totalCount = selectedNasFiles.length;
+
+		startPollingNASStatus();
+
+		for (let i = 0; i < totalCount; i++) {
+			const file = selectedNasFiles[i];
+			document.getElementById('stat-file-idx').innerText = `${i + 1} / ${totalCount} 檔`;
+
+			const percent = Math.round((i / totalCount) * 100);
+			progressBar.style.width = percent + '%';
+			percentText.innerText = percent + '%';
+			stageText.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>[${i + 1}/${totalCount}] 上傳與處理：${file.name}...`;
+
+			// 建立單檔 FormData
+			const formData = new FormData();
+			formData.append('file', file);
+			formData.append('file_index', i + 1);
+			formData.append('total_files', totalCount);
+			formData.append('log_type', logType);
+
+			try {
+				const resp = await uploadSingleNasFile(formData, (loaded, total) => {
+					const mbLoaded = (loaded / 1024 / 1024).toFixed(1);
+					const mbTotal = (total / 1024 / 1024).toFixed(1);
+					stageText.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>[${i + 1}/${totalCount}] 傳輸中: ${mbLoaded}MB / ${mbTotal}MB (${file.name})`;
+				});
+
+				if (resp.status === 'success') {
+					accumulatedLines += (resp.file_lines || 0);
+					accumulatedValids += (resp.file_valids || 0);
+					document.getElementById('stat-total-lines').innerText = accumulatedLines.toLocaleString();
+					document.getElementById('stat-valid-lines').innerText = accumulatedValids.toLocaleString();
+				} else {
+					showNasError(`處理 ${file.name} 失敗: ${resp.message}`);
+					break;
+				}
+			} catch (err) {
+				showNasError(`傳輸中斷: ${err}`);
+				break;
+			}
+		}
+
+		// 全部處理完成，呼叫一次全域去重整併
+		stageText.innerHTML = '<span class="spinner-border spinner-border-sm text-info me-1"></span>全數完成，正在執行 DuckDB 去重整合...';
+		try {
+			await fetch('/api/nas-consolidate-all', { credentials: 'same-origin' });
+		} catch(e) {}
+
+		clearInterval(nasPollTimer);
+		fetchNasStatusOnce();
+
+		progressBar.style.width = '100%';
+		percentText.innerText = '100%';
+		progressBar.className = 'progress-bar bg-success';
+		stageText.innerHTML = '<i class="bi bi-check-circle-fill text-success me-1"></i>全數檔案處理與整合圓滿完成！';
+		document.getElementById('nasCancelBtn').classList.add('d-none');
+		document.getElementById('nasFinishBtn').classList.remove('d-none');
+	}
+
+	function uploadSingleNasFile(formData, onProgress) {
+		return new Promise((resolve, reject) => {
+			const xhr = new XMLHttpRequest();
+			xhr.open('POST', '/api/import-nas-single', true);
+
+			xhr.upload.onprogress = function(e) {
+				if (e.lengthComputable && onProgress) {
+					onProgress(e.loaded, e.total);
+				}
+			};
+
+			xhr.onload = function() {
+				if (xhr.status === 200) {
+					try {
+						resolve(JSON.parse(xhr.responseText));
+					} catch (e) {
+						reject(new Error("伺服器回應格式錯誤"));
+					}
+				} else {
+					reject(new Error(`HTTP 錯誤碼: ${xhr.status}`));
+				}
+			};
+
+			xhr.onerror = function() {
+				reject(new Error("網路連線失敗"));
+			};
+
+			xhr.send(formData);
+		});
+	}
+
+	function startPollingNASStatus() {
+		if (nasPollTimer) clearInterval(nasPollTimer);
+		nasPollTimer = setInterval(fetchNasStatusOnce, 800);
+	}
+
+	function fetchNasStatusOnce() {
+		fetch(`/api/nas-import-status?_t=${Date.now()}`)
+			.then(res => res.json())
+			.then(data => {
+				if (data.status !== 'success') return;
+				const consoleBox = document.getElementById('nasConsoleBox');
+				if (data.logs && data.logs.length > 0) {
+					consoleBox.innerHTML = data.logs.map(l => {
+						let color = 'text-light';
+						if (l.includes('✅') || l.includes('🎉')) color = 'text-success';
+						if (l.includes('⚡') || l.includes('📅')) color = 'text-info';
+						if (l.includes('❌') || l.includes('⚠️')) color = 'text-danger';
+						return `<div class="${color}">${l}</div>`;
+					}).join('');
+					consoleBox.scrollTop = consoleBox.scrollHeight;
+				}
+			})
+			.catch(() => {});
+	}
+
+	function showNasError(msg) {
+		if (nasPollTimer) clearInterval(nasPollTimer);
+		const errorAlert = document.getElementById('nasErrorAlert');
+		errorAlert.classList.remove('d-none');
+		errorAlert.innerText = msg;
+		document.getElementById('nasCancelBtn').disabled = false;
+		document.getElementById('nasCancelBtn').innerText = '關閉';
+	}	
     function submitNasImport() {
         const fileInput = document.getElementById('nasFile');
         if (!fileInput.files.length) {
@@ -550,14 +738,6 @@
                 })
                 .catch(err => console.log('輪詢異常', err));
         }, 800);
-    }
-
-    function showNasError(msg) {
-        const errorAlert = document.getElementById('nasErrorAlert');
-        errorAlert.classList.remove('d-none');
-        errorAlert.innerText = msg;
-        document.getElementById('nasCancelBtn').disabled = false;
-        document.getElementById('nasCancelBtn').innerText = '關閉';
     }
 
     document.addEventListener('DOMContentLoaded', () => {

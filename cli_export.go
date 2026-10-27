@@ -212,65 +212,71 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 	tmpHot := filepath.ToSlash(hotParquetPath + ".tmp")
 	tmpCold := filepath.ToSlash(coldParquetPath + ".tmp")
 
-	// 熱資料 SQL
+	txtPattern := filepath.ToSlash(filepath.Join(req.FTPFolder, "*.txt"))
+	// 若相容原本的 csv 命名，亦可使用:
+	if matches, _ := filepath.Glob(filepath.Join(req.FTPFolder, "*.csv")); len(matches) > 0 {
+		txtPattern = filepath.ToSlash(filepath.Join(req.FTPFolder, "*.csv"))
+	}
+
+	// 🌟 熱資料 SQL：徹底拋棄 read_csv_auto，改採與批次檔 100% 一致的強健 split_part
 	var hotQuery string
 	if req.LogType == "threat" {
 		hotQuery = fmt.Sprintf(`
 			COPY (
 				SELECT
-					REPLACE(REPLACE("Generate Time", '/', '-'), ' ', ' ') AS timestamp,
-					"Type" AS subtype,
-					COALESCE("Threat/Content Name", "Threat/Content Type") AS threat_name,
-					"Threat/Content Type" AS threat_id,
-					"Source Zone" AS from_zone,
-					"Destination Zone" AS to_zone,
-					"Source address" AS src,
-					"Destination address" AS dst,
-					TRY_CAST("Destination Port" AS INT) AS to_port,
-					"Application" AS application,
-					"Action" AS action,
-					"Severity" AS severity,
-					"Misc" AS url,
-					CAST("Session ID" AS VARCHAR) AS session_id
+					REPLACE(REPLACE(split_part(line, ',', 7), '/', '-'), ' ', ' ') AS timestamp,
+					split_part(line, ',', 5) AS subtype,
+					COALESCE(NULLIF(split_part(line, ',', 33), ''), split_part(line, ',', 5)) AS threat_name,
+					split_part(line, ',', 5) AS threat_id,
+					split_part(line, ',', 17) AS from_zone,
+					split_part(line, ',', 18) AS to_zone,
+					split_part(line, ',', 8) AS src,
+					split_part(line, ',', 9) AS dst,
+					TRY_CAST(split_part(line, ',', 26) AS INT) AS to_port,
+					split_part(line, ',', 15) AS application,
+					split_part(line, ',', 31) AS action,
+					split_part(line, ',', 35) AS severity,
+					split_part(line, ',', 32) AS url,
+					split_part(line, ',', 23) AS session_id
 				FROM (
 					SELECT *, ROW_NUMBER() OVER (
-						PARTITION BY "Generate Time", "Source address", "Destination address", "Threat/Content Type", "Action"
-						ORDER BY "Generate Time" DESC
+						PARTITION BY split_part(line, ',', 7), split_part(line, ',', 8), split_part(line, ',', 9), split_part(line, ',', 23)
+						ORDER BY split_part(line, ',', 7) DESC
 					) as rn
-					FROM read_csv_auto('%s', header=true, all_varchar=true, ignore_errors=true)
-					WHERE "Source address" IS NOT NULL AND "Source address" != ''
+					FROM read_csv('%s', header=false, columns={'line': 'VARCHAR'}, quote='', escape='', auto_detect=false, delim=E'\x1f', strict_mode=false)
+					WHERE line LIKE '%%,THREAT,%%'
 				) WHERE rn = 1 ORDER BY timestamp DESC
 			) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
-		`, csvPattern, tmpHot)
+		`, txtPattern, tmpHot)
 	} else {
 		hotQuery = fmt.Sprintf(`
 			COPY (
 				SELECT
-					REPLACE(REPLACE("Generate Time", '/', '-'), ' ', ' ') AS timestamp,
-					"Threat/Content Type" AS type, -- 🌟 修正：正確提取 drop/end 子類型！
-					"Source Zone" AS from_zone,
-					"Destination Zone" AS to_zone,
-					"Source address" AS source,
-					"NAT Source IP" AS nat_source_ip,
-					"Destination address" AS destination,
-					"NAT Destination IP" AS nat_dest_ip,
-					TRY_CAST("Destination Port" AS INT) AS to_port,
-					"Application" AS application,
-					"Action" AS action,
-					"Rule" AS rule,
-					"Session End Reason" AS session_end_reason,
-					TRY_CAST("Bytes" AS BIGINT) AS bytes,
-					CAST("Session ID" AS VARCHAR) AS session_id
+					REPLACE(REPLACE(split_part(line, ',', 7), '/', '-'), ' ', ' ') AS timestamp,
+					split_part(line, ',', 5) AS type,
+					split_part(line, ',', 17) AS from_zone,
+					split_part(line, ',', 18) AS to_zone,
+					split_part(line, ',', 8) AS source,
+					split_part(line, ',', 10) AS nat_source_ip,
+					split_part(line, ',', 9) AS destination,
+					split_part(line, ',', 11) AS nat_dest_ip,
+					TRY_CAST(split_part(line, ',', 26) AS INT) AS to_port,
+					split_part(line, ',', 15) AS application,
+					split_part(line, ',', 31) AS action,
+					split_part(line, ',', 12) AS rule,
+					split_part(line, ',', 47) AS session_end_reason,
+					TRY_CAST(split_part(line, ',', 32) AS BIGINT) AS bytes,
+					split_part(line, ',', 23) AS session_id
 				FROM (
 					SELECT *, ROW_NUMBER() OVER (
-						PARTITION BY "Generate Time", "Source address", "Destination address", "Destination Port", "Session ID"
-						ORDER BY "Generate Time" DESC
+						PARTITION BY split_part(line, ',', 7), split_part(line, ',', 8), split_part(line, ',', 9), split_part(line, ',', 23)
+						ORDER BY split_part(line, ',', 7) DESC
 					) as rn
-					FROM read_csv_auto('%s', header=true, all_varchar=true, ignore_errors=true)
-					WHERE "Source address" IS NOT NULL AND "Source address" != ''
+					FROM read_csv('%s', header=false, columns={'line': 'VARCHAR'}, quote='', escape='', auto_detect=false, delim=E'\x1f', strict_mode=false)
+					WHERE line LIKE '%%,TRAFFIC,%%'
 				) WHERE rn = 1 ORDER BY timestamp DESC
 			) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
-		`, csvPattern, tmpHot)
+		`, txtPattern, tmpHot)
 	}
 
 	// 熱資料落盤 (去重、強型別、ZSTD 列式壓縮)

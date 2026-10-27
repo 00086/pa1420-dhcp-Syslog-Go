@@ -2955,7 +2955,7 @@ func processNASImport(nasFilePaths []string, logType string) {
 				dayDir := filepath.Join(baseTmpDir, currentType, dateKey)
 				_ = os.MkdirAll(dayDir, 0755)
 
-				dayCsvPath := filepath.Join(dayDir, fmt.Sprintf("%s_%s.csv", currentType, dateKey))
+				dayCsvPath := filepath.Join(dayDir, fmt.Sprintf("%s_%s.txt", currentType, dateKey))
 				outF, createErr := os.Create(dayCsvPath)
 				if createErr != nil {
 					continue
@@ -3099,5 +3099,189 @@ func processNASImport(nasFilePaths []string, logType string) {
 	} else {
 		globalNASProgress.addLog(fmt.Sprintf("🎉 全部 %d 個檔案批次轉檔與整合作業全數圓滿完成！", len(nasFilePaths)))
 	}
+}
+
+// 🌟 處理單一 NAS 上傳檔案 (讀取、即時切分至臨時 CSV，並呼叫 DuckDB 產生 Parquet)
+func processSingleNASImport(filePath, fileName string, fileIdx, totalFiles int, logType string) (int, int, []string, error) {
+	globalNASProgress.Lock()
+	globalNASProgress.IsRunning = true
+	globalNASProgress.Stage = "reading"
+	globalNASProgress.FileName = fileName
+	globalNASProgress.Unlock()
+
+	globalNASProgress.addLog(fmt.Sprintf("📖 [%d/%d] 開始串流讀取檔案: %s", fileIdx, totalFiles, fileName))
+
+	inFile, err := os.Open(filePath)
+	if err != nil {
+		globalNASProgress.addLog(fmt.Sprintf("❌ 無法開啟檔案 %s: %v", fileName, err))
+		return 0, 0, nil, err
+	}
+	defer inFile.Close()
+
+	baseTmpDir := filepath.Join(os.TempDir(), fmt.Sprintf("nas_s_%d", time.Now().UnixNano()))
+	_ = os.MkdirAll(baseTmpDir, 0755)
+	defer os.RemoveAll(baseTmpDir)
+
+	type BatchTarget struct {
+		LogType string
+		Date    string
+		Dir     string
+		File    *os.File
+		Count   int
+	}
+
+	batches := make(map[string]*BatchTarget)
+
+	lineCounter := 0
+	validCounter := 0
+
+	scanner := bufio.NewScanner(inFile)
+	buf := make([]byte, 0, 4*1024*1024)
+	scanner.Buffer(buf, 4*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		lineCounter++
+
+		isTraffic := strings.Contains(line, ",TRAFFIC,")
+		isThreat := strings.Contains(line, ",THREAT,")
+		if !isTraffic && !isThreat {
+			continue
+		}
+
+		idx := -1
+		if isTraffic {
+			trafficPos := strings.Index(line, ",TRAFFIC,")
+			lastTab := strings.LastIndex(line[:trafficPos], "\t")
+			if lastTab != -1 {
+				idx = lastTab + 1
+			} else {
+				idx = strings.LastIndex(line[:trafficPos], " 1,20")
+				if idx == -1 { idx = strings.LastIndex(line[:trafficPos], " ") }
+				if idx != -1 { idx++ } else { idx = 0 }
+			}
+		} else {
+			threatPos := strings.Index(line, ",THREAT,")
+			lastTab := strings.LastIndex(line[:threatPos], "\t")
+			if lastTab != -1 {
+				idx = lastTab + 1
+			} else {
+				idx = strings.LastIndex(line[:threatPos], " 1,20")
+				if idx == -1 { idx = strings.LastIndex(line[:threatPos], " ") }
+				if idx != -1 { idx++ } else { idx = 0 }
+			}
+		}
+
+		if idx < 0 || idx >= len(line) {
+			continue
+		}
+
+		cleanCSVLine := strings.ReplaceAll(line[idx:], "\t", " ")
+		parts := strings.Split(cleanCSVLine, ",")
+		if len(parts) < 6 {
+			continue
+		}
+
+		typeIdx := -1
+		var currentType string
+		for pIdx, pVal := range parts {
+			uVal := strings.ToUpper(strings.TrimSpace(pVal))
+			if uVal == "TRAFFIC" {
+				typeIdx = pIdx
+				currentType = "traffic"
+				break
+			} else if uVal == "THREAT" {
+				typeIdx = pIdx
+				currentType = "threat"
+				break
+			}
+		}
+
+		if typeIdx == -1 || typeIdx+3 >= len(parts) {
+			continue
+		}
+
+		if typeIdx == 2 {
+			cleanCSVLine = "1," + cleanCSVLine
+			parts = strings.Split(cleanCSVLine, ",")
+			typeIdx = 3
+		}
+
+		if logType != "" && logType != "all" && currentType != logType {
+			continue
+		}
+
+		// 🌟 錨定 Generate Time (在 Type 後方第 3 個欄位)
+		rawTime := strings.TrimSpace(parts[typeIdx+3])
+		sub := strings.Split(rawTime, " ")
+		if len(sub) == 0 {
+			continue
+		}
+		dateKey := strings.ReplaceAll(sub[0], "/", "-")
+		validCounter++
+
+		batchKey := fmt.Sprintf("%s_%s", currentType, dateKey)
+		b, exists := batches[batchKey]
+		if !exists {
+			dayDir := filepath.Join(baseTmpDir, currentType, dateKey)
+			_ = os.MkdirAll(dayDir, 0755)
+
+			dayCsvPath := filepath.Join(dayDir, fmt.Sprintf("%s_%s.csv", currentType, dateKey))
+			outF, createErr := os.Create(dayCsvPath)
+			if createErr != nil {
+				continue
+			}
+
+			// 🌟 修正：不預寫固定欄位表頭，避免後續 DuckDB 發生欄位數不合而整批拋棄
+			// 保持原始日誌格式，後續由 DuckDB split_part 直接精準提取各欄位
+
+			b = &BatchTarget{
+				LogType: currentType,
+				Date:    dateKey,
+				Dir:     dayDir,
+				File:    outF,
+				Count:   0,
+			}
+			batches[batchKey] = b
+		}
+
+		b.File.WriteString(cleanCSVLine + "\n")
+		b.Count++
+	}
+
+	for _, b := range batches {
+		_ = b.File.Close()
+	}
+
+	var generatedDates []string
+	// 逐個日期批次呼叫 DuckDB 進行 Parquet 湖倉落盤
+	for _, b := range batches {
+		typeName := "流量 (Traffic)"
+		if b.LogType == "threat" {
+			typeName = "威脅 (Threat)"
+		}
+
+		globalNASProgress.addLog(fmt.Sprintf("  ⚡ 正在建立 [%s %s] 的 Parquet 湖倉 (共 %d 筆)...", typeName, b.Date, b.Count))
+
+		req := CLIExportRequest{
+			Date:        b.Date,
+			LogType:     b.LogType,
+			FTPFolder:   b.Dir,
+			ConvertOnly: true,
+			SkipCold:    false,
+		}
+
+		_ = performCLIExportAndConvert(req, func(format string, a ...any) {
+			msg := strings.TrimSpace(fmt.Sprintf(format, a...))
+			if msg != "" {
+				globalNASProgress.addLog("    " + msg)
+			}
+		})
+
+		generatedDates = append(generatedDates, b.Date)
+	}
+
+	globalNASProgress.addLog(fmt.Sprintf("✅ [%d/%d] %s 處理完成！(掃描 %d 行，有效歸檔 %d 筆)", fileIdx, totalFiles, fileName, lineCounter, validCounter))
+	return lineCounter, validCounter, generatedDates, nil
 }
 

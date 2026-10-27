@@ -61,26 +61,37 @@
 {% endblock %}
 
 {% block content %}
-<!-- 流量查詢工具列 -->
+<!-- 流量查詢工具列 (強制同一列不折行 flex-nowrap) -->
 <div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white" style="overflow: visible;">
-            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-wrap gap-2" style="overflow: visible;">
+            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2" style="overflow-x: auto; overflow-y: hidden;">
                 
-                <!-- 條件篩選輸入組 -->
-                <!-- 條件篩選輸入組 -->
-                <div class="d-flex align-items-center gap-1 flex-wrap">
+                <!-- 條件篩選輸入組 (左側所有控制元件強制一列) -->
+                <div class="d-flex align-items-center gap-1 flex-nowrap flex-shrink-0">
                     <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-primary"></i> 條件篩選：</span>
-                    <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold" style="width: 130px; cursor: pointer;" id="traffic-date" onclick="this.showPicker()">
-                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="來源 (SRC)" style="width: 120px;" id="traffic-src">
-                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="目的地 (DST)" style="width: 125px;" id="traffic-dst">
-                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="應用 (APP)" style="width: 110px;" id="traffic-app">
-                    <select class="form-select form-select-sm" style="width: 95px;" id="traffic-action">
+                    
+                    <!-- 日期選擇器、星期顯示與前後日快捷按鈕群組 -->
+                    <div class="input-group input-group-sm flex-nowrap" style="width: auto;">
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeTrafficDate(-1)" title="前一日 (快速切換)">
+                            <i class="bi bi-chevron-left"></i>
+                        </button>
+                        <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold" style="width: 125px; cursor: pointer;" id="traffic-date" onclick="this.showPicker()">
+                        <span class="input-group-text bg-white text-primary fw-bold px-2 font-monospace" id="traffic-weekday" style="font-size: 13px;">(六)</span>
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeTrafficDate(1)" title="後一日 (快速切換)">
+                            <i class="bi bi-chevron-right"></i>
+                        </button>
+                    </div>
+
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="來源 (SRC)" style="width: 105px;" id="traffic-src">
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="目的地 (DST)" style="width: 110px;" id="traffic-dst">
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="應用 (APP)" style="width: 95px;" id="traffic-app">
+                    <select class="form-select form-select-sm" style="width: 90px;" id="traffic-action">
                         <option value="all">動作: 全部</option>
                         <option value="allow">allow</option>
                         <option value="deny">deny/drop</option>
                     </select>
-                    <select class="form-select form-select-sm" style="width: 85px;" id="traffic-zone">
+                    <select class="form-select form-select-sm" style="width: 80px;" id="traffic-zone">
                         <option value="all">區域: 全部</option>
                         <option value="LAN">LAN</option>
                         <option value="WAN">WAN</option>
@@ -110,9 +121,9 @@
                     </div>
                 </div>
 
-                <!-- 右側：Syslog 接收狀態徽章 -->
-                <div class="d-flex align-items-center gap-2 ms-auto">
-				    <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
+                <!-- 右側狀態徽章 (固定不折行) -->
+                <div class="d-flex align-items-center gap-2 ms-auto flex-shrink-0">
+                    <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
                     <span class="badge bg-success-subtle text-success-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" id="syslog-status-badge" style="font-size: 12px;">
                         <span class="spinner-grow spinner-grow-sm text-success" style="width: 6px; height: 6px;"></span>
                         <span id="syslog-flush-text">Syslog 514: Traffic 0 筆</span>
@@ -254,7 +265,34 @@
         const day = String(now.getDate()).padStart(2, '0');
         return `${year}-${month}-${day}`;
     }
+	
+	// 🌟 更新星期顯示（去除「星期」兩字）
+    function updateTrafficWeekday(dateVal) {
+        if (!dateVal) return;
+        const [y, m, d] = dateVal.split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        const weekdays = ['(日)', '(一)', '(二)', '(三)', '(四)', '(五)', '(六)'];
+        const el = document.getElementById('traffic-weekday');
+        if (el) el.innerText = weekdays[dt.getDay()];
+    }
 
+    // 🌟 前一日 / 後一日切換
+    function changeTrafficDate(deltaDays) {
+        const dateInput = document.getElementById('traffic-date');
+        let curVal = dateInput.value || todayStr;
+        const [y, m, d] = curVal.split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        dt.setDate(dt.getDate() + deltaDays);
+
+        const newY = dt.getFullYear();
+        const newM = String(dt.getMonth() + 1).padStart(2, '0');
+        const newD = String(dt.getDate()).padStart(2, '0');
+        dateInput.value = `${newY}-${newM}-${newD}`;
+
+        updateTrafficWeekday(dateInput.value);
+        queryTrafficLogs(1);
+    }
+	
     const todayStr = getLocalDateString();
     let currentTrafficPage = 1;
     let messageCountChartInstance = null;
@@ -580,10 +618,14 @@
         const labelMap = { 10: '10 秒', 30: '30 秒', 60: '60 秒', 0: '手動' };
         setRefreshInterval(savedSec, labelMap[savedSec] || '10 秒');
 
-        // 🌟 預設為今日，點選月曆更換日期時自動執行檢索
         const dateInput = document.getElementById('traffic-date');
         dateInput.value = todayStr;
-        dateInput.addEventListener('change', () => queryTrafficLogs(1));
+        updateTrafficWeekday(todayStr); // 🌟 載入當日星期
+
+        dateInput.addEventListener('change', () => {
+            updateTrafficWeekday(dateInput.value); // 🌟 月曆選取後即時更新星期
+            queryTrafficLogs(1);
+        });
 
         queryTrafficLogs(1);
         refreshSyslogStatus();
