@@ -444,28 +444,50 @@ func registerRoutes(r *gin.Engine) {
 		})
 	})
 
-	// 10. ARP 即時比對與固定 IP 分析
+	// 10. ARP 即時比對與固定 IP 分析 (加入 PAN-OS 11 相容與 SQLite 自動落盤)
 	r.GET("/api/arp-analysis", func(c *gin.Context) {
-		queryDate := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
-		body, err := runPACommand("<show><arp><entry name='all'/></arp></show>")
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
-			return
+		queryDate := strings.ReplaceAll(c.DefaultQuery("date", time.Now().Format("2006-01-02")), "/", "-")
+
+		// 🌟 雙重相容性指令：相容 PAN-OS 10/11 的 <all/> 與舊版 entry 標籤
+		cmds := []string{
+			"<show><arp><all/></show>",
+			"<show><arp><entry name='all'/></arp></show>",
 		}
 
-		decoder := xml.NewDecoder(bytes.NewReader(body))
 		var arpEntries []ARPEntry
-		for {
-			token, err := decoder.Token()
+		var lastErr error
+
+		for _, cmd := range cmds {
+			body, err := runPACommand(cmd)
 			if err != nil {
-				break
+				lastErr = err
+				continue
 			}
-			if se, ok := token.(xml.StartElement); ok && se.Name.Local == "entry" {
-				var e ARPEntry
-				if err := decoder.DecodeElement(&e, &se); err == nil {
-					arpEntries = append(arpEntries, e)
+
+			decoder := xml.NewDecoder(bytes.NewReader(body))
+			for {
+				token, err := decoder.Token()
+				if err != nil {
+					break
+				}
+				if se, ok := token.(xml.StartElement); ok && se.Name.Local == "entry" {
+					var e ARPEntry
+					if err := decoder.DecodeElement(&e, &se); err == nil {
+						if strings.TrimSpace(e.IP) != "" && strings.TrimSpace(e.MAC) != "" {
+							arpEntries = append(arpEntries, e)
+						}
+					}
 				}
 			}
+
+			if len(arpEntries) > 0 {
+				break
+			}
+		}
+
+		if len(arpEntries) == 0 && lastErr != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": fmt.Sprintf("無法取得防火牆 ARP 紀錄: %v", lastErr)})
+			return
 		}
 
 		db, _ := initDB()
@@ -523,7 +545,7 @@ func registerRoutes(r *gin.Engine) {
 		for _, e := range arpEntries {
 			ip := strings.TrimSpace(e.IP)
 			mac := strings.ToLower(strings.TrimSpace(e.MAC))
-			if ip == "" || mac == "" || mac == "(incomplete)" || e.Status == "i" {
+			if ip == "" || mac == "" || mac == "(incomplete)" || strings.ToLower(strings.TrimSpace(e.Status)) == "i" {
 				continue
 			}
 
@@ -590,6 +612,39 @@ func registerRoutes(r *gin.Engine) {
 			return results[i].IP < results[j].IP
 		})
 
+		// =========================================================================
+		// 🌟 核心落盤位置：在 sort.Slice 之後、回傳 c.JSON 之前自動寫入 SQLite
+		// =========================================================================
+		if db != nil && len(results) > 0 {
+			go func(entries []ARPResult) {
+				tx, err := db.Begin()
+				if err == nil {
+					stmt, sErr := tx.Prepare(`
+						INSERT INTO arp_records (ip, mac, interface, hostname, dev_type, updated_at)
+						VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+						ON CONFLICT(ip) DO UPDATE SET
+							mac = excluded.mac,
+							interface = excluded.interface,
+							hostname = CASE WHEN excluded.hostname != '' AND excluded.hostname != '-' THEN excluded.hostname ELSE arp_records.hostname END,
+							dev_type = excluded.dev_type,
+							updated_at = CURRENT_TIMESTAMP
+					`)
+					if sErr == nil {
+						defer stmt.Close()
+						cleanRegex := regexp.MustCompile(`<[^>]*>`)
+						for _, r := range entries {
+							cleanHn := r.Hostname
+							if strings.Contains(cleanHn, "<") {
+								cleanHn = strings.TrimSpace(cleanRegex.ReplaceAllString(cleanHn, ""))
+							}
+							_, _ = stmt.Exec(r.IP, r.MAC, r.Interface, cleanHn, r.DevType)
+						}
+						_ = tx.Commit()
+					}
+				}
+			}(results)
+		}
+
 		dnsMutex.RLock()
 		progress := dnsWorkerStatus
 		dnsMutex.RUnlock()
@@ -605,7 +660,7 @@ func registerRoutes(r *gin.Engine) {
 			"data":              results,
 		})
 	})
-
+	
 	// 11. 流量日誌檢索與直方圖數據 API (強制禁用瀏覽器快取)
 	r.GET("/api/traffic-query", func(c *gin.Context) {
 		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -1514,4 +1569,642 @@ func registerRoutes(r *gin.Engine) {
 		})
 	})
 	
+	// ==========================================
+	// 🌟 全新移植：流量明細檢索與三向統計頁面
+	// 1. 流量通訊軌跡明細檢索頁面
+	// ==========================================
+	r.GET("/search", func(c *gin.Context) {
+		renderPongo(c, "search.html", pongo2.Context{
+			"active_page": "search",
+			"today":       time.Now().Format("2006-01-02"),
+		})
+	})
+
+	// 流量進階檢索 API (時間基準錨定 + 頁碼超界防護 + 完整分頁)
+	r.POST("/api/flow/search", func(c *gin.Context) {
+		var req struct {
+			Date      string `json:"date"`
+			StartTime string `json:"start_time"`
+			EndTime   string `json:"end_time"`
+			SrcIP     string `json:"src_ip"`
+			DstIP     string `json:"dst_ip"`
+			Port      string `json:"port"`
+			App       string `json:"app"`  // 🌟 新增：支援 L7 應用服務過濾
+			Zone      string `json:"zone"` // download, upload, internal
+			Page      int    `json:"page"`
+			PerPage   int    `json:"per_page"`
+		}
+		_ = c.ShouldBindJSON(&req)
+
+		queryDate := strings.ReplaceAll(strings.TrimSpace(req.Date), "/", "-")
+		if queryDate == "" {
+			queryDate = time.Now().Format("2006-01-02")
+		}
+		if req.Page < 1 { req.Page = 1 }
+		if req.PerPage < 1 { req.PerPage = 50 }
+
+		pattern := filepath.ToSlash(filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", queryDate)))
+
+		tFiles, _ := filepath.Glob(filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", queryDate)))
+		if len(tFiles) == 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"status":        "success",
+				"total_records": 0,
+				"total_pages":   1,
+				"current_page":  1,
+				"fixed_end_time": "",
+				"sum_download":  0.0,
+				"sum_upload":    0.0,
+				"sum_internal":  0.0,
+				"data":          []interface{}{},
+			})
+			return
+		}
+
+		// 🌟 1. 時間錨定：若前端在分頁過程中有帶入前次查詢的固定 end_time，直接鎖定該時間
+		var fixedEndTime string
+		var baseTime time.Time
+
+		if req.EndTime != "" && req.StartTime != "custom" && !strings.Contains(req.StartTime, " ") {
+			if pt, err := time.Parse("2006-01-02 15:04:05", strings.ReplaceAll(req.EndTime, "T", " ")); err == nil {
+				baseTime = pt
+				fixedEndTime = baseTime.Format("2006-01-02 15:04:05")
+			}
+		}
+
+		// 初次點擊查詢：以 Parquet 檔案中最新一筆紀錄（或目前時間）作為時間窗錨點
+		if baseTime.IsZero() {
+			maxTimeSQL := fmt.Sprintf(`SELECT MAX(timestamp) AS max_t FROM read_parquet('%s')`, pattern)
+			if maxRes, err := runDuckDBQuery(maxTimeSQL); err == nil && len(maxRes) > 0 && maxRes[0]["max_t"] != nil {
+				if tStr, ok := maxRes[0]["max_t"].(string); ok && len(tStr) >= 19 {
+					if pt, err := time.Parse("2006-01-02 15:04:05", tStr[:19]); err == nil {
+						baseTime = pt
+					}
+				}
+			}
+			if baseTime.IsZero() {
+				baseTime = time.Now()
+			}
+			fixedEndTime = baseTime.Format("2006-01-02 15:04:05")
+		}
+
+		// 🌟 2. 構建時間條件
+		var baseConds []string
+		baseConds = append(baseConds, "1=1")
+
+		if req.StartTime != "" && req.StartTime != "-24h" {
+			if req.StartTime == "custom" || strings.Contains(req.StartTime, " ") || strings.Contains(req.StartTime, "T") {
+				st := strings.ReplaceAll(strings.TrimSpace(req.StartTime), "T", " ")
+				et := strings.ReplaceAll(strings.TrimSpace(req.EndTime), "T", " ")
+				if len(st) == 16 { st += ":00" }
+				if len(et) == 16 { et += ":59" }
+				if st != "" && et != "" {
+					baseConds = append(baseConds, fmt.Sprintf("timestamp >= '%s' AND timestamp <= '%s'", st, et))
+				} else if st != "" {
+					baseConds = append(baseConds, fmt.Sprintf("timestamp >= '%s'", st))
+				}
+			} else {
+				mins := 5
+				switch req.StartTime {
+				case "-5m": mins = 5
+				case "-15m": mins = 15
+				case "-30m": mins = 30
+				case "-1h": mins = 60
+				case "-6h": mins = 360
+				default: mins = 5
+				}
+				stThres := baseTime.Add(-time.Duration(mins) * time.Minute).Format("2006-01-02 15:04:05")
+				etThres := fixedEndTime
+				baseConds = append(baseConds, fmt.Sprintf("timestamp >= '%s' AND timestamp <= '%s'", stThres, etThres))
+			}
+		}
+
+		if req.SrcIP != "" { baseConds = append(baseConds, fmt.Sprintf("source ILIKE '%%%s%%'", strings.ReplaceAll(req.SrcIP, "'", "''"))) }
+		if req.DstIP != "" { baseConds = append(baseConds, fmt.Sprintf("destination ILIKE '%%%s%%'", strings.ReplaceAll(req.DstIP, "'", "''"))) }
+		if req.Port != "" { baseConds = append(baseConds, fmt.Sprintf("to_port = %s", req.Port)) }
+		// 🌟 新增：L7 應用 (application) 模糊比對過濾
+		if req.App != "" {
+			baseConds = append(baseConds, fmt.Sprintf("application ILIKE '%%%s%%'", strings.ReplaceAll(req.App, "'", "''")))
+		}
+		baseWhereClause := strings.Join(baseConds, " AND ")
+
+		safeFloat := func(val interface{}) float64 {
+			if val == nil { return 0.0 }
+			switch v := val.(type) {
+			case float64: return v
+			case int64:   return float64(v)
+			case int:     return float64(v)
+			case string:
+				if f, err := strconv.ParseFloat(v, 64); err == nil { return f }
+			}
+			return 0.0
+		}
+
+		// 🌟 3. 三向卡片統計
+		threeWaySQL := fmt.Sprintf(`
+			SELECT 
+				CAST(round(COALESCE(SUM(CASE WHEN from_zone = 'LAN' AND to_zone = 'WAN' THEN bytes END), 0)/1048576.0, 2) AS DOUBLE) AS lan_wan_mb,
+				CAST(round(COALESCE(SUM(CASE WHEN from_zone = 'WAN' AND to_zone = 'LAN' THEN bytes END), 0)/1048576.0, 2) AS DOUBLE) AS wan_lan_mb,
+				CAST(round(COALESCE(SUM(CASE WHEN from_zone = 'LAN' AND to_zone = 'LAN' THEN bytes END), 0)/1048576.0, 2) AS DOUBLE) AS lan_lan_mb
+			FROM read_parquet('%s')
+			WHERE %s
+		`, pattern, baseWhereClause)
+
+		var sumLanWan, sumWanLan, sumLanLan float64
+		if threeWayRes, err := runDuckDBQuery(threeWaySQL); err == nil && len(threeWayRes) > 0 {
+			sumLanWan = safeFloat(threeWayRes[0]["lan_wan_mb"])
+			sumWanLan = safeFloat(threeWayRes[0]["wan_lan_mb"])
+			sumLanLan = safeFloat(threeWayRes[0]["lan_lan_mb"])
+		}
+
+		// 🌟 4. 表格過濾條件 (Zone)
+		tableConds := append([]string{}, baseConds...)
+		if req.Zone == "download" {
+			tableConds = append(tableConds, "from_zone = 'LAN' AND to_zone = 'WAN'")
+		} else if req.Zone == "upload" {
+			tableConds = append(tableConds, "from_zone = 'WAN' AND to_zone = 'LAN'")
+		} else if req.Zone == "internal" {
+			tableConds = append(tableConds, "from_zone = 'LAN' AND to_zone = 'LAN'")
+		}
+		tableWhereClause := strings.Join(tableConds, " AND ")
+
+		// 🌟 5. 真實總筆數查詢
+		countSQL := fmt.Sprintf(`SELECT COUNT(*) AS total_count FROM read_parquet('%s') WHERE %s`, pattern, tableWhereClause)
+		var totalRecords int64 = 0
+		if countRes, err := runDuckDBQuery(countSQL); err == nil && len(countRes) > 0 {
+			totalRecords = parseDuckDBNumber(countRes[0]["total_count"])
+		}
+		totalPages := int(math.Ceil(float64(totalRecords) / float64(req.PerPage)))
+		if totalPages == 0 { totalPages = 1 }
+
+		// 🌟 6. 核心保護：頁碼超界保護 (防止翻到最後一頁時 Offset 超出資料集)
+		targetPage := req.Page
+		if targetPage > totalPages {
+			targetPage = totalPages
+		}
+		offset := (targetPage - 1) * req.PerPage
+		if offset < 0 { offset = 0 }
+
+		searchSQL := fmt.Sprintf(`
+			SELECT 
+				timestamp as time, source as src_ip, destination as dst_ip, 
+				0 as src_port, to_port as dst_port, application as protocol, 
+				round(bytes/1048576.0, 3) as traffic_mb,
+				from_zone, to_zone
+			FROM read_parquet('%s')
+			WHERE %s
+			ORDER BY timestamp DESC 
+			LIMIT %d OFFSET %d
+		`, pattern, tableWhereClause, req.PerPage, offset)
+
+		logsRes, err := runDuckDBQuery(searchSQL)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "success",
+			"total_records":  totalRecords,
+			"total_pages":    totalPages,
+			"current_page":   targetPage,
+			"fixed_end_time": fixedEndTime,
+			"sum_download":   sumLanWan,
+			"sum_upload":     sumWanLan,
+			"sum_internal":   sumLanLan,
+			"data":           logsRes,
+		})
+	})
+	
+	// 🌟 全量圖表分析 API (時間基準精準雙向錨定 + DuckDB 向量高速聚合)
+	r.POST("/api/flow/chart-data", func(c *gin.Context) {
+		var req struct {
+			Date      string `json:"date"`
+			StartTime string `json:"start_time"`
+			EndTime   string `json:"end_time"`
+			SrcIP     string `json:"src_ip"`
+			DstIP     string `json:"dst_ip"`
+			Port      string `json:"port"`
+			App       string `json:"app"`
+			Zone      string `json:"zone"`
+		}
+		_ = c.ShouldBindJSON(&req)
+
+		queryDate := strings.ReplaceAll(strings.TrimSpace(req.Date), "/", "-")
+		if queryDate == "" { queryDate = time.Now().Format("2006-01-02") }
+
+		pattern := filepath.ToSlash(filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", queryDate)))
+
+		// 🌟 1. 時間基準雙向錨定：優先使用前端凍結的結束時間 (req.EndTime) 作為 baseTime
+		var fixedEndTime string
+		var baseTime time.Time
+
+		if req.EndTime != "" && req.StartTime != "custom" && !strings.Contains(req.StartTime, " ") {
+			if pt, err := time.Parse("2006-01-02 15:04:05", strings.ReplaceAll(req.EndTime, "T", " ")); err == nil {
+				baseTime = pt
+				fixedEndTime = baseTime.Format("2006-01-02 15:04:05")
+			}
+		}
+
+		// 若無凍結錨點 (例如未檢索前點開圖表)，才動態取資料庫最新紀錄時間
+		if baseTime.IsZero() {
+			maxTimeSQL := fmt.Sprintf(`SELECT MAX(timestamp) AS max_t FROM read_parquet('%s')`, pattern)
+			if maxRes, err := runDuckDBQuery(maxTimeSQL); err == nil && len(maxRes) > 0 && maxRes[0]["max_t"] != nil {
+				if tStr, ok := maxRes[0]["max_t"].(string); ok && len(tStr) >= 19 {
+					if pt, err := time.Parse("2006-01-02 15:04:05", tStr[:19]); err == nil {
+						baseTime = pt
+					}
+				}
+			}
+			if baseTime.IsZero() {
+				baseTime = time.Now()
+			}
+			fixedEndTime = baseTime.Format("2006-01-02 15:04:05")
+		}
+
+		// 🌟 2. 構建過濾條件 (確保起始與結束時間均源自同一個 baseTime，杜絕時間反轉)
+		var conds []string
+		conds = append(conds, "1=1")
+
+		isMinuteGrain := true
+		if req.StartTime != "" && req.StartTime != "-24h" {
+			if req.StartTime == "custom" || strings.Contains(req.StartTime, " ") || strings.Contains(req.StartTime, "T") {
+				st := strings.ReplaceAll(strings.TrimSpace(req.StartTime), "T", " ")
+				et := strings.ReplaceAll(strings.TrimSpace(req.EndTime), "T", " ")
+				if len(st) == 16 { st += ":00" }
+				if len(et) == 16 { et += ":59" }
+				if st != "" && et != "" {
+					conds = append(conds, fmt.Sprintf("timestamp >= '%s' AND timestamp <= '%s'", st, et))
+				} else if st != "" {
+					conds = append(conds, fmt.Sprintf("timestamp >= '%s'", st))
+				}
+				isMinuteGrain = false
+			} else {
+				mins := 5
+				switch req.StartTime {
+				case "-5m": mins = 5
+				case "-15m": mins = 15
+				case "-30m": mins = 30
+				case "-1h": mins = 60
+				case "-6h": mins = 360; isMinuteGrain = false
+				default: mins = 5
+				}
+
+				// 關鍵：起始時間與結束時間一律由同一個 baseTime 計算，保證永遠合法
+				stThres := baseTime.Add(-time.Duration(mins) * time.Minute).Format("2006-01-02 15:04:05")
+				etThres := fixedEndTime
+				conds = append(conds, fmt.Sprintf("timestamp >= '%s' AND timestamp <= '%s'", stThres, etThres))
+			}
+		} else {
+			isMinuteGrain = false
+		}
+
+		if req.Zone == "download" {
+			conds = append(conds, "from_zone = 'LAN' AND to_zone = 'WAN'")
+		} else if req.Zone == "upload" {
+			conds = append(conds, "from_zone = 'WAN' AND to_zone = 'LAN'")
+		} else if req.Zone == "internal" {
+			conds = append(conds, "from_zone = 'LAN' AND to_zone = 'LAN'")
+		}
+
+		if req.SrcIP != "" { conds = append(conds, fmt.Sprintf("source ILIKE '%%%s%%'", strings.ReplaceAll(req.SrcIP, "'", "''"))) }
+		if req.DstIP != "" { conds = append(conds, fmt.Sprintf("destination ILIKE '%%%s%%'", strings.ReplaceAll(req.DstIP, "'", "''"))) }
+		if req.Port != "" {
+			if p, err := strconv.Atoi(strings.TrimSpace(req.Port)); err == nil {
+				conds = append(conds, fmt.Sprintf("to_port = %d", p))
+			}
+		}
+		if req.App != "" {
+			conds = append(conds, fmt.Sprintf("application ILIKE '%%%s%%'", strings.ReplaceAll(req.App, "'", "''")))
+		}
+		whereClause := strings.Join(conds, " AND ")
+
+		// 1. 時序趨勢查詢 (分 / 時)
+		var trendSQL string
+		if isMinuteGrain {
+			trendSQL = fmt.Sprintf(`
+				SELECT SUBSTRING(timestamp FROM 12 FOR 5) AS t, round(COALESCE(SUM(bytes),0)/1048576.0, 2) AS mb
+				FROM read_parquet('%s') WHERE %s
+				GROUP BY t ORDER BY t ASC
+			`, pattern, whereClause)
+		} else {
+			trendSQL = fmt.Sprintf(`
+				SELECT SUBSTRING(timestamp FROM 12 FOR 2) || ':00' AS t, round(COALESCE(SUM(bytes),0)/1048576.0, 2) AS mb
+				FROM read_parquet('%s') WHERE %s
+				GROUP BY t ORDER BY t ASC
+			`, pattern, whereClause)
+		}
+
+		// 2. 全域 Top 6 應用協定佔比
+		appSQL := fmt.Sprintf(`
+			SELECT application AS app, round(COALESCE(SUM(bytes),0)/1048576.0, 2) AS mb
+			FROM read_parquet('%s') WHERE %s
+			GROUP BY app ORDER BY mb DESC LIMIT 6
+		`, pattern, whereClause)
+
+		// 3. 全域 Top 8 通訊埠分佈
+		portSQL := fmt.Sprintf(`
+			SELECT to_port AS port, round(COALESCE(SUM(bytes),0)/1048576.0, 2) AS mb
+			FROM read_parquet('%s') WHERE %s
+			GROUP BY port ORDER BY mb DESC LIMIT 8
+		`, pattern, whereClause)
+
+		trendRes, _ := runDuckDBQuery(trendSQL)
+		appRes, _ := runDuckDBQuery(appSQL)
+		portRes, _ := runDuckDBQuery(portSQL)
+
+		c.JSON(http.StatusOK, gin.H{
+			"status": "success",
+			"trend":  trendRes,
+			"apps":   appRes,
+			"ports":  portRes,
+		})
+	})
+	
+	// 應用程式能見度與 QoE 品質評分 API
+	r.GET("/api/flow/qoe-summary", func(c *gin.Context) {
+		queryDate := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
+		pattern := filepath.ToSlash(filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", queryDate)))
+
+		sql := fmt.Sprintf(`
+			SELECT 
+				application as app_name,
+				to_port as port,
+				COUNT(*) as connections,
+				round(SUM(bytes)/1048576.0, 2) as traffic_mb,
+				COUNT(CASE WHEN session_end_reason = 'tcp-rst' OR action = 'deny' THEN 1 END) as fail_cnt
+			FROM read_parquet('%s')
+			GROUP BY app_name, port
+			ORDER BY traffic_mb DESC LIMIT 20
+		`, pattern)
+
+		rows, err := runDuckDBQuery(sql)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "data": []interface{}{}})
+			return
+		}
+
+		type QoEItem struct {
+			AppName     string  `json:"app_name"`
+			Port        string  `json:"port"`
+			Connections int64   `json:"connections"`
+			TrafficMB   float64 `json:"traffic_mb"`
+			Percentage  string  `json:"percentage"`
+			QoEScore    int     `json:"qoe_score"`
+		}
+
+		var totalMB float64 = 0
+		for _, r := range rows {
+			if v, ok := r["traffic_mb"].(float64); ok { totalMB += v }
+		}
+
+		var list []QoEItem
+		for _, r := range rows {
+			connCnt := parseDuckDBNumber(r["connections"])
+			failCnt := parseDuckDBNumber(r["fail_cnt"])
+			mbVal := 0.0
+			if v, ok := r["traffic_mb"].(float64); ok { mbVal = v }
+
+			score := 96
+			if connCnt > 0 {
+				failRate := float64(failCnt) / float64(connCnt)
+				score = int(100 - (failRate * 100) * 1.5)
+				if score < 55 { score = 55 }
+			}
+
+			pct := "0.0"
+			if totalMB > 0 {
+				pct = fmt.Sprintf("%.1f", (mbVal / totalMB) * 100)
+			}
+
+			list = append(list, QoEItem{
+				AppName:     fmt.Sprintf("%v", r["app_name"]),
+				Port:        fmt.Sprintf("%v", r["port"]),
+				Connections: connCnt,
+				TrafficMB:   mbVal,
+				Percentage:  pct,
+				QoEScore:    score,
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": list})
+	})
+	
+	// 🌟 取得資安預警靈敏度閥值設定 API
+	r.GET("/api/flow/security-settings", func(c *gin.Context) {
+		db, err := initDB()
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+			return
+		}
+		settings := getSecuritySettings(db)
+		c.JSON(http.StatusOK, gin.H{"success": true, "settings": settings})
+	})
+
+	// 🌟 儲存資安預警靈敏度閥值設定 API (寫入 SQLite 持久儲存)
+	r.POST("/api/flow/security-settings", func(c *gin.Context) {
+		var req SecuritySettings
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "參數解析失敗: " + err.Error()})
+			return
+		}
+
+		db, err := initDB()
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+			return
+		}
+
+		if err := saveSecuritySettings(db, req); err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "儲存至資料庫失敗: " + err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "預警靈敏度閥值已成功儲存並即時套用！"})
+	})
+
+	// ==========================================
+	// 🛡️ 全新移植：流量資安預警與防禦中心
+	// 2. 資安威脅預警中心頁面
+	// ==========================================
+	r.GET("/security", func(c *gin.Context) {
+		renderPongo(c, "security.html", pongo2.Context{
+			"active_page": "security",
+		})
+	})
+
+	// 預警事件列表查詢 API
+	r.GET("/api/flow/security-alerts", func(c *gin.Context) {
+		db, err := initDB()
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+			return
+		}
+		rows, err := db.Query(`
+			SELECT id, strftime('%Y-%m-%d %H:%M:%S', timestamp, 'localtime') as ts,
+			       src_ip, dst_ip, attack_type, severity, details, status
+			FROM flow_security_events ORDER BY id DESC LIMIT 200
+		`)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "data": []interface{}{}})
+			return
+		}
+		defer rows.Close()
+
+		type AlertItem struct {
+			ID         int    `json:"id"`
+			TS         string `json:"ts"`
+			SrcIP      string `json:"src_ip"`
+			DstIP      string `json:"dst_ip"`
+			AttackType string `json:"attack_type"`
+			Severity   string `json:"severity"`
+			Details    string `json:"details"`
+			Status     string `json:"status"`
+		}
+		var list []AlertItem
+		for rows.Next() {
+			var it AlertItem
+			_ = rows.Scan(&it.ID, &it.TS, &it.SrcIP, &it.DstIP, &it.AttackType, &it.Severity, &it.Details, &it.Status)
+			list = append(list, it)
+		}
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": list})
+	})
+
+	// 清除預警紀錄 API
+	r.POST("/api/flow/security-alerts/clear", func(c *gin.Context) {
+		db, err := initDB()
+		if err == nil {
+			_, _ = db.Exec("DELETE FROM flow_security_events")
+		}
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "已清空所有資安威脅預警紀錄！"})
+	})
+
+	// 外部嫌疑 IP 攻擊 Port 調閱 API
+	r.POST("/api/flow/security-single-ip-details", func(c *gin.Context) {
+		var req struct {
+			SrcIP string `json:"src_ip"`
+			Date  string `json:"date"`
+		}
+		_ = c.ShouldBindJSON(&req)
+		if req.Date == "" { req.Date = time.Now().Format("2006-01-02") }
+
+		pattern := filepath.ToSlash(filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", req.Date)))
+		sql := fmt.Sprintf(`
+			SELECT destination as dst_ip, to_port as dst_port, round(SUM(bytes)/1048576.0, 3) as traffic_mb
+			FROM read_parquet('%s')
+			WHERE source = '%s'
+			GROUP BY dst_ip, dst_port
+			ORDER BY SUM(bytes) DESC LIMIT 100
+		`, pattern, strings.ReplaceAll(req.SrcIP, "'", "''"))
+
+		rows, _ := runDuckDBQuery(sql)
+		c.JSON(http.StatusOK, gin.H{"success": true, "details": rows})
+	})
+
+	// 🌟 內網 MAC / 主機名秒級反解 API (DHCP + ARP 靜態庫雙軌聯防)
+	r.GET("/api/tools/ip-lookup/:ip", func(c *gin.Context) {
+		targetIP := c.Param("ip")
+		db, _ := initDB()
+
+		hostname := "-"
+		mac := "-"
+		macSource := ""
+		isInternal := false
+
+		if strings.HasPrefix(targetIP, "192.168.") || strings.HasPrefix(targetIP, "10.") || strings.HasPrefix(targetIP, "172.") || strings.HasPrefix(targetIP, "192.50.") {
+			isInternal = true
+		}
+
+		if db != nil {
+			// 1. 優先查詢 DHCP 租約
+			var dHn, dMac sql.NullString
+			_ = db.QueryRow("SELECT hostname, mac FROM dhcp_leases WHERE ip = ? ORDER BY id DESC LIMIT 1", targetIP).Scan(&dHn, &dMac)
+			if dMac.Valid && dMac.String != "" && dMac.String != "-" {
+				mac = dMac.String
+				macSource = "DHCP 租約"
+				if dHn.Valid && dHn.String != "" {
+					hostname = dHn.String
+				}
+			}
+
+			// 2. 若 DHCP 無紀錄 (如 192.50.1.25 固定 IP)，立即穿透查詢 ARP 靜態資料庫
+			if mac == "-" || mac == "" {
+				var aMac, aHn sql.NullString
+				_ = db.QueryRow("SELECT mac, hostname FROM arp_records WHERE ip = ?", targetIP).Scan(&aMac, &aHn)
+				if aMac.Valid && aMac.String != "" && aMac.String != "-" {
+					mac = aMac.String
+					macSource = "ARP 靜態紀錄"
+					if (hostname == "-" || hostname == "") && aHn.Valid && aHn.String != "" {
+						hostname = aHn.String
+					}
+				}
+			}
+
+			// 3. 主機名補強：查詢本機 DNS 快取表
+			if hostname == "" || hostname == "-" {
+				var cacheHn sql.NullString
+				_ = db.QueryRow("SELECT hostname FROM ip_hostname_cache WHERE ip = ?", targetIP).Scan(&cacheHn)
+				if cacheHn.Valid && cacheHn.String != "" {
+					hostname = cacheHn.String
+				}
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"success":     true,
+			"ip":          targetIP,
+			"hostname":    hostname,
+			"mac_address": mac,
+			"mac_source":  macSource,
+			"is_internal": isInternal,
+		})
+	})
+	
+	// 🌟 全網設備 IP / MAC / Hostname 整合資產清冊匯出 API (支援 CSV 匯出)
+	r.GET("/api/tools/export-network-devices", func(c *gin.Context) {
+		db, err := initDB()
+		if err != nil {
+			c.String(http.StatusInternalServerError, "資料庫讀取失敗")
+			return
+		}
+
+		// 整合 ARP 與 DHCP 全量不重複設備清冊
+		query := `
+			SELECT 
+				COALESCE(a.ip, d.ip) AS ip,
+				COALESCE(NULLIF(a.mac, ''), d.mac) AS mac,
+				COALESCE(NULLIF(a.hostname, ''), NULLIF(d.hostname, ''), c.hostname, '-') AS hostname,
+				COALESCE(a.dev_type, 'DHCP 動態配發') AS dev_type,
+				COALESCE(a.updated_at, d.record_date) AS last_seen
+			FROM arp_records a
+			FULL OUTER JOIN (
+				SELECT ip, mac, hostname, record_date FROM dhcp_leases GROUP BY ip
+			) d ON a.ip = d.ip
+			LEFT JOIN ip_hostname_cache c ON COALESCE(a.ip, d.ip) = c.ip
+			ORDER BY 
+				CAST(substr(COALESCE(a.ip, d.ip), 1, instr(COALESCE(a.ip, d.ip), '.') - 1) AS INT),
+				CAST(substr(substr(COALESCE(a.ip, d.ip), instr(COALESCE(a.ip, d.ip), '.') + 1), 1, instr(substr(COALESCE(a.ip, d.ip), instr(COALESCE(a.ip, d.ip), '.') + 1), '.') - 1) AS INT)
+		`
+		rows, err := db.Query(query)
+		if err != nil {
+			// 若 SQLite 版本不支援 FULL OUTER JOIN，以 UNION 容錯查詢
+			queryFallback := `
+				SELECT ip, mac, hostname, dev_type, updated_at FROM arp_records
+				UNION
+				SELECT ip, mac, hostname, 'DHCP 動態配發', record_date FROM dhcp_leases
+			`
+			rows, _ = db.Query(queryFallback)
+		}
+		defer rows.Close()
+
+		csvData := "IP 位址,實體網卡 MAC,設備名稱 (Hostname),設備性質,最後發現時間\n"
+		for rows.Next() {
+			var ip, mac, hn, dtype, seen string
+			_ = rows.Scan(&ip, &mac, &hn, &dtype, &seen)
+			csvData += fmt.Sprintf("%s,%s,%s,%s,%s\n", ip, mac, hn, dtype, seen)
+		}
+
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=Network_Devices_%s.csv", time.Now().Format("20060102_150405")))
+		c.Data(http.StatusOK, "text/csv; charset=utf-8", []byte("\xEF\xBB\xBF"+csvData)) // 加上 UTF-8 BOM 避免 Excel 亂碼
+	})
+		
 }

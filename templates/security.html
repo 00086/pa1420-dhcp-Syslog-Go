@@ -1,0 +1,463 @@
+{% extends "base.html" %}
+
+{% block title %}PA-1420 流量資安預警與威脅防禦中心{% endblock %}
+
+{% block extra_styles %}
+    /* ========================================================= */
+    /* 🌞 目前預設：標準淺色模式 (Light Theme)                   */
+    /* ========================================================= */
+    .flow-sec-container {
+        display: flex;
+        flex-direction: column;
+        height: calc(100vh - 165px);
+        margin-top: -5px;
+    }
+    .card-sec { 
+        background-color: #ffffff; 
+        border: 1px solid #dee2e6; 
+        border-radius: 8px; 
+    }
+    .sec-header { 
+        background-color: #fff5f5; 
+        border-bottom: 1px solid #feb2b2; 
+        color: #9b2c2c; 
+        font-weight: bold; 
+    }
+    .table-sec th { 
+        background-color: #f8f9fa !important; 
+        color: #495057; 
+        border-color: #dee2e6; 
+    }
+    .table-sec td { 
+        vertical-align: middle; 
+        border-color: #e2e8f0; 
+        font-size: 0.9rem; 
+    }
+    
+    .card-clickable { cursor: pointer; transition: transform 0.2s ease, box-shadow 0.2s ease; }
+    .card-clickable:hover { transform: translateY(-3px); box-shadow: 0 6px 15px rgba(0,0,0,0.08) !important; }
+    .card-active { box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.4) !important; filter: brightness(0.97); }
+
+    /* ========================================================= */
+    /* 🌙 原本深色模式 CSS (完整保留備查，待日後切換功能使用)   */
+    /* ========================================================= */
+    /*
+    .dark-theme .card-sec { background-color: #2d3748; border: 1px solid #4a5568; }
+    .dark-theme .sec-header { background-color: #2b0b0e; border-bottom: 1px solid #742a2a; color: #feb2b2; }
+    .dark-theme .table-sec th { background-color: #1a202c !important; color: #a0aec0; border-color: #4a5568; }
+    .dark-theme .table-sec td { border-color: #4a5568; }
+    .dark-theme .card-active { box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.4) !important; filter: brightness(1.2); }
+    */
+{% endblock %}
+
+{% block content %}
+<div class="flow-sec-container">
+    
+    <!-- 頂部標題與控制列 -->
+    <div class="d-flex justify-content-between align-items-center mb-2 flex-shrink-0">
+        <h5 class="m-0 text-danger fw-bold">
+            <i class="bi bi-shield-slash-fill me-2"></i>Palo Alto 流量資安預警與重大威脅防禦中心
+        </h5>
+        <<div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-info fw-bold shadow-sm" id="btnMaskIp" onclick="toggleIpMask()">
+                <i class="bi bi-eye-slash me-1"></i>隱藏內網 IP
+            </button>
+            <!-- 🌟 新增：預警閥值設定按鈕 -->
+            <button class="btn btn-sm btn-outline-warning text-dark fw-bold shadow-sm" onclick="openSecuritySettingsModal()" title="設定 6 大威脅分析靈敏度閥值">
+                <i class="bi bi-sliders me-1"></i>預警閥值設定
+            </button>
+            <button class="btn btn-sm btn-outline-danger fw-bold shadow-sm" onclick="fetchAlerts()">
+                <i class="bi bi-arrow-clockwise me-1"></i>手動刷新
+            </button>
+            <button class="btn btn-sm btn-outline-secondary fw-bold shadow-sm" onclick="clearSecurityAlerts()">
+                <i class="bi bi-trash3 me-1"></i>清除目前紀錄
+            </button>
+        </div>
+    </div>
+
+    <!-- 威脅分類小卡 (淺色白底背景)[cite: 13, 26] -->
+    <div class="row g-2 mb-2 flex-shrink-0">
+        <div class="col-md-3">
+            <div id="cardCRITICAL" class="card card-sec p-3 border-start border-4 border-danger card-clickable shadow-sm bg-white" onclick="toggleFilter('CRITICAL')" title="點擊過濾：僅顯示危急事件">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="text-secondary small fw-bold">危急事件 (Critical)</div>
+                        <h2 class="m-0 text-danger fw-bold" id="cntCritical">0</h2>
+                    </div>
+                    <i class="bi bi-exclamation-octagon-fill fs-1 text-danger opacity-75"></i>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div id="cardHIGH" class="card card-sec p-3 border-start border-4 border-warning card-clickable shadow-sm bg-white" onclick="toggleFilter('HIGH')" title="點擊過濾：僅顯示高風險掃描/爆破">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="text-secondary small fw-bold">高風險掃描/爆破 (High)</div>
+                        <h2 class="m-0 text-warning text-dark fw-bold" id="cntHigh">0</h2>
+                    </div>
+                    <i class="bi bi-bug-fill fs-1 text-warning opacity-75"></i>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div id="cardSOURCES" class="card card-sec p-3 border-start border-4 border-info card-clickable shadow-sm bg-white" onclick="toggleFilter('SOURCES')" title="點擊過濾：僅顯示外部嫌疑 IP">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="text-secondary small fw-bold">外部嫌疑 IP</div>
+                        <h2 class="m-0 text-info fw-bold" id="cntSources">0</h2>
+                    </div>
+                    <i class="bi bi-globe-americas fs-1 text-info opacity-75"></i>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card card-sec p-3 border-start border-4 border-success shadow-sm bg-white">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="text-secondary small fw-bold">分析引擎狀態</div>
+                        <h6 class="m-0 text-success fw-bold mt-2"><i class="bi bi-check-circle-fill me-1"></i>DuckDB + PA 日誌運轉中</h6>
+                    </div>
+                    <i class="bi bi-cpu-fill fs-1 text-success opacity-75"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 威脅事件表格區塊 (改為淺色質感白底表格)[cite: 26] -->
+    <div class="card card-sec shadow flex-grow-1 d-flex flex-column bg-white border" style="min-height: 0;">
+        <div class="sec-header d-flex justify-content-between align-items-center py-2 px-3 flex-shrink-0">
+            <span class="fs-6" id="alertsTitle"><i class="bi bi-list-stars me-2"></i>即時資安威脅監測紀錄</span>
+            <span class="badge bg-danger text-white shadow-sm">每 30 秒自動巡檢</span>
+        </div>
+        <div class="card-body p-0 flex-grow-1 overflow-auto custom-scroll">
+            <table class="table table-sm table-hover table-striped mb-0 table-sec align-middle text-center">
+                <thead style="position: sticky; top: 0; z-index: 5;">
+                    <tr>
+                        <th style="width: 15%;">觸發時間</th>
+                        <th style="width: 10%;">風險等級</th>
+                        <th style="width: 15%;">攻擊型態</th>
+                        <th style="width: 15%;">來源 IP (Source)</th>
+                        <th style="width: 15%;">目標 IP (Target)</th>
+                        <th style="width: 30%;">事件詳細情資描述</th>
+                    </tr>
+                </thead>
+                <tbody id="securityAlertsBody">
+                    <tr><td colspan="6" class="text-muted py-4"><div class="spinner-border spinner-border-sm me-2"></div>正在自資料庫載入最新資安事件...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ================= 彈出視窗：外部 IP 攻擊 Port 明細 (淺色白底) ================= -->
+<div class="modal fade" id="singleIpDetailsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content bg-white text-dark border-0 shadow-lg">
+            <div class="modal-header bg-light py-2 border-bottom">
+                <h6 class="modal-title text-danger fw-bold" id="singleIpModalTitle">
+                    <i class="bi bi-bug-fill me-2"></i>外部嫌疑 IP 探測與攻擊 Port 明細
+                </h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-0">
+                <div class="table-responsive" style="max-height: 50vh; overflow-y: auto;">
+                    <table class="table table-sm table-hover table-striped mb-0 align-middle text-center" style="font-size: 0.9rem;">
+                        <thead class="table-light" style="position: sticky; top: 0; z-index: 5;">
+                            <tr>
+                                <th style="width: 10%;">序號</th>
+                                <th style="width: 35%;">受害目標 IP (Target)</th>
+                                <th style="width: 30%;">攻擊/探測 Port</th>
+                                <th style="width: 25%;">累積流量 (MB)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="singleIpModalBody">
+                            <tr><td colspan="4" class="text-muted py-4"><div class="spinner-border spinner-border-sm me-2"></div>正在自 DuckDB 調閱該 IP 探測紀錄...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ================= 彈出視窗：全套 6 大資安威脅預警靈敏度閥值設定 ================= -->
+<div class="modal fade" id="securitySettingsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content bg-white text-dark border-0 shadow-lg">
+            <div class="modal-header bg-light py-2 border-bottom">
+                <h6 class="modal-title text-danger fw-bold">
+                    <i class="bi bi-sliders me-2"></i>全套 6 大資安威脅預警靈敏度閥值設定
+                </h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-3">
+                <div class="row g-3">
+                    <!-- 第 1 項 -->
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold text-primary mb-1">1. 分析時間範圍視窗 (最近幾分鐘)</label>
+                        <input type="number" id="setting_window_mins" class="form-control form-control-sm font-monospace" min="1" max="60" placeholder="5">
+                        <small class="text-secondary d-block" style="font-size: 11.5px;">預警引擎分析最近 X 分鐘內的 PA 流量日誌特徵。</small>
+                    </div>
+                    <!-- 第 2 項 -->
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold text-primary mb-1">2. Port Scan 掃描閥值 (Port 數)</label>
+                        <input type="number" id="setting_port_scan" class="form-control form-control-sm font-monospace" min="5" max="1000" placeholder="50">
+                        <small class="text-secondary d-block" style="font-size: 11.5px;">連線超過此數量的不同 Port 即觸發探測預警。</small>
+                    </div>
+
+                    <!-- 第 3 項 -->
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold text-danger mb-1">3. DDoS 殭屍網路洪泛閥值 (MB)</label>
+                        <input type="number" id="setting_ddos_mb" class="form-control form-control-sm font-monospace" min="10" max="10000" placeholder="300">
+                        <small class="text-secondary d-block" style="font-size: 11.5px;">超過 10 個外網來源且流量達此 MB 數即觸發。</small>
+                    </div>
+                    <!-- 第 4 項 -->
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold text-warning-emphasis mb-1">4. 密碼暴力破解閥值 (連線次數)</label>
+                        <input type="number" id="setting_brute_force" class="form-control form-control-sm font-monospace" min="5" max="500" placeholder="30">
+                        <small class="text-secondary d-block" style="font-size: 11.5px;">對 22/3389/445 高頻嘗試次數超過此門檻即觸發。</small>
+                    </div>
+
+                    <!-- 第 5 項 -->
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold text-danger mb-1">5. 異常巨量資料外洩閥值 (MB)</label>
+                        <input type="number" id="setting_data_exfil" class="form-control form-control-sm font-monospace" min="50" max="50000" placeholder="500">
+                        <small class="text-secondary d-block" style="font-size: 11.5px;">內網主機向外部單一 IP 上傳超過此 MB 數即觸發。</small>
+                    </div>
+                    <!-- 第 6 項 -->
+                    <div class="col-md-6">
+                        <label class="form-label small fw-bold text-dark mb-1">6. 採礦木馬 / 內網擴散閥值 (連線數)</label>
+                        <div class="row g-2">
+                            <div class="col-6">
+                                <input type="number" id="setting_mining_pool" class="form-control form-control-sm font-monospace" min="1" max="500" placeholder="礦池 (如 20)">
+                            </div>
+                            <div class="col-6">
+                                <input type="number" id="setting_lateral_spread" class="form-control form-control-sm font-monospace" min="1" max="100" placeholder="內網主機 (如 15)">
+                            </div>
+                        </div>
+                        <small class="text-secondary d-block" style="font-size: 11.5px;">左：連線外部礦池數 ｜ 右：對內探測主機數。</small>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer bg-light py-2 border-top">
+                <button type="button" class="btn btn-secondary btn-sm px-3" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger btn-sm px-3 fw-bold" onclick="saveSecuritySettings()">儲存並即時套用</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentRecords = [];
+let currentFilter = 'ALL';
+let isIpMasked = false;
+let autoRefreshTimer = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+    fetchAlerts();
+    autoRefreshTimer = setInterval(fetchAlerts, 30000);
+});
+
+function toggleFilter(fType) {
+    currentFilter = (currentFilter === fType) ? 'ALL' : fType;
+    document.querySelectorAll('.card-clickable').forEach(el => el.classList.remove('card-active'));
+    if (currentFilter !== 'ALL') {
+        const target = document.getElementById('card' + currentFilter);
+        if (target) target.classList.add('card-active');
+    }
+    renderAlertsTable(currentRecords);
+}
+
+function toggleIpMask() {
+    isIpMasked = !isIpMasked;
+    const btn = document.getElementById('btnMaskIp');
+    if (isIpMasked) {
+        btn.className = 'btn btn-sm btn-info text-dark fw-bold shadow-sm';
+        btn.innerHTML = '<i class="bi bi-eye me-1"></i>顯示內網 IP';
+    } else {
+        btn.className = 'btn btn-sm btn-outline-info fw-bold shadow-sm';
+        btn.innerHTML = '<i class="bi bi-eye-slash me-1"></i>隱藏內網 IP';
+    }
+    renderAlertsTable(currentRecords);
+}
+
+function maskIpText(text) {
+    if (!isIpMasked || !text) return text;
+    return text.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, match => {
+        if (match.startsWith("192.168.") || match.startsWith("10.") || match.startsWith("172.") || match.startsWith("192.50.")) {
+            const p = match.split('.');
+            return `${p[0]}.*.*.${p[3]}`;
+        }
+        return match;
+    });
+}
+
+function isExternal(ip) {
+    if (!ip || ip.includes('WAN') || ip.includes('Botnet') || ip.includes('LAN')) return false;
+    return !(ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.") || ip.startsWith("192.50."));
+}
+
+function fetchAlerts() {
+    fetch('/api/flow/security-alerts')
+        .then(r => r.json())
+        .then(res => {
+            if (res.success) {
+                currentRecords = res.data || [];
+                renderAlertsTable(currentRecords);
+            }
+        })
+        .catch(err => console.log('讀取警報失敗:', err));
+}
+
+function renderAlertsTable(records) {
+    const tbody = document.getElementById('securityAlertsBody');
+    let cntCrit = 0, cntHigh = 0;
+    const sourcesSet = new Set();
+
+    records.forEach(r => {
+        const sev = (r.severity || '').toUpperCase();
+        if (sev === 'CRITICAL') cntCrit++;
+        else if (sev === 'HIGH') cntHigh++;
+        if (isExternal(r.src_ip)) sourcesSet.add(r.src_ip);
+    });
+
+    document.getElementById('cntCritical').innerText = cntCrit;
+    document.getElementById('cntHigh').innerText = cntHigh;
+    document.getElementById('cntSources').innerText = sourcesSet.size;
+
+    if (!records || records.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" class="text-muted py-4"><i class="bi bi-shield-check text-success fs-4 me-2"></i>目前網路安全狀態優異，無任何未處理之威脅預警。</td></tr>`;
+        return;
+    }
+
+    let html = '';
+    records.forEach(r => {
+        const sev = (r.severity || '').toUpperCase();
+        if (currentFilter === 'CRITICAL' && sev !== 'CRITICAL') return;
+        if (currentFilter === 'HIGH' && sev !== 'HIGH') return;
+        if (currentFilter === 'SOURCES' && !isExternal(r.src_ip)) return;
+
+        const badgeClass = sev === 'CRITICAL' ? 'bg-danger text-white' : 'bg-warning text-dark';
+        const displaySrc = maskIpText(r.src_ip);
+        const displayDst = maskIpText(r.dst_ip);
+        const displayDetails = maskIpText(r.details);
+
+        let srcHtml = displaySrc;
+        if (isExternal(r.src_ip)) {
+            srcHtml = `<a href="javascript:void(0)" class="text-danger text-decoration-underline fw-bold" onclick="inspectSingleExternalIp('${r.src_ip}')"><i class="bi bi-search me-1"></i>${displaySrc}</a>`;
+        }
+
+        html += `
+            <tr>
+                <td class="font-monospace text-secondary">${r.ts}</td>
+                <td><span class="badge ${badgeClass} fw-bold">${sev}</span></td>
+                <td class="fw-bold text-danger"><i class="bi bi-exclamation-triangle-fill me-1"></i>${r.attack_type}</td>
+                <td class="font-monospace text-primary fw-bold">${srcHtml}</td>
+                <td class="font-monospace text-danger fw-bold">${displayDst}</td>
+                <td class="text-start px-3 text-dark">${displayDetails}</td>
+            </tr>
+        `;
+    });
+
+    tbody.innerHTML = html || `<tr><td colspan="6" class="text-muted py-4">此過濾條件下無對應事件。</td></tr>`;
+}
+
+function inspectSingleExternalIp(srcIp) {
+    const modal = new bootstrap.Modal(document.getElementById('singleIpDetailsModal'));
+    const modalTitle = document.getElementById('singleIpModalTitle');
+    const modalBody = document.getElementById('singleIpModalBody');
+
+    modalTitle.innerHTML = `<i class="bi bi-bug-fill me-2"></i>外部嫌疑 IP [${srcIp}] 攻擊 Port 明細`;
+    modalBody.innerHTML = `<tr><td colspan="4" class="text-muted py-4"><div class="spinner-border spinner-border-sm me-2"></div>正在自 DuckDB 撈取細節...</td></tr>`;
+    modal.show();
+
+    fetch('/api/flow/security-single-ip-details', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ src_ip: srcIp })
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (res.success && res.details && res.details.length > 0) {
+            let html = '';
+            res.details.forEach((d, idx) => {
+                html += `
+                    <tr>
+                        <td class="text-muted">${idx + 1}</td>
+                        <td class="font-monospace text-danger fw-bold">${maskIpText(d.dst_ip)}</td>
+                        <td class="font-monospace text-secondary fw-bold">Port ${d.dst_port}</td>
+                        <td class="font-monospace text-primary fw-bold">${d.traffic_mb} MB</td>
+                    </tr>
+                `;
+            });
+            modalBody.innerHTML = html;
+        } else {
+            modalBody.innerHTML = `<tr><td colspan="4" class="text-muted py-4">查無特定 Port 封包紀錄。</td></tr>`;
+        }
+    });
+}
+
+function clearSecurityAlerts() {
+    if (!confirm("確定要清空目前所有的資安預警事件紀錄嗎？")) return;
+    fetch('/api/flow/security-alerts/clear', { method: 'POST' })
+        .then(r => r.json())
+        .then(res => {
+            fetchAlerts();
+        });
+}
+
+// 🌟 開啟資安預警閥值設定彈窗 (從後端 SQLite 載入現存設定)
+function openSecuritySettingsModal() {
+    fetch('/api/flow/security-settings')
+        .then(r => r.json())
+        .then(res => {
+            if (res.success && res.settings) {
+                const s = res.settings;
+                document.getElementById('setting_window_mins').value = s.window_mins || 5;
+                document.getElementById('setting_port_scan').value = s.port_scan_threshold || 50;
+                document.getElementById('setting_ddos_mb').value = s.ddos_mb_threshold || 300;
+                document.getElementById('setting_brute_force').value = s.brute_force_threshold || 30;
+                document.getElementById('setting_data_exfil').value = s.data_exfil_threshold || 500;
+                document.getElementById('setting_mining_pool').value = s.mining_pool_threshold || 20;
+                document.getElementById('setting_lateral_spread').value = s.lateral_spread_threshold || 15;
+            }
+            new bootstrap.Modal(document.getElementById('securitySettingsModal')).show();
+        })
+        .catch(err => alert("讀取閥值設定失敗: " + err));
+}
+
+// 🌟 儲存資安預警閥值設定 (寫入 SQLite 並即時生效)
+function saveSecuritySettings() {
+    const payload = {
+        window_mins: parseInt(document.getElementById('setting_window_mins').value, 10) || 5,
+        port_scan_threshold: parseInt(document.getElementById('setting_port_scan').value, 10) || 50,
+        ddos_mb_threshold: parseInt(document.getElementById('setting_ddos_mb').value, 10) || 300,
+        brute_force_threshold: parseInt(document.getElementById('setting_brute_force').value, 10) || 30,
+        data_exfil_threshold: parseInt(document.getElementById('setting_data_exfil').value, 10) || 500,
+        mining_pool_threshold: parseInt(document.getElementById('setting_mining_pool').value, 10) || 20,
+        lateral_spread_threshold: parseInt(document.getElementById('setting_lateral_spread').value, 10) || 15
+    };
+
+    fetch('/api/flow/security-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (res.success) {
+            alert("✅ " + res.message);
+            bootstrap.Modal.getInstance(document.getElementById('securitySettingsModal')).hide();
+            fetchAlerts(); // 立即重新整理事件
+        } else {
+            alert("❌ 儲存失敗: " + res.message);
+        }
+    })
+    .catch(err => alert("儲存連線失敗: " + err));
+}
+
+</script>
+{% endblock %}

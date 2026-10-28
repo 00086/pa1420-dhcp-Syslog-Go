@@ -1,0 +1,877 @@
+{% extends "base.html" %}
+
+{% block title %}PA-1420 網路通訊軌跡明細檢索{% endblock %}
+
+{% block extra_styles %}
+    .flow-search-container {
+        display: flex;
+        flex-direction: column;
+        height: calc(100vh - 165px);
+        margin-top: -5px;
+    }
+    .search-panel { 
+        background-color: #ffffff; 
+        border: 1px solid #dee2e6; 
+        border-radius: 8px; 
+    }
+    .table-container { 
+        background-color: #ffffff; 
+        border: 1px solid #dee2e6; 
+        border-radius: 8px; 
+        overflow-y: auto; 
+    }
+    .table th { 
+        background-color: #f8f9fa; 
+        color: #495057; 
+        position: sticky; 
+        top: 0; 
+        z-index: 10; 
+        border-bottom: 2px solid #dee2e6; 
+    }
+    .form-control-custom, .search-panel .form-control, .search-panel .form-select { 
+        background-color: #ffffff !important; 
+        color: #212529 !important; 
+        border: 1px solid #ced4da !important; 
+    }
+    .form-control-custom:focus, .search-panel .form-control:focus, .search-panel .form-select:focus { 
+        border-color: #0ea5e9 !important; 
+        box-shadow: 0 0 0 0.25rem rgba(14, 165, 233, 0.25) !important; 
+    }
+    .form-control::placeholder { color: #94a3b8 !important; opacity: 1 !important; }
+    
+    .custom-scroll::-webkit-scrollbar { width: 6px; }
+    .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+    /* 三向流量統計卡片互動特效 */
+    .stat-card { cursor: pointer; transition: all 0.2s ease-in-out; }
+    .stat-card:hover { transform: translateY(-2px); filter: brightness(0.97); box-shadow: 0 4px 10px rgba(0,0,0,0.08) !important; }
+    .stat-card.active { background-color: #f1f5f9 !important; border-width: 2px !important; border-color: #0dcaf0 !important; }
+
+    .clickable-link { cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; transition: 0.15s; }
+    .clickable-link:hover { color: #0d6efd !important; text-decoration-style: solid; background-color: rgba(13, 110, 253, 0.08); padding: 1px 4px; border-radius: 4px; }
+    
+    .clickable-badge { cursor: pointer; transition: 0.15s; }
+    .clickable-badge:hover { filter: brightness(0.9); transform: scale(1.05); }
+{% endblock %}
+
+{% block content %}
+<div class="flow-search-container">
+    
+    <!-- 頂部功能按鈕與標題 -->
+    <div class="d-flex justify-content-between align-items-center mb-2 flex-shrink-0">
+        <h5 class="text-primary fw-bold mb-0">
+            <i class="bi bi-search me-2"></i>PA-1420 邊界與跨區通訊軌跡檢索
+        </h5>
+        <div class="d-flex align-items-center gap-2">
+            <button id="btnMaskIp" class="btn btn-sm btn-outline-info fw-bold shadow-sm" onclick="toggleHideInternalIp()" title="切換是否遮蔽內網敏感 IP 位址">
+                <i class="bi bi-eye-slash me-1"></i>隱藏內網 IP
+            </button>
+            <button class="btn btn-success btn-sm fw-bold shadow-sm" onclick="showQoeModal()" id="btnShowQoe" disabled>
+                <i class="bi bi-activity me-1"></i>QoE 應用服務品質
+            </button>
+            <button class="btn btn-warning btn-sm fw-bold shadow-sm text-dark" onclick="showChartModal()" id="btnShowCharts" disabled>
+                <i class="bi bi-bar-chart-line-fill me-1"></i>流量統計圖
+            </button>
+        </div>
+    </div>
+    
+    <!-- 三向流量統計卡片 -->
+    <div id="summaryDashboard" class="row g-2 mb-2 flex-shrink-0">
+        <div class="col-md-4">
+            <div id="card-download" class="card shadow-sm h-100 stat-card bg-white" style="border: 1px solid #20c997;" onclick="filterByCard('download')" title="點擊過濾：僅顯示內網對外 (LAN ➔ WAN) 流量">
+                <div class="card-body text-center py-2">
+                    <div class="text-success fw-bold mb-1" style="font-size: 0.82rem;"><i class="bi bi-cloud-arrow-down-fill me-1"></i>內網對外上網總量 (LAN ➔ WAN)</div>
+                    <h4 id="sumDownload" class="text-dark fw-bold mb-0">0.00 <span class="fs-6 text-muted">MB</span></h4>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div id="card-upload" class="card shadow-sm h-100 stat-card bg-white" style="border: 1px solid #ffc107;" onclick="filterByCard('upload')" title="點擊過濾：僅顯示外部主動探測 (WAN ➔ LAN) 流量">
+                <div class="card-body text-center py-2">
+                    <div class="text-warning text-dark fw-bold mb-1" style="font-size: 0.82rem;"><i class="bi bi-cloud-arrow-up-fill me-1"></i>外部主動探測連線 (WAN ➔ LAN)</div>
+                    <h4 id="sumUpload" class="text-dark fw-bold mb-0">0.00 <span class="fs-6 text-muted">MB</span></h4>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div id="card-internal" class="card shadow-sm h-100 stat-card bg-white" style="border: 1px solid #0dcaf0;" onclick="filterByCard('internal')" title="點擊過濾：僅顯示內網橫向通訊流量">
+                <div class="card-body text-center py-2">
+                    <div class="text-info text-dark fw-bold mb-1" style="font-size: 0.82rem;"><i class="bi bi-arrow-left-right me-1"></i>內網跨區橫向通訊 (LAN ➔ LAN)</div>
+                    <h4 id="sumInternal" class="text-dark fw-bold mb-0">0.00 <span class="fs-6 text-muted">MB</span></h4>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 檢索條件面板 -->
+    <div class="search-panel p-2 mb-2 shadow-sm flex-shrink-0 bg-white">
+        <div class="row g-2 align-items-end">
+            <!-- 1. 日誌日期 (完整 8 碼不截斷) -->
+            <div class="col-auto" style="width: 245px;">
+                <label class="small text-secondary mb-1">📅 日誌日期</label>
+                <div class="input-group input-group-sm flex-nowrap">
+                    <button class="btn btn-outline-secondary px-2" type="button" onclick="changeSearchDate(-1)" title="前一日 (快速切換)">
+                        <i class="bi bi-chevron-left"></i>
+                    </button>
+                    <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold text-center px-1" style="width: 130px; min-width: 130px; cursor: pointer;" id="searchDate" onclick="this.showPicker()">
+                    <span class="input-group-text bg-white text-primary fw-bold px-2 font-monospace" id="search-weekday" style="font-size: 13px;">(六)</span>
+                    <button class="btn btn-outline-secondary px-2" type="button" onclick="changeSearchDate(1)" title="後一日 (快速切換)">
+                        <i class="bi bi-chevron-right"></i>
+                    </button>
+                </div>
+            </div>
+            
+            <!-- 2. 快選時間 (寬度 135px) -->
+            <div class="col-auto" style="width: 135px;">
+                <label class="small text-secondary mb-1">⏰ 快選時間</label>
+                <select id="timePreset" class="form-select form-select-sm" onchange="toggleCustomTime()" style="width: 100%;">
+                    <option value="-5m" selected>最近 5 分鐘</option>
+                    <option value="-15m">最近 15 分鐘</option>
+                    <option value="-30m">最近 30 分鐘</option>
+                    <option value="-1h">最近 1 小時</option>
+                    <option value="-6h">最近 6 小時</option>
+                    <option value="-24h">最近 24 小時</option>
+                    <option value="custom">📅 自訂區間</option>
+                </select>
+            </div>
+
+            <!-- 自訂時間展開區塊 -->
+            <div id="customTimeRange" class="col-md-3 d-none">
+                <div class="row g-1">
+                    <div class="col">
+                        <label class="small text-secondary mb-1">開始時間</label>
+                        <input type="datetime-local" id="startTime" class="form-control form-control-sm font-monospace">
+                    </div>
+                    <div class="col">
+                        <label class="small text-secondary mb-1">結束時間</label>
+                        <input type="datetime-local" id="endTime" class="form-control form-control-sm font-monospace">
+                    </div>
+                </div>
+            </div>
+
+            <!-- 來源 IP -->
+            <div class="col">
+                <label class="small text-secondary mb-1">🖥️ 來源 IP</label>
+                <input type="text" id="srcIp" class="form-control form-control-sm font-monospace" placeholder="來源 IP">
+            </div>
+
+            <!-- 目的 IP -->
+            <div class="col">
+                <label class="small text-secondary mb-1">🌐 目的 IP</label>
+                <input type="text" id="dstIp" class="form-control form-control-sm font-monospace" placeholder="目的 IP">
+            </div>
+
+            <!-- 目的 Port -->
+            <div class="col" style="max-width: 105px;">
+                <label class="small text-secondary mb-1">🔌 目的 Port</label>
+                <input type="text" id="portVal" class="form-control form-control-sm font-monospace" placeholder="如 443">
+            </div>
+
+            <!-- 🌟 新增：L7 應用 (App-ID) -->
+            <div class="col" style="max-width: 135px;">
+                <label class="small text-secondary mb-1">📱 L7 應用 (App)</label>
+                <input type="text" id="appVal" class="form-control form-control-sm font-monospace" placeholder="如 ssl, dns">
+            </div>
+
+            <!-- 操作按鈕 -->
+            <div class="col-auto d-flex gap-2">
+                <button class="btn btn-primary btn-sm px-3 fw-bold shadow-sm" onclick="executeFlowSearch(1)">
+                    <i class="bi bi-funnel-fill me-1"></i>執行檢索
+                </button>
+                <button class="btn btn-outline-secondary btn-sm px-2 fw-bold shadow-sm" onclick="resetSearch()">
+                    <i class="bi bi-arrow-counterclockwise me-1"></i>重置
+                </button>
+                <div id="recordCountDisplay" class="badge bg-primary text-white px-2 py-2 shadow-sm fw-bold d-flex align-items-center font-monospace" style="white-space: nowrap; font-size: 0.85rem;">
+                    0 筆
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 檢索結果明細表格 -->
+    <div class="table-container custom-scroll shadow-sm flex-grow-1 bg-white" style="min-height: 0;">
+        <table class="table table-sm table-hover table-striped mb-0 align-middle small text-center" style="table-layout: fixed;">
+            <thead>
+                <tr>
+                    <th width="16%">🕒 通訊時間戳</th>
+                    <th width="16%">🖥️ 來源主機 (Source)</th>
+                    <th width="4%">➡️</th>
+                    <th width="16%">🌐 目的主機 (Dest)</th>
+                    <th width="12%">目的 Port</th>
+                    <th width="18%">L7 應用服務 (App-ID)</th>
+                    <th width="18%">📦 累積傳輸量</th>
+                </tr>
+            </thead>
+            <tbody id="flowResultBody">
+                <tr>
+                    <td colspan="7" class="text-muted py-5">
+                        <i class="bi bi-arrow-up-circle fs-3 d-block mb-2 text-primary"></i>
+                        請設定篩選條件後點擊「執行檢索」，直接由 DuckDB 向量引擎穿透 Parquet 湖倉調閱。
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    
+    <!-- 分頁導覽列 (1:1 依照「流量紀錄分析」標準佈局)[cite: 13, 31] -->
+    <div class="d-flex justify-content-between align-items-center mt-2 flex-shrink-0 pb-1">
+        <div class="text-secondary small fw-bold font-monospace d-flex align-items-center gap-2">
+            <span class="badge bg-light text-primary border"><i class="bi bi-lightning-charge-fill me-1"></i>DuckDB 向量加速</span>
+            <span id="pageInfoText">共 0 筆紀錄</span>
+        </div>
+        <nav><ul class="pagination pagination-sm mb-0" id="traffic-pagination-ul"></ul></nav>
+    </div>
+</div>
+
+<!-- ================= 彈出視窗：流量趨勢圖 (更名為 flowChartModal 避免衝突)[cite: 26] ================= -->
+<div class="modal fade" id="flowChartModal" tabindex="-1" aria-hidden="true" style="z-index: 1060;">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+        <div class="modal-content shadow-lg bg-white border-0">
+            <div class="modal-header bg-light py-2 border-bottom d-flex align-items-center justify-content-between">
+                <div class="d-flex align-items-center gap-2">
+                    <h6 class="modal-title text-primary fw-bold m-0" id="chartModalTitleText">
+                        <i class="bi bi-bar-chart-fill me-2"></i>流量時序趨勢與應用統計圖
+                    </h6>
+                    <span class="badge bg-primary-subtle text-primary border font-monospace" id="chartScopeBadge">分析範圍：載入中...</span>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-2 overflow-hidden">
+                <div class="row g-2 mb-2">
+                    <div class="col-12">
+                        <div class="card shadow-sm border bg-white">
+                            <div class="card-body p-2 position-relative" style="height: 250px;">
+                                <canvas id="trendChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="row g-2">
+                    <div class="col-md-5">
+                        <div class="card shadow-sm border bg-white">
+                            <div class="card-body p-2 position-relative" style="height: 250px;">
+                                <canvas id="protocolChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-7">
+                        <div class="card shadow-sm border bg-white">
+                            <div class="card-body p-2 position-relative" style="height: 250px;">
+                                <canvas id="portChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ================= 彈出視窗：QoE 服務品質分析 ================= -->
+<div class="modal fade" id="qoeModal" tabindex="-1" aria-hidden="true" style="z-index: 1060;">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+        <div class="modal-content shadow-lg bg-white border-0" style="max-height: 90vh; display: flex; flex-direction: column;">
+            <div class="modal-header bg-light py-2 flex-shrink-0 border-bottom">
+                <h6 class="modal-title text-primary fw-bold m-0">
+                    <i class="bi bi-activity me-2"></i>Palo Alto L7 應用服務能見度與 QoE 服務品質評分
+                </h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-0 flex-grow-1" style="overflow-y: auto;">
+                <table class="table table-sm table-hover table-striped align-middle text-center mb-0" style="font-size: 0.88rem;">
+                    <thead class="table-light" style="position: sticky; top: 0; z-index: 5;">
+                        <tr>
+                            <th style="width: 8%;">排名</th>
+                            <th style="width: 25%;">應用服務名稱 (App-ID)</th>
+                            <th style="width: 15%;">通訊 Port</th>
+                            <th style="width: 15%;">總傳輸量 (MB)</th>
+                            <th style="width: 15%;">連線會話數</th>
+                            <th style="width: 12%;">流量佔比</th>
+                            <th style="width: 10%;">QoE 評分</th>
+                        </tr>
+                    </thead>
+                    <tbody id="qoeTableBody">
+                        <tr><td colspan="7" class="text-muted py-4"><div class="spinner-border spinner-border-sm me-2"></div>正在由 DuckDB 聚合應用品質指標...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="modal-footer bg-light py-2 justify-content-between flex-shrink-0 border-top">
+                <div class="text-primary fw-bold small" id="qoeRecordCountDisplay">共 0 筆應用服務</div>
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">關閉</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ================= 彈出視窗：IP 來源分析 (滑鼠右鍵觸發) ================= -->
+<div class="modal fade" id="ipInfoModal" tabindex="-1" aria-hidden="true" style="z-index: 1060;">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content shadow-lg bg-white border-0">
+            <div class="modal-header bg-light py-2 border-bottom">
+                <h5 class="modal-title text-primary fw-bold"><i class="bi bi-globe me-2"></i>IP 來源與設備身分分析</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body text-dark" id="ipInfoModalBody">
+                <div class="text-center py-4">
+                    <div class="spinner-border text-primary mb-2"></div>
+                    <p class="text-muted mb-0">正在穿透 DHCP 租約與本機快取查詢...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allFetchedData = [];
+let currentDisplayData = [];
+let currentPage = 1;
+let totalPagesCount = 1;
+let totalRecordsCount = 0;
+let isHideInternalIp = false;
+let currentActiveCard = '';
+let currentFixedEndTime = ''; 
+
+let trendChartInstance = null;
+let protocolChartInstance = null;
+let portChartInstance = null;
+
+function getLocalDateString() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function updateSearchWeekday(dateVal) {
+    if (!dateVal) return;
+    const [y, m, d] = dateVal.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    const weekdays = ['(日)', '(一)', '(二)', '(三)', '(四)', '(五)', '(六)'];
+    const el = document.getElementById('search-weekday');
+    if (el) el.innerText = weekdays[dt.getDay()];
+}
+
+function changeSearchDate(deltaDays) {
+    const dateInput = document.getElementById('searchDate');
+    let curVal = dateInput.value || getLocalDateString();
+    const [y, m, d] = curVal.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    dt.setDate(dt.getDate() + deltaDays);
+
+    const newY = dt.getFullYear();
+    const newM = String(dt.getMonth() + 1).padStart(2, '0');
+    const newD = String(dt.getDate()).padStart(2, '0');
+    dateInput.value = `${newY}-${newM}-${newD}`;
+
+    updateSearchWeekday(dateInput.value);
+    currentFixedEndTime = '';
+    executeFlowSearch(1);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const todayStr = getLocalDateString();
+    const dateInput = document.getElementById('searchDate');
+    
+    dateInput.value = todayStr;
+    updateSearchWeekday(todayStr);
+    document.getElementById('timePreset').value = '-5m';
+    
+    dateInput.addEventListener('change', () => {
+        updateSearchWeekday(dateInput.value);
+        currentFixedEndTime = ''; 
+        executeFlowSearch(1);
+    });
+
+    executeFlowSearch(1);
+});
+
+function formatTrafficMB(mbVal) {
+    const val = parseFloat(mbVal) || 0;
+    if (val >= 1024 * 1024) {
+        return `${(val / (1024 * 1024)).toFixed(2)} <span class="fs-6 text-muted">TB</span>`;
+    } else if (val >= 1024) {
+        return `${(val / 1024).toFixed(2)} <span class="fs-6 text-muted">GB</span>`;
+    }
+    return `${val.toFixed(2)} <span class="fs-6 text-muted">MB</span>`;
+}
+
+function toggleCustomTime() {
+    const preset = document.getElementById('timePreset').value;
+    const customDiv = document.getElementById('customTimeRange');
+    if (preset === 'custom') {
+        customDiv.classList.remove('d-none');
+        const d = document.getElementById('searchDate').value || getLocalDateString();
+        if (!document.getElementById('startTime').value) {
+            document.getElementById('startTime').value = `${d}T00:00`;
+        }
+        if (!document.getElementById('endTime').value) {
+            document.getElementById('endTime').value = `${d}T23:59`;
+        }
+    } else {
+        customDiv.classList.add('d-none');
+    }
+}
+
+function toggleHideInternalIp() {
+    isHideInternalIp = !isHideInternalIp;
+    const btn = document.getElementById('btnMaskIp');
+    if (isHideInternalIp) {
+        btn.className = 'btn btn-sm btn-info text-dark fw-bold shadow-sm';
+        btn.innerHTML = '<i class="bi bi-eye me-1"></i>顯示內網 IP';
+    } else {
+        btn.className = 'btn btn-sm btn-outline-info fw-bold shadow-sm';
+        btn.innerHTML = '<i class="bi bi-eye-slash me-1"></i>隱藏內網 IP';
+    }
+    renderTableBody(currentDisplayData);
+}
+
+function maskIp(ip) {
+    if (!isHideInternalIp || !ip) return ip;
+    if (ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.") || ip.startsWith("192.50.")) {
+        const parts = ip.split('.');
+        if (parts.length === 4) return `${parts[0]}.${parts[1]}.*.*`;
+    }
+    return ip;
+}
+
+// 🌟 執行檢索 (包含 Port 與 L7 應用參數)
+function executeFlowSearch(page = 1) {
+    currentPage = page;
+    const tbody = document.getElementById('flowResultBody');
+    tbody.innerHTML = `<tr><td colspan="7" class="py-5 text-primary"><div class="spinner-border spinner-border-sm me-2"></div>DuckDB 向量引擎高速檢索中...</td></tr>`;
+
+    const preset = document.getElementById('timePreset').value;
+    let sTime = preset;
+    let eTime = '';
+
+    if (preset === 'custom') {
+        const sInput = document.getElementById('startTime').value;
+        const eInput = document.getElementById('endTime').value;
+        if (!sInput || !eInput) {
+            alert('🚨 請完整選擇自訂時間的開始與結束範圍！');
+            return;
+        }
+        sTime = sInput.replace('T', ' ');
+        eTime = eInput.replace('T', ' ');
+    } else {
+        if (page > 1 && currentFixedEndTime) {
+            eTime = currentFixedEndTime;
+        }
+    }
+
+    const payload = {
+        date: document.getElementById('searchDate').value,
+        start_time: sTime,
+        end_time: eTime,
+        src_ip: document.getElementById('srcIp').value.trim(),
+        dst_ip: document.getElementById('dstIp').value.trim(),
+        port: document.getElementById('portVal').value.trim(),
+        app: document.getElementById('appVal') ? document.getElementById('appVal').value.trim() : '',
+        zone: currentActiveCard,
+        page: currentPage,
+        per_page: 50
+    };
+
+    fetch('/api/flow/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (res.status === 'success') {
+            currentDisplayData = res.data || [];
+            allFetchedData = currentDisplayData;
+            totalRecordsCount = res.total_records || 0;
+            totalPagesCount = res.total_pages || 1;
+            currentPage = res.current_page || page;
+            if (res.fixed_end_time) {
+                currentFixedEndTime = res.fixed_end_time;
+            }
+
+            document.getElementById('sumDownload').innerHTML = formatTrafficMB(res.sum_download);
+            document.getElementById('sumUpload').innerHTML = formatTrafficMB(res.sum_upload);
+            document.getElementById('sumInternal').innerHTML = formatTrafficMB(res.sum_internal);
+
+            document.getElementById('btnShowCharts').disabled = totalRecordsCount === 0;
+            document.getElementById('btnShowQoe').disabled = totalRecordsCount === 0;
+
+            renderTableBody(currentDisplayData);
+            renderTrafficPagination(currentPage, totalPagesCount);
+        } else {
+            tbody.innerHTML = `<tr><td colspan="7" class="text-danger py-4">檢索失敗: ${res.message}</td></tr>`;
+        }
+    })
+    .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-danger py-4">連線錯誤: ${err}</td></tr>`;
+    });
+}
+
+// 🌟 渲染表格：Port 與 L7 App-ID 均綁定深入統整點擊事件
+function renderTableBody(pageData) {
+    const tbody = document.getElementById('flowResultBody');
+    const countDisplay = document.getElementById('recordCountDisplay');
+
+    if (!pageData || pageData.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="7" class="text-muted py-5">此時間範圍內查無符合條件的通訊紀錄。</td></tr>`;
+        countDisplay.innerText = totalRecordsCount > 0 ? `${totalRecordsCount.toLocaleString()} 筆` : "0 筆";
+        document.getElementById('pageInfoText').innerText = totalRecordsCount > 0 
+            ? `第 ${currentPage} / ${totalPagesCount} 頁 (共 ${totalRecordsCount.toLocaleString()} 筆)` 
+            : "共 0 筆紀錄";
+        return;
+    }
+
+    const startIdx = (currentPage - 1) * 50;
+    countDisplay.innerText = `顯示 ${startIdx + 1}~${Math.min(startIdx + pageData.length, totalRecordsCount)} / 共 ${totalRecordsCount.toLocaleString()} 筆`;
+    document.getElementById('pageInfoText').innerText = `第 ${currentPage} / ${totalPagesCount} 頁 (共 ${totalRecordsCount.toLocaleString()} 筆)`;
+
+    let html = '';
+    pageData.forEach(item => {
+        const srcDisplay = maskIp(item.src_ip);
+        const dstDisplay = maskIp(item.dst_ip);
+        const trafficBadge = item.traffic_mb > 50 
+            ? `<span class="badge bg-danger fw-bold">${item.traffic_mb} MB</span>`
+            : (item.traffic_mb > 5 ? `<span class="badge bg-warning text-dark fw-bold">${item.traffic_mb} MB</span>` : `<span class="text-primary font-monospace fw-bold">${item.traffic_mb} MB</span>`);
+
+        html += `
+            <tr>
+                <td class="text-secondary font-monospace">${item.time}</td>
+                <td>
+                    <span class="text-primary fw-bold clickable-link font-monospace" 
+                          onclick="searchSpecificIP('${item.src_ip}', 'src')" 
+                          oncontextmenu="event.preventDefault(); inspectIp('${item.src_ip}')" 
+                          title="滑鼠左鍵：深鑽檢索此 IP 流量 | 滑鼠右鍵：查看身分與 MAC 分析">
+                        ${srcDisplay}
+                    </span>
+                </td>
+                <td><i class="bi bi-arrow-right text-muted"></i></td>
+                <td>
+                    <span class="text-danger fw-bold clickable-link font-monospace" 
+                          onclick="searchSpecificIP('${item.dst_ip}', 'dst')" 
+                          oncontextmenu="event.preventDefault(); inspectIp('${item.dst_ip}')" 
+                          title="滑鼠左鍵：深鑽檢索此 IP 流量 | 滑鼠右鍵：查看身分與 MAC 分析">
+                        ${dstDisplay}
+                    </span>
+                </td>
+                <!-- 🌟 點擊 Port 深入檢索統整 (再次點擊取消) -->
+                <td>
+                    <span class="font-monospace text-primary fw-bold clickable-link" 
+                          onclick="searchSpecificPort('${item.dst_port}')" 
+                          title="點擊依 Port ${item.dst_port} 深入統整 / 再次點擊取消">
+                        Port ${item.dst_port}
+                    </span>
+                </td>
+                <!-- 🌟 點擊 L7 應用 (App-ID) 深入統整 (再次點擊取消) -->
+                <td>
+                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 clickable-badge" 
+                          onclick="searchSpecificApp('${item.protocol}')" 
+                          title="點擊依應用 [${item.protocol}] 深入統整 / 再次點擊取消">
+                        <i class="bi bi-funnel me-1"></i>${item.protocol}
+                    </span>
+                </td>
+                <td>${trafficBadge}</td>
+            </tr>
+        `;
+    });
+    tbody.innerHTML = html;
+}
+
+// 🌟 點擊 Port 篩選統整
+function searchSpecificPort(port) {
+    const portIn = document.getElementById('portVal');
+    portIn.value = (portIn.value == port) ? '' : port;
+    currentFixedEndTime = '';
+    executeFlowSearch(1);
+}
+
+// 🌟 點擊 L7 App-ID 篩選統整
+function searchSpecificApp(app) {
+    const appIn = document.getElementById('appVal');
+    appIn.value = (appIn.value === app) ? '' : app;
+    currentFixedEndTime = '';
+    executeFlowSearch(1);
+}
+
+// 點擊 IP 篩選統整
+function searchSpecificIP(ip, type) {
+    const srcIn = document.getElementById('srcIp');
+    const dstIn = document.getElementById('dstIp');
+
+    if (type === 'src') {
+        srcIn.value = (srcIn.value === ip) ? '' : ip;
+    } else if (type === 'dst') {
+        dstIn.value = (dstIn.value === ip) ? '' : ip;
+    }
+    currentFixedEndTime = '';
+    executeFlowSearch(1);
+}
+
+// 1:1 對齊 traffic.html 的標準滑動分頁[cite: 31, 32]
+function renderTrafficPagination(current, total) {
+    const ul = document.getElementById('traffic-pagination-ul');
+    if (!ul) return;
+    ul.innerHTML = '';
+    if (!total || total <= 1) return;
+
+    const maxVisible = 10;
+    let startPage = Math.max(1, current - Math.floor(maxVisible / 2));
+    let endPage = startPage + maxVisible - 1;
+    if (endPage > total) { 
+        endPage = total; 
+        startPage = Math.max(1, endPage - maxVisible + 1); 
+    }
+
+    ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}">
+        <a class="page-link" href="#" onclick="executeFlowSearch(1); return false;"><i class="bi bi-chevron-double-left"></i></a>
+    </li>`;
+    ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}">
+        <a class="page-link" href="#" onclick="executeFlowSearch(${current - 1}); return false;"><i class="bi bi-chevron-left"></i></a>
+    </li>`;
+
+    for (let i = startPage; i <= endPage; i++) {
+        ul.innerHTML += `<li class="page-item ${i === current ? 'active' : ''}">
+            <a class="page-link" href="#" onclick="executeFlowSearch(${i}); return false;">${i}</a>
+        </li>`;
+    }
+
+    ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}">
+        <a class="page-link" href="#" onclick="executeFlowSearch(${current + 1}); return false;"><i class="bi bi-chevron-right"></i></a>
+    </li>`;
+    ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}">
+        <a class="page-link" href="#" onclick="executeFlowSearch(${total}); return false;"><i class="bi bi-chevron-double-right"></i></a>
+    </li>`;
+}
+
+function filterByCard(type) {
+    document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active'));
+    if (currentActiveCard === type) {
+        currentActiveCard = '';
+    } else {
+        currentActiveCard = type;
+        document.getElementById(`card-${type}`).classList.add('active');
+    }
+    executeFlowSearch(1);
+}
+
+function resetSearch() {
+    currentFixedEndTime = '';
+    document.getElementById('srcIp').value = '';
+    document.getElementById('dstIp').value = '';
+    document.getElementById('portVal').value = '';
+    document.getElementById('appVal').value = ''; // 🌟 清空應用輸入框
+    document.getElementById('timePreset').value = '-5m';
+    document.getElementById('customTimeRange').classList.add('d-none');
+    currentActiveCard = '';
+    document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active'));
+    executeFlowSearch(1);
+}
+
+function inspectIp(ip) {
+    const modal = new bootstrap.Modal(document.getElementById('ipInfoModal'));
+    const modalBody = document.getElementById('ipInfoModalBody');
+    modalBody.innerHTML = `<div class="text-center py-4"><div class="spinner-border text-primary mb-2"></div><p class="text-muted">查詢中...</p></div>`;
+    modal.show();
+
+    fetch(`/api/tools/ip-lookup/${ip}`)
+        .then(r => r.json())
+        .then(res => {
+            if (res.success) {
+                const badge = res.is_internal ? `<span class="badge bg-success ms-2">內網設備</span>` : `<span class="badge bg-danger ms-2">外部來源</span>`;
+                const srcLabel = res.mac_source ? ` (取自 ${res.mac_source})` : ' (取自 DHCP / ARP 紀錄)';
+                modalBody.innerHTML = `
+                    <div class="mb-3 border-bottom pb-2">
+                        <span class="text-muted small d-block">目標 IP 位址</span>
+                        <span class="fs-5 fw-bold text-primary font-monospace">${res.ip}</span> ${badge}
+                    </div>
+                    <div class="mb-3">
+                        <span class="text-muted small d-block">DNS / 主機名稱</span>
+                        <span class="fw-bold text-dark">${res.hostname || '-'}</span>
+                    </div>
+                    <div class="p-3 rounded border bg-light">
+                        <span class="text-muted small d-block mb-1">實體網卡 MAC<span class="text-primary fw-bold">${srcLabel}</span></span>
+                        <span class="fs-5 fw-bold text-success font-monospace">${res.mac_address || '無對應租約 / ARP 紀錄'}</span>
+                    </div>
+                `;
+            } else {
+                modalBody.innerHTML = `<div class="alert alert-danger">查詢失敗</div>`;
+            }
+        });
+}
+
+function showQoeModal() {
+    const modal = new bootstrap.Modal(document.getElementById('qoeModal'));
+    modal.show();
+
+    const curDate = document.getElementById('searchDate').value;
+    fetch(`/api/flow/qoe-summary?date=${curDate}`)
+        .then(r => r.json())
+        .then(res => {
+            const tbody = document.getElementById('qoeTableBody');
+            if (res.success && res.data && res.data.length > 0) {
+                let html = '';
+                res.data.forEach((item, idx) => {
+                    const badge = item.qoe_score >= 90 ? 'bg-success' : (item.qoe_score >= 75 ? 'bg-warning text-dark' : 'bg-danger');
+                    html += `
+                        <tr>
+                            <td class="text-muted">${idx + 1}</td>
+                            <td class="fw-bold text-primary">${item.app_name}</td>
+                            <td class="font-monospace text-secondary">Port ${item.port}</td>
+                            <td class="font-monospace text-dark fw-bold">${item.traffic_mb} MB</td>
+                            <td class="font-monospace text-dark">${item.connections.toLocaleString()} 次</td>
+                            <td>
+                                <div class="progress" style="height: 16px;">
+                                    <div class="progress-bar bg-info text-dark fw-bold" style="width: ${item.percentage}%; font-size: 11px;">
+                                        ${item.percentage}%
+                                    </div>
+                                </div>
+                            </td>
+                            <td><span class="badge ${badge} px-2 py-1">${item.qoe_score} 分</span></td>
+                        </tr>
+                    `;
+                });
+                tbody.innerHTML = html;
+                document.getElementById('qoeRecordCountDisplay').innerText = `共 ${res.data.length} 項熱門應用`;
+            } else {
+                tbody.innerHTML = `<tr><td colspan="7" class="text-muted py-4">無應用資料</td></tr>`;
+            }
+        });
+}
+
+// 🌟 全量圖表聚合 (支援 Port 與 App 條件連動)[cite: 26]
+function showChartModal() {
+    const modal = new bootstrap.Modal(document.getElementById('flowChartModal'));
+    modal.show();
+
+    const badge = document.getElementById('chartScopeBadge');
+    badge.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>DuckDB 全量聚合中...';
+
+    const preset = document.getElementById('timePreset').value;
+    let sTime = preset;
+    let eTime = '';
+
+    if (preset === 'custom') {
+        const sInput = document.getElementById('startTime').value;
+        const eInput = document.getElementById('endTime').value;
+        if (sInput && eInput) {
+            sTime = sInput.replace('T', ' ');
+            eTime = eInput.replace('T', ' ');
+        }
+    } else {
+        if (currentFixedEndTime) {
+            eTime = currentFixedEndTime;
+        }
+    }
+
+    const payload = {
+        date: document.getElementById('searchDate').value,
+        start_time: sTime,
+        end_time: eTime,
+        src_ip: document.getElementById('srcIp').value.trim(),
+        dst_ip: document.getElementById('dstIp').value.trim(),
+        port: document.getElementById('portVal').value.trim(),
+        app: document.getElementById('appVal') ? document.getElementById('appVal').value.trim() : '',
+        zone: currentActiveCard
+    };
+
+    fetch('/api/flow/chart-data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (res.status === 'success') {
+            const timeText = document.getElementById('timePreset').selectedOptions[0].text;
+            badge.innerText = `分析範圍：全域 ${totalRecordsCount.toLocaleString()} 筆 (${timeText})`;
+            renderChartsFromData(res.trend || [], res.apps || [], res.ports || []);
+        } else {
+            badge.innerText = '聚合失敗';
+        }
+    })
+    .catch(err => {
+        badge.innerText = '連線失敗: ' + err;
+    });
+}
+
+function renderChartsFromData(trendList, appList, portList) {
+    const tLabels = trendList.map(item => item.t);
+    const tValues = trendList.map(item => item.mb);
+
+    if (trendChartInstance) trendChartInstance.destroy();
+    trendChartInstance = new Chart(document.getElementById('trendChart'), {
+        type: 'line',
+        data: {
+            labels: tLabels,
+            datasets: [{
+                label: '全域總傳輸量 (MB)',
+                data: tValues,
+                borderColor: '#0ea5e9',
+                backgroundColor: 'rgba(14, 165, 233, 0.15)',
+                borderWidth: 2,
+                pointRadius: tValues.length > 30 ? 1 : 3,
+                fill: true,
+                tension: 0.35
+            }]
+        },
+        options: { 
+            responsive: true, 
+            maintainAspectRatio: false,
+            scales: {
+                x: { grid: { display: false } },
+                y: { grid: { color: '#f1f5f9' }, beginAtZero: true }
+            }
+        }
+    });
+
+    const aLabels = appList.map(item => item.app || '其他');
+    const aValues = appList.map(item => item.mb);
+
+    if (protocolChartInstance) protocolChartInstance.destroy();
+    protocolChartInstance = new Chart(document.getElementById('protocolChart'), {
+        type: 'doughnut',
+        data: {
+            labels: aLabels,
+            datasets: [{
+                data: aValues,
+                backgroundColor: ['#3b82f6', '#0dcaf0', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6']
+            }]
+        },
+        options: { 
+            responsive: true, 
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } }
+            }
+        }
+    });
+
+    const pLabels = portList.map(item => `Port ${item.port}`);
+    const pValues = portList.map(item => item.mb);
+
+    if (portChartInstance) portChartInstance.destroy();
+    portChartInstance = new Chart(document.getElementById('portChart'), {
+        type: 'bar',
+        data: {
+            labels: pLabels,
+            datasets: [{
+                label: '累積傳輸 (MB)',
+                data: pValues,
+                backgroundColor: '#10b981',
+                borderRadius: 3
+            }]
+        },
+        options: { 
+            responsive: true, 
+            maintainAspectRatio: false,
+            scales: {
+                x: { grid: { display: false } },
+                y: { grid: { color: '#f1f5f9' }, beginAtZero: true }
+            }
+        }
+    });
+}
+</script>
+{% endblock %}

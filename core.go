@@ -579,12 +579,19 @@ func runPACommand(cmdXML string) ([]byte, error) {
 		return nil, err
 	}
 
-	apiURL := fmt.Sprintf("https://%s/api/?type=op&cmd=%s&key=%s", fwIP, cmdXML, apiKey)
+	// 🌟 核心防護：將 XML 指令進行百分比 URL 編碼，避免空格與引號造成 API 截斷
+	escapedCmd := url.QueryEscape(cmdXML)
+	apiURL := fmt.Sprintf("https://%s/api/?type=op&cmd=%s&key=%s", fwIP, escapedCmd, apiKey)
+
 	resp, err := httpClient.Get(apiURL)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("PA API 回傳 HTTP 狀態碼: %d", resp.StatusCode)
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -645,6 +652,29 @@ func initDB() (*sql.DB, error) {
 		`CREATE TABLE IF NOT EXISTS system_settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
+		);`,
+		
+		`CREATE TABLE IF NOT EXISTS flow_security_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+			src_ip TEXT,
+			dst_ip TEXT,
+			attack_type TEXT,
+			severity TEXT,
+			details TEXT,
+			status TEXT DEFAULT 'unhandled'
+		);`,
+		`CREATE TABLE IF NOT EXISTS flow_security_settings (
+			key TEXT PRIMARY KEY,
+			value TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS arp_records (
+			ip TEXT PRIMARY KEY,
+			mac TEXT,
+			interface TEXT,
+			hostname TEXT,
+			dev_type TEXT,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);`,
 	}
 
@@ -3283,5 +3313,299 @@ func processSingleNASImport(filePath, fileName string, fileIdx, totalFiles int, 
 
 	globalNASProgress.addLog(fmt.Sprintf("✅ [%d/%d] %s 處理完成！(掃描 %d 行，有效歸檔 %d 筆)", fileIdx, totalFiles, fileName, lineCounter, validCounter))
 	return lineCounter, validCounter, generatedDates, nil
+}
+
+// -------------------------------------------------------------
+// 🌟 資安預警 6 大靈敏度閥值設定結構與 SQLite 存取
+// -------------------------------------------------------------
+type SecuritySettings struct {
+	WindowMins             int `json:"window_mins"`              // 1. 分析時間視窗 (分鐘)
+	PortScanThreshold      int `json:"port_scan_threshold"`      // 2. Port Scan 連線埠門檻
+	DDoSMBThreshold        int `json:"ddos_mb_threshold"`        // 3. DDoS 洪泛流量門檻 (MB)
+	BruteForceThreshold    int `json:"brute_force_threshold"`    // 4. 密碼暴力破解次數門檻
+	DataExfilThreshold     int `json:"data_exfil_threshold"`     // 5. 異常巨量外洩流量門檻 (MB)
+	MiningPoolThreshold    int `json:"mining_pool_threshold"`    // 6. 採礦木馬外部連線門檻
+	LateralSpreadThreshold int `json:"lateral_spread_threshold"` // 7. 內網橫向擴散主機數門檻
+}
+
+// 從 SQLite 讀取設定 (若無設定則給予預設值)
+func getSecuritySettings(db *sql.DB) SecuritySettings {
+	cfg := SecuritySettings{
+		WindowMins:             5,
+		PortScanThreshold:      50,
+		DDoSMBThreshold:        300,
+		BruteForceThreshold:    30,
+		DataExfilThreshold:     500,
+		MiningPoolThreshold:    20,
+		LateralSpreadThreshold: 15,
+	}
+	if db == nil {
+		return cfg
+	}
+
+	rows, err := db.Query("SELECT key, value FROM flow_security_settings")
+	if err != nil {
+		return cfg
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err == nil {
+			val, _ := strconv.Atoi(v)
+			if val <= 0 && k != "window_mins" {
+				continue
+			}
+			switch k {
+			case "window_mins":
+				if val > 0 { cfg.WindowMins = val }
+			case "port_scan_threshold":
+				if val > 0 { cfg.PortScanThreshold = val }
+			case "ddos_mb_threshold":
+				if val > 0 { cfg.DDoSMBThreshold = val }
+			case "brute_force_threshold":
+				if val > 0 { cfg.BruteForceThreshold = val }
+			case "data_exfil_threshold":
+				if val > 0 { cfg.DataExfilThreshold = val }
+			case "mining_pool_threshold":
+				if val > 0 { cfg.MiningPoolThreshold = val }
+			case "lateral_spread_threshold":
+				if val > 0 { cfg.LateralSpreadThreshold = val }
+			}
+		}
+	}
+	return cfg
+}
+
+// 儲存設定至 SQLite (持久化靜態儲存)
+func saveSecuritySettings(db *sql.DB, s SecuritySettings) error {
+	if db == nil {
+		return errors.New("db is nil")
+	}
+	if s.WindowMins <= 0 { s.WindowMins = 5 }
+	if s.PortScanThreshold <= 0 { s.PortScanThreshold = 50 }
+	if s.DDoSMBThreshold <= 0 { s.DDoSMBThreshold = 300 }
+	if s.BruteForceThreshold <= 0 { s.BruteForceThreshold = 30 }
+	if s.DataExfilThreshold <= 0 { s.DataExfilThreshold = 500 }
+	if s.MiningPoolThreshold <= 0 { s.MiningPoolThreshold = 20 }
+	if s.LateralSpreadThreshold <= 0 { s.LateralSpreadThreshold = 15 }
+
+	items := map[string]int{
+		"window_mins":              s.WindowMins,
+		"port_scan_threshold":      s.PortScanThreshold,
+		"ddos_mb_threshold":        s.DDoSMBThreshold,
+		"brute_force_threshold":    s.BruteForceThreshold,
+		"data_exfil_threshold":     s.DataExfilThreshold,
+		"mining_pool_threshold":    s.MiningPoolThreshold,
+		"lateral_spread_threshold": s.LateralSpreadThreshold,
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for k, v := range items {
+		_, err := tx.Exec("INSERT OR REPLACE INTO flow_security_settings (key, value) VALUES (?, ?)", k, strconv.Itoa(v))
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// 🌟 啟動 PA-1420 專屬資安威脅自動分析引擎 (動態閥值版)
+func startFlowSecurityWorker() {
+	go func() {
+		time.Sleep(5 * time.Second) // 開機暖機
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			todayStr := time.Now().Format("2006-01-02")
+			trafficPattern := filepath.ToSlash(filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", todayStr)))
+			threatPattern := filepath.ToSlash(filepath.Join(threatDir, fmt.Sprintf("threat_%s*.parquet", todayStr)))
+
+			db, err := initDB()
+			if err != nil {
+				continue
+			}
+
+			// 🌟 動態從 SQLite 取得目前使用者設定之最新閥值
+			cfg := getSecuritySettings(db)
+
+			// ── 威脅 1: Palo Alto 原生重大威脅同步 (Critical / High) ──
+			threatFiles, _ := filepath.Glob(filepath.Join(threatDir, fmt.Sprintf("threat_%s*.parquet", todayStr)))
+			if len(threatFiles) > 0 {
+				sqlThreat := fmt.Sprintf(`
+					SELECT timestamp, src, dst, threat_name, severity, action
+					FROM read_parquet('%s')
+					WHERE LOWER(severity) IN ('critical', 'high')
+					ORDER BY timestamp DESC
+				`, threatPattern)
+				if tRows, err := runDuckDBQuery(sqlThreat); err == nil {
+					for _, tr := range tRows {
+						ts := fmt.Sprintf("%v", tr["timestamp"])
+						src := fmt.Sprintf("%v", tr["src"])
+						dst := fmt.Sprintf("%v", tr["dst"])
+						tName := fmt.Sprintf("%v", tr["threat_name"])
+						sev := strings.ToUpper(fmt.Sprintf("%v", tr["severity"]))
+						details := fmt.Sprintf("Palo Alto 防火牆阻擋事件: %s (動作: %v)", tName, tr["action"])
+						recordSecurityAlertWithTime(db, ts, src, dst, "NGFW 重大威脅", sev, details)
+					}
+				}
+			}
+
+			// 確保當日流量檔案存在，再執行行為閥值檢測
+			tFiles, _ := filepath.Glob(filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", todayStr)))
+			if len(tFiles) == 0 {
+				continue
+			}
+
+			// 以最新時間戳記倒推分析視窗 (分鐘)
+			var refTime time.Time
+			maxTSQL := fmt.Sprintf(`SELECT MAX(timestamp) as max_t FROM read_parquet('%s')`, trafficPattern)
+			if mRows, err := runDuckDBQuery(maxTSQL); err == nil && len(mRows) > 0 && mRows[0]["max_t"] != nil {
+				if tStr, ok := mRows[0]["max_t"].(string); ok && len(tStr) >= 19 {
+					refTime, _ = time.Parse("2006-01-02 15:04:05", tStr[:19])
+				}
+			}
+			if refTime.IsZero() { refTime = time.Now() }
+			timeThreshold := refTime.Add(-time.Duration(cfg.WindowMins) * time.Minute).Format("2006-01-02 15:04:05")
+
+			// ── 威脅 2: Port Scan 掃描探測 ──
+			sqlScan := fmt.Sprintf(`
+				SELECT source, COUNT(DISTINCT to_port) as p_count 
+				FROM read_parquet('%s') 
+				WHERE timestamp >= '%s' 
+				GROUP BY source HAVING p_count >= %d
+			`, trafficPattern, timeThreshold, cfg.PortScanThreshold)
+			if rows, err := runDuckDBQuery(sqlScan); err == nil {
+				for _, r := range rows {
+					src := fmt.Sprintf("%v", r["source"])
+					cnt := parseDuckDBNumber(r["p_count"])
+					details := fmt.Sprintf("警報：主機 [%s] 於 %d 分鐘內探測了 %d 個不同 Port", src, cfg.WindowMins, cnt)
+					recordSecurityAlert(db, src, "WAN/LAN", "Port 掃描探測", "HIGH", details)
+				}
+			}
+
+			// ── 威脅 3: DDoS / 殭屍網路洪泛 ──
+			sqlDDoS := fmt.Sprintf(`
+				SELECT destination, COUNT(DISTINCT source) as src_count, round(SUM(bytes)/1048576.0, 2) as mb_size
+				FROM read_parquet('%s')
+				WHERE timestamp >= '%s' 
+				GROUP BY destination HAVING src_count >= 10 AND mb_size >= %d
+			`, trafficPattern, timeThreshold, cfg.DDoSMBThreshold)
+			if rows, err := runDuckDBQuery(sqlDDoS); err == nil {
+				for _, r := range rows {
+					dst := fmt.Sprintf("%v", r["destination"])
+					cnt := parseDuckDBNumber(r["src_count"])
+					details := fmt.Sprintf("警報：目標 [%s] 遭 %d 個來源密集連線，累積流量達 %v MB", dst, cnt, r["mb_size"])
+					recordSecurityAlert(db, "Botnet External WANs", dst, "DDoS / 殭屍網路洪泛", "CRITICAL", details)
+				}
+			}
+
+			// ── 威脅 4: 密碼暴力破解猜測 ──
+			sqlBrute := fmt.Sprintf(`
+				SELECT source, destination, to_port, COUNT(*) as cnt
+				FROM read_parquet('%s')
+				WHERE timestamp >= '%s' AND to_port IN (22, 3389, 445, 23)
+				GROUP BY source, destination, to_port HAVING cnt >= %d
+			`, trafficPattern, timeThreshold, cfg.BruteForceThreshold)
+			if rows, err := runDuckDBQuery(sqlBrute); err == nil {
+				for _, r := range rows {
+					src := fmt.Sprintf("%v", r["source"])
+					dst := fmt.Sprintf("%v", r["destination"])
+					p := r["to_port"]
+					cnt := parseDuckDBNumber(r["cnt"])
+					details := fmt.Sprintf("警報：來源 [%s] 對 [%s:Port %v] 發起 %d 次密集連線嘗試", src, dst, p, cnt)
+					recordSecurityAlert(db, src, dst, "密碼暴力破解猜測", "HIGH", details)
+				}
+			}
+
+			// ── 威脅 5: 異常巨量資料外洩 (LAN ➔ WAN) ──
+			sqlExfil := fmt.Sprintf(`
+				SELECT source, destination, round(SUM(bytes)/1048576.0, 2) as mb_size
+				FROM read_parquet('%s')
+				WHERE timestamp >= '%s' AND from_zone = 'LAN' AND to_zone = 'WAN'
+				GROUP BY source, destination HAVING mb_size >= %d
+			`, trafficPattern, timeThreshold, cfg.DataExfilThreshold)
+			if rows, err := runDuckDBQuery(sqlExfil); err == nil {
+				for _, r := range rows {
+					src := fmt.Sprintf("%v", r["source"])
+					dst := fmt.Sprintf("%v", r["destination"])
+					details := fmt.Sprintf("警報：內網主機 [%s] 向外部 IP [%s] 上傳了 %v MB 巨量資料", src, dst, r["mb_size"])
+					recordSecurityAlert(db, src, dst, "異常巨量資料外洩", "HIGH", details)
+				}
+			}
+
+			// ── 威脅 6: 內網橫向擴散移動 ──
+			sqlLateral := fmt.Sprintf(`
+				SELECT source, COUNT(DISTINCT destination) as target_cnt
+				FROM read_parquet('%s')
+				WHERE timestamp >= '%s' AND from_zone = 'LAN' AND to_zone = 'LAN' AND to_port IN (445, 135, 3389, 5985)
+				GROUP BY source HAVING target_cnt >= %d
+			`, trafficPattern, timeThreshold, cfg.LateralSpreadThreshold)
+			if rows, err := runDuckDBQuery(sqlLateral); err == nil {
+				for _, r := range rows {
+					src := fmt.Sprintf("%v", r["source"])
+					cnt := parseDuckDBNumber(r["target_cnt"])
+					details := fmt.Sprintf("警報：內網主機 [%s] 於 %d 分鐘內對內部 %d 台設備發動橫向高危埠探測", src, cfg.WindowMins, cnt)
+					recordSecurityAlert(db, src, "LAN 內部多主機", "內網橫向擴散移動", "HIGH", details)
+				}
+			}
+
+			// ── 威脅 7: 採礦木馬 (連線外部礦池) ──
+			sqlMining := fmt.Sprintf(`
+				SELECT source, destination, to_port, COUNT(*) as cnt
+				FROM read_parquet('%s')
+				WHERE timestamp >= '%s' AND (to_port IN (3333, 5555, 7777, 9999, 14444, 4444, 8333, 18080) OR application ILIKE '%%miner%%' OR application ILIKE '%%stratum%%')
+				GROUP BY source, destination, to_port HAVING cnt >= %d
+			`, trafficPattern, timeThreshold, cfg.MiningPoolThreshold)
+			if rows, err := runDuckDBQuery(sqlMining); err == nil {
+				for _, r := range rows {
+					src := fmt.Sprintf("%v", r["source"])
+					dst := fmt.Sprintf("%v", r["destination"])
+					p := r["to_port"]
+					cnt := parseDuckDBNumber(r["cnt"])
+					details := fmt.Sprintf("警報：內網主機 [%s] 疑似連線至外部礦池 [%s:Port %v] 達 %d 次", src, dst, p, cnt)
+					recordSecurityAlert(db, src, dst, "疑似採礦木馬連線", "HIGH", details)
+				}
+			}
+		}
+	}()
+}
+
+// 寫入預警防重複機制 (帶有日誌真實時間戳記)
+func recordSecurityAlertWithTime(db *sql.DB, logTime, src, dst, attackType, severity, details string) {
+	var count int
+	_ = db.QueryRow(`
+		SELECT COUNT(*) FROM flow_security_events 
+		WHERE timestamp = ? AND src_ip = ? AND attack_type = ?
+	`, logTime, src, attackType).Scan(&count)
+
+	if count == 0 {
+		_, _ = db.Exec(`
+			INSERT INTO flow_security_events (timestamp, src_ip, dst_ip, attack_type, severity, details)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, logTime, src, dst, attackType, severity, details)
+	}
+}
+
+// 寫入預警防重複機制 (5 分鐘內同 IP、同攻擊型態不重複推播)
+func recordSecurityAlert(db *sql.DB, src, dst, attackType, severity, details string) {
+	var count int
+	_ = db.QueryRow(`
+		SELECT COUNT(*) FROM flow_security_events 
+		WHERE src_ip = ? AND attack_type = ? AND timestamp >= datetime('now', '-5 minutes')
+	`, src, attackType).Scan(&count)
+
+	if count == 0 {
+		_, _ = db.Exec(`
+			INSERT INTO flow_security_events (src_ip, dst_ip, attack_type, severity, details)
+			VALUES (?, ?, ?, ?, ?)
+		`, src, dst, attackType, severity, details)
+	}
 }
 

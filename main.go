@@ -87,6 +87,9 @@ func main() {
 	_, _ = c.AddFunc("0 1,5,9,13,17,21 * * *", func() { fetchPADhcpJob("auto") })
 	_, _ = c.AddFunc("@every 1m", func() { logSystemHealthJob() })
 	c.Start()
+	
+	// 5-2. 啟動資安威脅自動分析巡檢引擎
+	startFlowSecurityWorker()
 
 	// 6. Syslog 接收器
 	go startSyslogReceiver(514)

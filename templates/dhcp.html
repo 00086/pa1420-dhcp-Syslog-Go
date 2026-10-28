@@ -440,6 +440,11 @@
 
                     const tbody = document.getElementById('arp-table-body');
                     tbody.innerHTML = '';
+                    if (!data.data || data.data.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">目前防火牆 ARP 表無在線設備紀錄</td></tr>';
+                        return;
+                    }
+
                     data.data.forEach(row => {
                         const tr = document.createElement('tr');
                         if (row.tag_class === 'warning') tr.className = 'table-warning';
@@ -450,11 +455,16 @@
                         `;
                         tbody.appendChild(tr);
                     });
+                } else {
+                    document.getElementById('arp-table-body').innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">取得失敗：${data.message || '未知錯誤'}</td></tr>`;
                 }
+            })
+            .catch(err => {
+                document.getElementById('arp-table-body').innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">連線錯誤：${err}</td></tr>`;
             })
             .finally(() => { refreshBtn.disabled = false; });
     }
-
+	
     function openThreatModal() {
         threatModalObj.show();
         const tbody = document.getElementById('threat-table-body');
