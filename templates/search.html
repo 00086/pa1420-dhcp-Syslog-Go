@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}PA-1420 網路通訊軌跡明細檢索{% endblock %}
+{% block title %}{{ fw_model }} 網路通訊軌跡明細檢索{% endblock %}
 
 {% block extra_styles %}
     .flow-search-container {
@@ -60,7 +60,7 @@
     <!-- 頂部功能按鈕與標題 -->
     <div class="d-flex justify-content-between align-items-center mb-2 flex-shrink-0">
         <h5 class="text-primary fw-bold mb-0">
-            <i class="bi bi-search me-2"></i>PA-1420 邊界與跨區通訊軌跡檢索
+            <i class="bi bi-search me-2"></i>{{ fw_model }} 邊界與跨區通訊軌跡檢索
         </h5>
         <div class="d-flex align-items-center gap-2">
             <button id="btnMaskIp" class="btn btn-sm btn-outline-info fw-bold shadow-sm" onclick="toggleHideInternalIp()" title="切換是否遮蔽內網敏感 IP 位址">
@@ -308,18 +308,19 @@
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content shadow-lg bg-white border-0">
             <div class="modal-header bg-light py-2 border-bottom">
-                <h5 class="modal-title text-primary fw-bold"><i class="bi bi-globe me-2"></i>IP 來源與設備身分分析</h5>
+                <h6 class="modal-title text-primary fw-bold mb-0"><i class="bi bi-globe me-2"></i>IP 來源與所屬單位情資分析</h6>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
-            <div class="modal-body text-dark" id="ipInfoModalBody">
+            <div class="modal-body text-dark p-3" id="ipInfoModalBody">
                 <div class="text-center py-4">
                     <div class="spinner-border text-primary mb-2"></div>
-                    <p class="text-muted mb-0">正在穿透 DHCP 租約與本機快取查詢...</p>
+                    <p class="text-muted mb-0">正在穿透 DNS 快取與反向 PTR 解析中...</p>
                 </div>
             </div>
         </div>
     </div>
 </div>
+
 {% endblock %}
 
 {% block scripts %}
@@ -669,35 +670,73 @@ function resetSearch() {
     executeFlowSearch(1);
 }
 
+// 🌟 IP 來源/目標身分與機構情資反查函式
 function inspectIp(ip) {
-    const modal = new bootstrap.Modal(document.getElementById('ipInfoModal'));
+    if (!ip) return;
+    
+    const modalEl = document.getElementById('ipInfoModal');
+    const modal = new bootstrap.Modal(modalEl);
     const modalBody = document.getElementById('ipInfoModalBody');
-    modalBody.innerHTML = `<div class="text-center py-4"><div class="spinner-border text-primary mb-2"></div><p class="text-muted">查詢中...</p></div>`;
+
+    if (ip.includes('Botnet') || ip.includes('WANs') || ip.includes('多主機')) {
+        modalBody.innerHTML = `
+            <div class="mb-3 border-bottom pb-2">
+                <span class="text-muted small d-block">來源屬性</span>
+                <span class="fs-5 fw-bold text-danger font-monospace">${ip}</span>
+            </div>
+            <div class="p-3 rounded border bg-light">
+                <span class="text-muted small d-block mb-1">情資說明</span>
+                <span class="text-dark">此項目為系統行為引擎彙整之外部來源集合。</span>
+            </div>
+        `;
+        modal.show();
+        return;
+    }
+
+    modalBody.innerHTML = `<div class="text-center py-4"><div class="spinner-border text-primary mb-2"></div><p class="text-muted mb-0">正在反向解析主機名稱與所屬單位...</p></div>`;
     modal.show();
 
-    fetch(`/api/tools/ip-lookup/${ip}`)
+    fetch(`/api/tools/ip-lookup/${encodeURIComponent(ip)}`)
         .then(r => r.json())
         .then(res => {
             if (res.success) {
-                const badge = res.is_internal ? `<span class="badge bg-success ms-2">內網設備</span>` : `<span class="badge bg-danger ms-2">外部來源</span>`;
-                const srcLabel = res.mac_source ? ` (取自 ${res.mac_source})` : ' (取自 DHCP / ARP 紀錄)';
+                const badge = res.is_internal 
+                    ? `<span class="badge bg-success ms-2">內網設備</span>` 
+                    : `<span class="badge bg-danger ms-2">外部來源</span>`;
+                
+                let extraHtml = '';
+                if (res.is_internal) {
+                    const srcLabel = res.mac_source ? ` (取自 ${res.mac_source})` : '';
+                    extraHtml = `
+                    <div class="p-3 rounded border bg-light">
+                        <span class="text-muted small d-block mb-1">實體網卡 MAC<span class="text-primary fw-bold">${srcLabel}</span></span>
+                        <span class="fs-5 fw-bold text-success font-monospace">${res.mac_address || '無對應租約 / ARP 紀錄'}</span>
+                    </div>`;
+                } else {
+                    extraHtml = `
+                    <div class="p-3 rounded border bg-light">
+                        <span class="text-muted small d-block mb-1">所屬組織 / 單位情資</span>
+                        <span class="fs-6 fw-bold text-danger font-monospace"><i class="bi bi-building me-1"></i>${res.org_desc || '網際網路外部公網主機'}</span>
+                    </div>`;
+                }
+
                 modalBody.innerHTML = `
                     <div class="mb-3 border-bottom pb-2">
                         <span class="text-muted small d-block">目標 IP 位址</span>
                         <span class="fs-5 fw-bold text-primary font-monospace">${res.ip}</span> ${badge}
                     </div>
                     <div class="mb-3">
-                        <span class="text-muted small d-block">DNS / 主機名稱</span>
-                        <span class="fw-bold text-dark">${res.hostname || '-'}</span>
+                        <span class="text-muted small d-block">反向解析主機名稱 (Reverse DNS / PTR)</span>
+                        <span class="fw-bold text-dark font-monospace">${res.hostname !== '-' ? res.hostname : '<span class="text-muted">該 IP 無註冊 PTR 反向記錄</span>'}</span>
                     </div>
-                    <div class="p-3 rounded border bg-light">
-                        <span class="text-muted small d-block mb-1">實體網卡 MAC<span class="text-primary fw-bold">${srcLabel}</span></span>
-                        <span class="fs-5 fw-bold text-success font-monospace">${res.mac_address || '無對應租約 / ARP 紀錄'}</span>
-                    </div>
+                    ${extraHtml}
                 `;
             } else {
                 modalBody.innerHTML = `<div class="alert alert-danger">查詢失敗</div>`;
             }
+        })
+        .catch(err => {
+            modalBody.innerHTML = `<div class="alert alert-danger">查詢發生異常：${err}</div>`;
         });
 }
 

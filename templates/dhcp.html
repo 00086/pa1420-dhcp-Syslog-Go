@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}PA-1420 DHCP 租約智能監控聯防系統{% endblock %}
+{% block title %}{{ fw_model }} DHCP 租約智能監控聯防系統{% endblock %}
 
 {% block extra_styles %}
 .upload-card { background-color: #ffffff; border-radius: 8px; padding: 12px 15px; }
@@ -21,6 +21,21 @@
 .table-scroll-container { overflow-y: scroll; flex-grow: 1; }
 .table-fixed { table-layout: fixed; width: 100%; margin-bottom: 0; }
 .table-fixed th, .table-fixed td { vertical-align: middle; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+
+.card-stat-arp {
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s ease-in-out;
+}
+.card-stat-arp:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+}
+.card-stat-arp.active-filter {
+    box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.45) !important;
+    border-color: #0d6efd !important;
+}
+
 {% endblock %}
 
 {% block content %}
@@ -67,7 +82,7 @@
                             <i class="bi bi-search"></i> ARP 固定IP比對
                         </button>
                         <button class="btn btn-outline-primary btn-sm px-2 text-nowrap" id="fetch-btn" onclick="fetchNow()">
-                            <i class="bi bi-arrow-repeat"></i> 立即從 PA-1420 抓取
+                            <i class="bi bi-arrow-repeat"></i> 立即從 {{ fw_model }} 抓取
                         </button>
                     </div>
                 </div>
@@ -131,7 +146,7 @@
         <div class="modal-content">
             <div class="modal-header bg-light py-2 d-flex justify-content-between align-items-center">
                 <div class="d-flex align-items-center gap-2">
-                    <h5 class="modal-title fw-bold mb-0"><i class="bi bi-cpu-fill text-danger"></i> PA-1420 ARP 即時比對分析</h5>
+                    <h5 class="modal-title fw-bold mb-0"><i class="bi bi-cpu-fill text-danger"></i> {{ fw_model }} ARP 即時比對分析</h5>
                     <span id="arp-dns-status" class="badge bg-secondary ms-2" style="display: none;">
                         <span class="spinner-border spinner-border-sm me-1"></span>解析中...
                     </span>
@@ -144,12 +159,59 @@
                 </div>
             </div>
             <div class="modal-body">
+                <!-- 🌟 5 大指標卡片 (固定 IP 獨立展示，支援點擊直接篩選表格) -->
                 <div class="row g-2 mb-3">
-                    <div class="col-md-3"><div class="p-2 border rounded bg-light text-center"><div class="small text-muted">目前 ARP 總上線設備</div><h4 class="mb-0 fw-bold font-monospace" id="arp-total-count">0</h4></div></div>
-                    <div class="col-md-3"><div class="p-2 border rounded bg-light text-center"><div class="small text-muted">DHCP 動態正常配發</div><h4 class="mb-0 fw-bold font-monospace text-success" id="arp-dhcp-count">0</h4></div></div>
-                    <div class="col-md-3"><div class="p-2 border rounded bg-warning-subtle text-center"><div class="small text-warning-emphasis fw-bold">🚨 疑似私設 / 固定 IP</div><h4 class="mb-0 fw-bold font-monospace text-warning-emphasis" id="arp-static-count">0</h4></div></div>
-                    <div class="col-md-3"><div class="p-2 border rounded bg-danger-subtle text-center"><div class="small text-danger fw-bold">⚠️ MAC 不符 / IP 異常</div><h4 class="mb-0 fw-bold font-monospace text-danger" id="arp-conflict-count">0</h4></div></div>
+                    <div class="col-6 col-md">
+                        <div class="card-stat-arp p-2 border rounded bg-light text-center active-filter" id="arp-card-all" onclick="filterArpTable('ALL')">
+                            <div class="small text-muted fw-bold">總上線設備</div>
+                            <h4 class="mb-0 fw-bold font-monospace text-dark" id="arp-total-count">0</h4>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md">
+                        <div class="card-stat-arp p-2 border rounded bg-success-subtle text-center" id="arp-card-dhcp" onclick="filterArpTable('DHCP')">
+                            <div class="small text-success-emphasis fw-bold">🟢 DHCP 動態配發</div>
+                            <h4 class="mb-0 fw-bold font-monospace text-success" id="arp-dhcp-count">0</h4>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md">
+                        <div class="card-stat-arp p-2 border rounded bg-primary-subtle text-center" id="arp-card-static" onclick="filterArpTable('STATIC')">
+                            <div class="small text-primary-emphasis fw-bold">🔵 固定 IP (已列管)</div>
+                            <h4 class="mb-0 fw-bold font-monospace text-primary" id="arp-static-count">0</h4>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md">
+                        <div class="card-stat-arp p-2 border rounded bg-warning-subtle text-center" id="arp-card-rogue" onclick="filterArpTable('ROGUE')">
+                            <div class="small text-warning-emphasis fw-bold">🚨 疑似私設 (未列管)</div>
+                            <h4 class="mb-0 fw-bold font-monospace text-warning-emphasis" id="arp-rogue-count">0</h4>
+                        </div>
+                    </div>
+                    <div class="col-12 col-md">
+                        <div class="card-stat-arp p-2 border rounded bg-danger-subtle text-center" id="arp-card-conflict" onclick="filterArpTable('CONFLICT')">
+                            <div class="small text-danger-emphasis fw-bold">⚠️ MAC 不符 / 衝突</div>
+                            <h4 class="mb-0 fw-bold font-monospace text-danger" id="arp-conflict-count">0</h4>
+                        </div>
+                    </div>
                 </div>
+				
+				<!-- 🌟 Ping IP 範圍與 Windows arp -a 融合控制列 (預設 192.168.1.1 為主) -->
+				<div class="card border p-2 mb-3 bg-light shadow-sm">
+					<div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+						<div class="d-flex align-items-center gap-2 flex-grow-1">
+							<span class="fw-bold text-dark small text-nowrap">
+								<i class="bi bi-broadcast text-primary me-1"></i>Ping 掃描 IP 範圍：
+							</span>
+							<div class="input-group input-group-sm" style="max-width: 320px;">
+								<input type="text" class="form-control font-monospace" id="ping-ip-range" 
+									   value="192.168.1.1-254" placeholder="例如: 192.168.1.1-254 或 192.168.1.0/24">
+							</div>
+							<button class="btn btn-sm btn-success fw-bold px-3 text-nowrap" id="btn-ping-scan" onclick="triggerPingScanAndArp()">
+								<i class="bi bi-lightning-charge-fill me-1"></i>開始 Ping 並以 Windows ARP 融合比對
+							</button>
+						</div>
+						<div id="ping-scan-status-text" class="small text-muted font-monospace"></div>
+					</div>
+				</div>
+				
                 <div class="table-responsive" style="max-height: 480px;">
                     <table class="table table-sm table-bordered table-hover align-middle mb-0 font-monospace">
                         <thead class="table-light sticky-top">
@@ -171,7 +233,7 @@
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header bg-danger text-white py-2">
-                <h5 class="modal-title fw-bold"><i class="bi bi-shield-x"></i> PA-1420 資安威脅與阻擋事件即時分析</h5>
+                <h5 class="modal-title fw-bold"><i class="bi bi-shield-x"></i> {{ fw_model }} 資安威脅與阻擋事件即時分析</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body p-3">
@@ -406,55 +468,122 @@
 
     function openArpModal() {
         arpModalObj.show();
+        currentArpFilter = 'ALL';
+        ['all', 'dhcp', 'static', 'rogue', 'conflict'].forEach(k => {
+            const el = document.getElementById(`arp-card-${k}`);
+            if (el) el.classList.remove('active-filter');
+        });
+        const activeEl = document.getElementById('arp-card-all');
+        if (activeEl) activeEl.classList.add('active-filter');
         document.getElementById('arp-table-body').innerHTML = '<tr><td colspan="5" class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary me-2"></div>正在比對 ARP...</td></tr>';
         refreshArpTableData();
     }
+	
+    // 🌟 觸發 Ping 掃描並讀取 Windows arp -a
+    function triggerPingScanAndArp() {
+        const range = document.getElementById('ping-ip-range').value.trim();
+        if (!range) {
+            alert('請輸入要 Ping 的 IP 範圍！');
+            return;
+        }
 
-    function refreshArpTableData() {
+        const scanBtn = document.getElementById('btn-ping-scan');
+        const statusText = document.getElementById('ping-scan-status-text');
+        scanBtn.disabled = true;
+        scanBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>多執行緒 Ping 掃描中...';
+        statusText.innerHTML = `<span class="text-primary"><i class="bi bi-arrow-repeat spin"></i> 正在 Ping 範圍 [${range}] 並執行 arp -a 提取 MAC...</span>`;
+
+        refreshArpTableData(range, (foundCount) => {
+            scanBtn.disabled = false;
+            scanBtn.innerHTML = '<i class="bi bi-lightning-charge-fill me-1"></i>開始 Ping 並以 Windows ARP 融合比對';
+            statusText.innerHTML = `<span class="text-success fw-bold"><i class="bi bi-check-circle-fill me-1"></i>完成！成功擷取 ${foundCount} 筆 Windows 本機 ARP 記錄！</span>`;
+            setTimeout(() => { statusText.innerHTML = ''; }, 6000);
+        });
+    }
+
+    let allArpData = [];
+    let currentArpFilter = 'ALL';
+
+    // 🌟 點擊卡片切換篩選
+    function filterArpTable(cat) {
+        if (currentArpFilter === cat && cat !== 'ALL') {
+            currentArpFilter = 'ALL';
+        } else {
+            currentArpFilter = cat;
+        }
+
+        ['all', 'dhcp', 'static', 'rogue', 'conflict'].forEach(k => {
+            const el = document.getElementById(`arp-card-${k}`);
+            if (el) el.classList.remove('active-filter');
+        });
+        const activeEl = document.getElementById(`arp-card-${currentArpFilter.toLowerCase()}`);
+        if (activeEl) activeEl.classList.add('active-filter');
+
+        renderArpTableRows();
+    }
+
+    function renderArpTableRows() {
+        const tbody = document.getElementById('arp-table-body');
+        tbody.innerHTML = '';
+
+        const filtered = allArpData.filter(row => {
+            if (currentArpFilter === 'ALL') return true;
+            return row.category === currentArpFilter;
+        });
+
+        if (filtered.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">查無符合條件之 ARP 紀錄</td></tr>';
+            return;
+        }
+
+        filtered.forEach(row => {
+            const tr = document.createElement('tr');
+            if (row.tag_class === 'warning') tr.className = 'table-warning';
+            if (row.tag_class === 'danger') tr.className = 'table-danger';
+
+            const isWin = row.interface && row.interface.includes('Windows');
+            const ifaceBadge = isWin 
+                ? `<span class="badge bg-info text-dark font-monospace"><i class="bi bi-windows me-1"></i>${row.interface}</span>`
+                : `<span class="badge bg-light text-dark border font-monospace">${row.interface || '-'}</span>`;
+
+            tr.innerHTML = `
+                <td class="fw-bold font-monospace">${row.ip}</td>
+                <td class="font-monospace">${row.mac}</td>
+                <td>${ifaceBadge}</td>
+                <td>${row.hostname}</td>
+                <td><span class="badge bg-${row.tag_class}">${row.dev_type}</span></td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    function refreshArpTableData(pingRange = '', callback = null) {
         const refreshBtn = document.getElementById('arp-refresh-btn');
-        const statusBadge = document.getElementById('arp-dns-status');
         refreshBtn.disabled = true;
         const date = document.getElementById('view-date').value || todayStr;
 
-        fetch(`/api/arp-analysis?date=${date}`)
+        let url = `/api/arp-analysis?date=${date}`;
+        if (pingRange) {
+            url += `&ping_range=${encodeURIComponent(pingRange)}`;
+        }
+
+        fetch(url)
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'success') {
+                    // 🌟 獨立填入 5 大卡片數據
                     document.getElementById('arp-total-count').innerText = data.total_arp;
                     document.getElementById('arp-dhcp-count').innerText = data.normal_dhcp_count;
-                    document.getElementById('arp-static-count').innerText = data.static_ip_count;
+                    document.getElementById('arp-static-count').innerText = data.managed_static_count || 0; // 🔵 固定 IP (已列管)
+                    document.getElementById('arp-rogue-count').innerText = data.rogue_ip_count || 0;          // 🚨 疑似私設 (未列管)
                     document.getElementById('arp-conflict-count').innerText = data.conflict_count;
 
-                    if (data.dns_progress && data.dns_progress.is_running) {
-                        statusBadge.style.display = 'inline-block';
-                        statusBadge.className = 'badge bg-warning text-dark ms-2';
-                        statusBadge.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>解析中 (${data.dns_progress.done}/${data.dns_progress.total})`;
-                        if (!arpPollingTimer) {
-                            arpPollingTimer = setTimeout(() => { arpPollingTimer = null; refreshArpTableData(); }, 3000);
-                        }
-                    } else {
-                        statusBadge.style.display = 'inline-block';
-                        statusBadge.className = 'badge bg-success ms-2';
-                        statusBadge.innerHTML = `<i class="bi bi-check-circle me-1"></i>DNS 解析完成`;
+                    if (callback) {
+                        callback(data.windows_arp_found || 0);
                     }
 
-                    const tbody = document.getElementById('arp-table-body');
-                    tbody.innerHTML = '';
-                    if (!data.data || data.data.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">目前防火牆 ARP 表無在線設備紀錄</td></tr>';
-                        return;
-                    }
-
-                    data.data.forEach(row => {
-                        const tr = document.createElement('tr');
-                        if (row.tag_class === 'warning') tr.className = 'table-warning';
-                        if (row.tag_class === 'danger') tr.className = 'table-danger';
-                        tr.innerHTML = `
-                            <td class="fw-bold">${row.ip}</td><td>${row.mac}</td><td>${row.interface}</td>
-                            <td>${row.hostname}</td><td><span class="badge bg-${row.tag_class}">${row.dev_type}</span></td>
-                        `;
-                        tbody.appendChild(tr);
-                    });
+                    allArpData = data.data || [];
+                    renderArpTableRows();
                 } else {
                     document.getElementById('arp-table-body').innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">取得失敗：${data.message || '未知錯誤'}</td></tr>`;
                 }

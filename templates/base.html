@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}PA-1420 智能監控聯防系統{% endblock %}</title>
+    <title>{% block title %}{{ fw_model }} 智能監控聯防系統{% endblock %}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -64,47 +64,101 @@
                     <!-- 上層：主機資訊與功能選擇分頁 -->
                     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 pb-2 mb-2 border-bottom">
                         <div class="d-flex align-items-center gap-2 flex-wrap">
-                            <span class="fw-bold text-dark fs-6"><i class="bi bi-shield-lock-fill text-primary"></i> <span id="sys-hostname">PA-1420</span></span>
+                            <span class="fw-bold text-dark fs-6"><i class="bi bi-shield-lock-fill text-primary"></i> <span id="sys-hostname">{{ fw_model }}</span></span>
                             <span class="health-badge"><i class="bi bi-hdd-network text-secondary me-1"></i>型號: <strong id="sys-model">-</strong></span>
                             <span class="health-badge"><i class="bi bi-code-slash text-secondary me-1"></i>PAN-OS: <strong id="sys-os">-</strong></span>
                             <span class="health-badge"><i class="bi bi-clock-history text-secondary me-1"></i>運行時間: <strong id="sys-uptime">-</strong></span>
                         </div>
 
-                        <!-- 模組功能切換按鈕群組 (無縫跳轉，高亮當前模組) -->
-                        <div class="d-flex align-items-center gap-2">
-                            <ul class="nav nav-pills gap-1">
-                                <li class="nav-item">
-                                    <a class="nav-link {% if active_page == 'dhcp' %}active{% endif %}" href="/">
-                                        <i class="bi bi-ethernet me-1"></i>DHCP 租約管理
+                        <!-- 🌟 右上角功能整合下拉選單 (圖示完整保留，自適應動態標題) -->
+                        <div class="dropdown">
+                            <button class="btn btn-outline-secondary dropdown-toggle fw-bold d-flex align-items-center gap-2 bg-light text-dark shadow-sm py-1 px-3 border" type="button" id="navModuleDropdown" data-bs-toggle="dropdown" aria-expanded="false" style="font-size: 14px;">
+                                {% if active_page == 'dhcp' %}
+                                    <i class="bi bi-ethernet text-primary"></i> DHCP 租約管理
+                                {% elif active_page == 'traffic' %}
+                                    <i class="bi bi-activity text-primary"></i> 流量紀錄分析
+                                {% elif active_page == 'threat' or page == 'threat' %}
+                                    <i class="bi bi-shield-shaded text-danger"></i> 資安威脅分析
+                                {% elif active_page == 'system' %}
+                                    <i class="bi bi-gear-wide-connected text-info"></i> 系統紀錄分析
+                                {% elif active_page == 'config' %}
+                                    <i class="bi bi-pencil-square text-warning"></i> 組態紀錄分析
+                                {% elif active_page == 'search' %}
+                                    <i class="bi bi-search text-info"></i> 流量軌跡檢索
+                                {% elif active_page == 'security' %}
+									<i class="bi bi-shield-slash-fill text-danger"></i> 資安威脅預警
+								<!-- 🌟 補上 devices 標題判定 -->
+								{% elif active_page == 'devices' %}
+									<i class="bi bi-hdd-network text-primary"></i> 管理取得 IP (設備清冊)
+								{% elif active_page == 'audit' %}
+									<i class="bi bi-journal-check text-info"></i> 湖倉稽核與切分整併紀錄
+								{% else %}
+									<i class="bi bi-grid-fill text-primary"></i> 功能模組選單
+								{% endif %}
+                            </button>
+
+                            <ul class="dropdown-menu dropdown-menu-end shadow border py-2" aria-labelledby="navModuleDropdown" style="min-width: 220px; z-index: 2000;">
+                                <li><h6 class="dropdown-header text-uppercase text-muted fw-bold" style="font-size: 11.5px; letter-spacing: 0.5px;">日誌紀錄與監控</h6></li>
+                                <li>
+                                    <a class="dropdown-item d-flex align-items-center gap-2 py-2 {% if active_page == 'dhcp' %}active fw-bold{% endif %}" href="/">
+                                        <i class="bi bi-ethernet {% if active_page != 'dhcp' %}text-primary{% endif %}"></i> DHCP 租約管理
                                     </a>
                                 </li>
-                                <li class="nav-item">
-                                    <a class="nav-link {% if active_page == 'traffic' %}active{% endif %}" href="/traffic">
-                                        <i class="bi bi-activity me-1"></i>流量紀錄分析
+                                <li>
+                                    <a class="dropdown-item d-flex align-items-center gap-2 py-2 {% if active_page == 'traffic' %}active fw-bold{% endif %}" href="/traffic">
+                                        <i class="bi bi-activity {% if active_page != 'traffic' %}text-primary{% endif %}"></i> 流量紀錄分析
                                     </a>
                                 </li>
-                                <li class="nav-item">
-                                    <a class="nav-link {% if page == 'threat' %}active fw-bold text-danger{% endif %}" href="/threat">
-                                        <i class="bi bi-shield-shaded"></i> 資安威脅分析
+                                <li>
+                                    <a class="dropdown-item d-flex align-items-center gap-2 py-2 {% if active_page == 'threat' or page == 'threat' %}active fw-bold{% endif %}" href="/threat">
+                                        <i class="bi bi-shield-shaded {% if active_page != 'threat' and page != 'threat' %}text-danger{% endif %}"></i> 資安威脅分析
                                     </a>
                                 </li>
-								<li class="nav-item">
-									<a class="nav-link {% if active_page == 'search' %}active text-info fw-bold{% endif %}" href="/search">
-										<i class="bi bi-search me-1"></i>流量軌跡檢索
+								<li>
+                                    <a class="dropdown-item d-flex align-items-center gap-2 py-2 {% if active_page == 'system' %}active fw-bold{% endif %}" href="/system">
+                                        <i class="bi bi-gear-wide-connected {% if active_page != 'system' %}text-info{% endif %}"></i> 系統紀錄分析
+                                    </a>
+                                </li>
+                                <li>
+                                    <a class="dropdown-item d-flex align-items-center gap-2 py-2 {% if active_page == 'config' %}active fw-bold{% endif %}" href="/config">
+                                        <i class="bi bi-pencil-square {% if active_page != 'config' %}text-warning{% endif %}"></i> 組態紀錄分析
+                                    </a>
+                                </li><li>
+									<a class="dropdown-item {% if active_page == 'timeline' %}active{% endif %}" href="/timeline">
+										<i class="bi bi-crosshair text-danger me-2"></i>單一主機 360° 鑑識
 									</a>
 								</li>
-								<li class="nav-item">
-									<a class="nav-link {% if active_page == 'security' %}active text-danger fw-bold{% endif %}" href="/security">
-										<i class="bi bi-shield-slash-fill me-1"></i>資安威脅預警
+                                <li><hr class="dropdown-divider my-1"></li>
+                                <li><h6 class="dropdown-header text-uppercase text-muted fw-bold" style="font-size: 11.5px; letter-spacing: 0.5px;">軌跡深鑽與資安防禦</h6></li>
+                                <li>
+                                    <a class="dropdown-item d-flex align-items-center gap-2 py-2 {% if active_page == 'search' %}active fw-bold{% endif %}" href="/search">
+                                        <i class="bi bi-search {% if active_page != 'search' %}text-info{% endif %}"></i> 流量軌跡檢索
+                                    </a>
+                                </li>
+                                <li>
+                                    <a class="dropdown-item d-flex align-items-center gap-2 py-2 {% if active_page == 'security' %}active fw-bold{% endif %}" href="/security">
+                                        <i class="bi bi-shield-slash-fill {% if active_page != 'security' %}text-danger{% endif %}"></i> 資安威脅預警
+                                    </a>
+                                </li>
+                                <li><hr class="dropdown-divider my-1"></li>
+                                <li><h6 class="dropdown-header text-uppercase text-muted fw-bold" style="font-size: 11.5px; letter-spacing: 0.5px;">資料維護工具</h6></li>
+								<li>
+									<a class="dropdown-item d-flex align-items-center gap-2 py-2 {% if active_page == 'devices' %}active fw-bold{% endif %}" href="/devices">
+										<i class="bi bi-hdd-network {% if active_page != 'devices' %}text-primary{% endif %}"></i> 管理取得 IP (設備清冊)
+									</a>
+								</li>
+								<li>
+									<a class="dropdown-item d-flex align-items-center gap-2 py-2 text-dark" href="javascript:void(0)" onclick="openNasImportModal()">
+										<i class="bi bi-hdd-network text-success"></i> 匯入 Synology NAS
+									</a>
+								</li>
+								<!-- 🌟 全新掛載：湖倉稽核與切分整併紀錄 -->
+								<li>
+									<a class="dropdown-item d-flex align-items-center gap-2 py-2 {% if active_page == 'audit' %}active fw-bold{% endif %}" href="/audit">
+										<i class="bi bi-journal-check text-info"></i> 湖倉稽核與切分整併紀錄
 									</a>
 								</li>
                             </ul>
-                            <!-- 🌟 NAS 匯入按鈕 -->
-                            <div class="border-start ps-2 ms-1">
-                                <button class="btn btn-outline-secondary btn-sm" onclick="openNasImportModal()" title="從 Synology NAS 匯入歷史日誌">
-                                    <i class="bi bi-hdd-network text-primary"></i> 匯入 NAS
-                                </button>
-                            </div>
                         </div>
                     </div>
 

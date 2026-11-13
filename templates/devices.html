@@ -1,0 +1,841 @@
+{% extends "base.html" %}
+
+{% block title %}{{ fw_model }} 全網 IP 取得與設備資產管理{% endblock %}
+
+{% block extra_styles %}
+/* 頂部 4 大指標卡片 (具備點擊篩選與高亮效果) */
+.card-stat { 
+    border-radius: 10px; 
+    padding: 10px 16px;
+    background-color: #ffffff;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+    user-select: none;
+}
+.card-stat:hover { 
+    transform: translateY(-2px); 
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08); 
+}
+.card-title-text { 
+    font-size: 13.5px; 
+    color: #64748b; 
+    margin-bottom: 2px;
+}
+.card-num-text { 
+    font-size: 2.1rem; 
+    font-weight: 800; 
+    line-height: 1.1; 
+}
+
+/* 卡片邊線色彩規範 (高對比亮色) */
+.card-theme-all { border-left: 5px solid #0f172a !important; }
+.card-theme-all .card-num-text { color: #0f172a; }
+
+.card-theme-dhcp { border-left: 5px solid #16a34a !important; }
+.card-theme-dhcp .card-num-text { color: #16a34a; }
+
+.card-theme-static { border-left: 5px solid #2563eb !important; }
+.card-theme-static .card-num-text { color: #2563eb; }
+
+.card-theme-rogue { border-left: 5px solid #dc2626 !important; }
+.card-theme-rogue .card-num-text { color: #dc2626; }
+
+/* 卡片被點選高亮狀態 */
+.card-stat.active-filter {
+    box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.45) !important;
+    border-color: #0284c7 !important;
+    background-color: #f0f9ff !important;
+}
+.card-theme-dhcp.active-filter { 
+    box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.45) !important; 
+    border-color: #16a34a !important; 
+    background-color: #f0fdf4 !important;
+}
+.card-theme-static.active-filter { 
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.45) !important; 
+    border-color: #2563eb !important; 
+    background-color: #eff6ff !important;
+}
+.card-theme-rogue.active-filter { 
+    box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.45) !important; 
+    border-color: #dc2626 !important; 
+    background-color: #fef2f2 !important;
+}
+
+/* 滾動表格容器 (垂直自適應剩餘空間) */
+.table-scroll-container { 
+    overflow-y: scroll; 
+    flex-grow: 1; 
+    background-color: #ffffff;
+}
+
+/* 嚴格 9 欄規格表格 */
+.device-table-fixed {
+    table-layout: fixed;
+    width: 100%;
+    min-width: 1540px;
+    margin-bottom: 0;
+    font-size: 15px; /* 🌟 字型放大至 15px */
+}
+.device-table-fixed th { 
+    position: sticky; 
+    top: 0; 
+    background-color: #f8f9fa; 
+    color: #0f172a;
+    font-weight: 700;
+    font-size: 15.5px; /* 🌟 表頭放大至 15.5px */
+    border-bottom: 2px solid #cbd5e1;
+    z-index: 2; 
+    white-space: nowrap; 
+    padding: 9px 8px;
+    vertical-align: middle;
+}
+.device-table-fixed td {
+    vertical-align: middle;
+    white-space: nowrap;
+    padding: 6px 8px;
+    border-bottom: 1px solid #e2e8f0;
+    font-size: 15px;
+}
+.device-table-fixed tbody tr:hover {
+    background-color: #f1f5f9;
+}
+
+/* Excel 式直接編輯控制項 */
+.excel-cell-input {
+    background-color: transparent;
+    border: 1px solid transparent;
+    color: #0f172a;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 15px;
+    height: 36px;
+    width: 100%;
+    outline: none;
+    transition: all 0.15s ease;
+}
+.excel-cell-input:hover {
+    border-color: #cbd5e1;
+    background-color: #ffffff;
+}
+.excel-cell-input:focus {
+    background-color: #ffffff;
+    border-color: #0284c7;
+    box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
+}
+.excel-cell-input.dirty {
+    background-color: #fef9c3 !important;
+    border-color: #eab308 !important;
+    color: #854d0e !important;
+    font-weight: bold;
+}
+
+/* 來源狀態專屬 3 色切換選單 */
+.excel-state-select {
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    outline: none;
+    transition: all 0.2s ease;
+    width: 100%;
+    min-width: 155px;
+    height: 36px;
+}
+.excel-state-select.state-dhcp {
+    background-color: #dcfce7;
+    border: 1.5px solid #22c55e;
+    color: #15803d;
+}
+.excel-state-select.state-static {
+    background-color: #dbeafe;
+    border: 1.5px solid #3b82f6;
+    color: #1d4ed8;
+}
+.excel-state-select.state-rogue {
+    background-color: #fee2e2;
+    border: 1.5px solid #ef4444;
+    color: #b91c1c;
+}
+.excel-state-select.dirty {
+    box-shadow: 0 0 0 2px #eab308 !important;
+}
+
+/* 頂部搜尋列控制元件 */
+.top-search-control {
+    font-size: 14px;
+    height: 36px;
+}
+
+/* Traffic 規格 10 頁分頁導覽 */
+.pagination .page-link {
+    font-size: 14px;
+    padding: 4px 11px;
+}
+.pagination .page-item.active .page-link {
+    background-color: #0d6efd;
+    border-color: #0d6efd;
+    font-weight: bold;
+}
+{% endblock %}
+
+{% block content %}
+<!-- 4 大指標卡片 (可點擊切換篩選) -->
+<div class="row g-2 mb-2 flex-shrink-0">
+    <div class="col-md-3">
+        <div class="card card-stat card-theme-all active-filter" id="card-all" onclick="setFilterStatus('ALL')">
+            <div class="card-title-text"><i class="bi bi-hdd-stack me-1"></i>已納管與發現 IP 總數</div>
+            <div class="card-num-text font-monospace" id="statTotal">--</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card card-stat card-theme-dhcp" id="card-dhcp" onclick="setFilterStatus('DHCP')">
+            <div class="card-title-text"><i class="bi bi-check2-circle me-1"></i>DHCP 動態配發 (正常)</div>
+            <div class="card-num-text font-monospace" id="statDHCP">--</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card-stat card-theme-static" id="card-static" onclick="setFilterStatus('STATIC')">
+            <div class="card-title-text"><i class="bi bi-hdd-network-fill me-1"></i>固定 IP (已列管: 交換器/伺服器)</div>
+            <div class="card-num-text font-monospace" id="statStatic">--</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card-stat card-theme-rogue" id="card-rogue" onclick="setFilterStatus('ROGUE')">
+            <div class="card-title-text"><i class="bi bi-exclamation-octagon-fill me-1"></i>私設 IP (未列管 / 衝突)</div>
+            <div class="card-num-text font-monospace" id="statRogue">--</div>
+        </div>
+    </div>
+</div>
+
+<!-- 搜尋與操作工具列 (強制同一列 flex-nowrap) -->
+<div class="row mb-2 flex-shrink-0">
+    <div class="col-12">
+        <div class="card shadow-sm border-0 bg-white">
+            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2">
+                
+                <!-- 左側：搜尋輸入框與篩選下拉 -->
+                <div class="d-flex align-items-center gap-2 flex-grow-1">
+                    <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-primary"></i> 清冊搜尋：</span>
+                    <div class="input-group input-group-sm" style="max-width: 480px;">
+                        <span class="input-group-text bg-light text-muted"><i class="bi bi-search"></i></span>
+                        <input type="text" id="searchInput" class="form-control top-search-control font-monospace" 
+                               placeholder="搜尋 IP (如 192.168.1.1)、MAC、設備名稱 (如 CX8100)、廠牌或位置..." onkeyup="onSearchChange()">
+                    </div>
+                    <select id="statusFilterSelect" class="form-select form-select-sm top-search-control" style="width: 175px;" onchange="setFilterStatus(this.value)">
+                        <option value="ALL">全部取得狀態</option>
+                        <option value="STATIC">固定 IP (已列管)</option>
+                        <option value="DHCP">DHCP 動態配發</option>
+                        <option value="ROGUE">私設 IP (未列管)</option>
+                    </select>
+                    <select id="perPageSelect" class="form-select form-select-sm top-search-control" style="width: 125px;" onchange="changePerPage(this.value)">
+                        <option value="50" selected>每頁 50 筆</option>
+                        <option value="100">每頁 100 筆</option>
+                        <option value="200">每頁 200 筆</option>
+                    </select>
+                </div>
+
+                <!-- 右側：動作按鈕群組 -->
+                <div class="d-flex align-items-center gap-2 flex-shrink-0">
+                    <button class="btn btn-outline-primary btn-sm px-3 shadow-sm" onclick="reloadFromServer()" title="重新載入設備清冊">
+                        <i class="bi bi-arrow-clockwise me-1"></i>重新整理
+                    </button>
+                    <button class="btn btn-success btn-sm px-3 shadow-sm" data-bs-toggle="modal" data-bs-target="#importModal">
+                        <i class="bi bi-file-earmark-arrow-up me-1"></i>匯入 devices.csv
+                    </button>
+                    <a href="/api/tools/export-network-devices" class="btn btn-outline-secondary btn-sm px-3 shadow-sm">
+                        <i class="bi bi-download me-1"></i>匯出 CSV
+                    </a>
+                </div>
+
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 嚴格 9 欄明細清單 (全網 IP 資產主表格，滿版滾動) -->
+<div class="row flex-grow-1 overflow-hidden">
+    <div class="col-12 h-100">
+        <div class="card shadow-sm h-100 d-flex flex-column border-0">
+            <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <span class="fw-bold small">
+                    <i class="bi bi-hdd-network text-primary me-1"></i>全網 IP 取得與設備資產清冊 (自動融合 ARP、DHCP 租約與外部 devices.csv)
+                </span>
+                <span class="badge bg-secondary font-monospace" id="devices-count-badge">共 0 筆</span>
+            </div>
+            
+            <div class="card-body p-0 table-scroll-container">
+                <div class="table-responsive h-100">
+                    <table class="table table-hover table-sm device-table-fixed">
+                        <colgroup>
+                            <col style="width: 155px;"> <!-- 1. IP 位址 -->
+                            <col style="width: 175px;"> <!-- 2. 實體網卡 MAC -->
+                            <col style="width: 230px;"> <!-- 3. 設備名稱 (Hostname) -->
+                            <col style="width: 175px;"> <!-- 4. 取得來源狀態 -->
+                            <col style="width: 150px;"> <!-- 5. 設備種類 -->
+                            <col style="width: 200px;"> <!-- 6. 廠牌 / 型號 -->
+                            <col style="width: 170px;"> <!-- 7. 實體位置 -->
+                            <col style="width: 135px;"> <!-- 8. 介面 -->
+                            <col style="width: 185px;"> <!-- 9. 最後活躍時間 -->
+                        </colgroup>
+                        <thead>
+                            <tr>
+                                <th>IP 位址</th>
+                                <th>實體網卡 MAC</th>
+                                <th>設備名稱 (Hostname)</th>
+                                <th>取得來源狀態</th>
+                                <th>設備種類</th>
+                                <th>廠牌 / 型號</th>
+                                <th>實體位置</th>
+                                <th>介面</th>
+                                <th>最後活躍時間</th>
+                            </tr>
+                        </thead>
+                        <tbody id="excelTableBody">
+                            <tr>
+                                <td colspan="9" class="text-center py-5 text-muted">
+                                    <div class="spinner-border spinner-border-sm me-2"></div>正在載入設備清冊資料...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 底部操作列 (左下角取消與儲存，右下角 Traffic 規格分頁) -->
+            <div class="card-footer bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <!-- 左下角按鈕組 -->
+                <div class="d-flex align-items-center gap-2">
+                    <button type="button" class="btn btn-outline-secondary btn-sm px-3" onclick="cancelEdits()" id="btnCancel">
+                        <i class="bi bi-x-circle me-1"></i>取消修改
+                    </button>
+                    <button type="button" class="btn btn-primary btn-sm px-4 fw-bold shadow-sm" onclick="saveEdits()" id="btnSave">
+                        <i class="bi bi-check2-circle me-1"></i>確認儲存
+                    </button>
+                    <span id="dirtyCountBadge" class="badge bg-warning text-dark font-monospace d-none ms-2 p-2">
+                        <i class="bi bi-pencil-fill me-1"></i>已修改 0 筆未儲存
+                    </span>
+                </div>
+
+                <!-- 右下角分頁 (Traffic 規格: << < 10頁標籤 > >>) -->
+                <div class="d-flex align-items-center gap-3">
+                    <span class="small text-muted font-monospace" id="paginationSummary">顯示第 0 筆，共 0 筆</span>
+                    <nav><ul class="pagination pagination-sm mb-0" id="paginationUl"></ul></nav>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+<!-- 匯入 devices.csv 彈窗 -->
+<div class="modal fade" id="importModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content shadow border-0">
+            <div class="modal-header bg-light py-2">
+                <h6 class="modal-title fw-bold text-dark mb-0">
+                    <i class="bi bi-file-earmark-spreadsheet text-success me-2"></i>匯入外部設備清冊 (devices.csv)
+                </h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="small text-muted mb-3">系統將依據 <code>ip</code> 自動比對現有 ARP 與 DHCP 資料，補充設備名稱、廠牌型號與實體位置：</p>
+                <div class="mb-3">
+                    <label class="form-label fw-bold small">選擇 devices.csv 檔案：</label>
+                    <input type="file" id="csvFileInput" class="form-control form-control-sm" accept=".csv">
+                </div>
+                <div id="uploadStatus" class="alert alert-info d-none small mb-0 font-monospace"></div>
+            </div>
+            <div class="modal-footer bg-light py-2">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">關閉</button>
+                <button type="button" class="btn btn-success btn-sm px-3" onclick="uploadCSV()">
+                    <i class="bi bi-upload me-1"></i>開始比對並匯入
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const DEVICE_TYPES = [
+        '-', 
+        '交換器', 
+        'AP控制器', 
+        '防火牆', 
+        '伺服器', 
+        '虛擬機', 
+        '桌上電腦', 
+        '筆記型電腦', 
+        '平板', 
+        '網路印表機', 
+        '無線基地台(AP)', 
+        '網路攝影機', 
+        '路由器', 
+        '儲存設備(NAS)', 
+        '不斷電系統', 
+        '其他'
+    ];
+
+    let allDevices = [];
+    let originalDevices = [];
+    let dirtyIPs = new Set();
+    let currentFilter = 'ALL';
+    let currentPage = 1;
+    let perPage = 50;
+
+    function reloadFromServer() {
+        if (dirtyIPs.size > 0) {
+            if (!confirm(`目前有 ${dirtyIPs.size} 筆修改尚未儲存，重新整理將會放棄這些修改，確定嗎？`)) return;
+        }
+        dirtyIPs.clear();
+        updateDirtyBadge();
+
+        const tbody = document.getElementById('excelTableBody');
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center py-5 text-muted"><div class="spinner-border spinner-border-sm me-2"></div>正在載入設備清冊資料...</td></tr>';
+
+        fetch(`/api/devices/managed-ips?status=ALL&_t=${Date.now()}`)
+            .then(res => res.json())
+            .then(res => {
+                if (res.status === 'success') {
+                    allDevices = res.data.map(d => {
+                        let brandModel = '';
+                        if (d.brand && d.brand !== '-' && d.model && d.model !== '-') {
+                            brandModel = `${d.brand} ${d.model}`.trim();
+                        } else if (d.model && d.model !== '-') {
+                            brandModel = d.model;
+                        } else if (d.brand && d.brand !== '-') {
+                            brandModel = d.brand;
+                        }
+
+                        let state = d.source_state;
+                        if (d.manual_state) {
+                            state = d.manual_state;
+                        }
+
+                        return {
+                            ...d,
+							mac: (d.mac && d.mac !== '-') ? d.mac : '', // 👈 🌟 確保載入時可編輯
+                            source_state: state,
+                            device_name: d.device_name || '',
+                            device_type: d.device_type || '-',
+                            brand_model: brandModel || '-',
+                            location: d.location || '-'
+                        };
+                    });
+
+                    originalDevices = JSON.parse(JSON.stringify(allDevices));
+                    recalcTopCardCounters();
+                    applyFilterAndRender();
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="9" class="text-center text-danger py-4">載入失敗: ${res.message}</td></tr>`;
+                }
+            })
+            .catch(err => {
+                tbody.innerHTML = `<tr><td colspan="9" class="text-center text-danger py-4">網路連線異常: ${err}</td></tr>`;
+            });
+    }
+
+    function recalcTopCardCounters() {
+        let statDHCP = 0, statStatic = 0, statRogue = 0;
+        allDevices.forEach(it => {
+            if (it.source_state === 'DHCP') {
+                statDHCP++;
+            } else if (it.source_state === 'STATIC' || it.source_state === 'OFFLINE_STATIC') {
+                statStatic++;
+            } else {
+                statRogue++;
+            }
+        });
+        document.getElementById('statTotal').innerText = allDevices.length.toLocaleString();
+        document.getElementById('statDHCP').innerText = statDHCP.toLocaleString();
+        document.getElementById('statStatic').innerText = statStatic.toLocaleString();
+        document.getElementById('statRogue').innerText = statRogue.toLocaleString();
+    }
+
+    function setFilterStatus(status) {
+        if (currentFilter === status && status !== 'ALL') {
+            currentFilter = 'ALL';
+        } else {
+            currentFilter = status;
+        }
+
+        const sel = document.getElementById('statusFilterSelect');
+        if (sel) sel.value = currentFilter;
+
+        ['all', 'dhcp', 'static', 'rogue'].forEach(k => {
+            const card = document.getElementById(`card-${k}`);
+            if (card) card.classList.remove('active-filter');
+        });
+        if (currentFilter !== 'ALL') {
+            const activeCard = document.getElementById(`card-${currentFilter.toLowerCase()}`);
+            if (activeCard) activeCard.classList.add('active-filter');
+        } else {
+            document.getElementById('card-all').classList.add('active-filter');
+        }
+
+        currentPage = 1;
+        applyFilterAndRender();
+    }
+
+    function onSearchChange() {
+        currentPage = 1;
+        applyFilterAndRender();
+    }
+
+    function changePerPage(val) {
+        perPage = parseInt(val, 10) || 50;
+        currentPage = 1;
+        applyFilterAndRender();
+    }
+
+    function getFilteredList() {
+        const kw = (document.getElementById('searchInput').value || '').trim().toLowerCase();
+
+        return allDevices.filter(it => {
+            if (currentFilter === 'DHCP' && it.source_state !== 'DHCP') return false;
+            if (currentFilter === 'STATIC' && it.source_state !== 'STATIC' && it.source_state !== 'OFFLINE_STATIC') return false;
+            if (currentFilter === 'ROGUE' && it.source_state !== 'ROGUE' && it.source_state !== 'CONFLICT') return false;
+
+            if (kw) {
+                const match = (it.ip || '').toLowerCase().includes(kw) ||
+                              (it.mac || '').toLowerCase().includes(kw) ||
+                              (it.device_name || '').toLowerCase().includes(kw) ||
+                              (it.brand_model || '').toLowerCase().includes(kw) ||
+                              (it.location || '').toLowerCase().includes(kw) ||
+                              (it.device_type || '').toLowerCase().includes(kw);
+                if (!match) return false;
+            }
+            return true;
+        });
+    }
+
+    function applyFilterAndRender() {
+        const filtered = getFilteredList();
+        const totalRecords = filtered.length;
+        const totalPages = Math.max(1, Math.ceil(totalRecords / perPage));
+
+        if (currentPage > totalPages) currentPage = totalPages;
+        if (currentPage < 1) currentPage = 1;
+
+        const startIdx = (currentPage - 1) * perPage;
+        const endIdx = Math.min(startIdx + perPage, totalRecords);
+        const pageRows = filtered.slice(startIdx, endIdx);
+
+        renderTableRows(pageRows);
+
+        const summary = document.getElementById('paginationSummary');
+        const badge = document.getElementById('devices-count-badge');
+        if (totalRecords === 0) {
+            summary.innerText = '顯示第 0 筆，共 0 筆';
+            badge.innerText = '共 0 筆';
+        } else {
+            summary.innerText = `顯示第 ${(startIdx + 1).toLocaleString()} - ${endIdx.toLocaleString()} 筆，共 ${totalRecords.toLocaleString()} 筆 (第 ${currentPage} / ${totalPages} 頁)`;
+            badge.innerText = `共 ${totalRecords.toLocaleString()} 筆 (頁次 ${currentPage} / ${totalPages})`;
+        }
+        renderTrafficPagination(currentPage, totalPages);
+    }
+
+    function getStateSelectClass(state) {
+        if (state === 'DHCP') return 'state-dhcp';
+        if (state === 'STATIC' || state === 'OFFLINE_STATIC') return 'state-static';
+        return 'state-rogue';
+    }
+
+    function renderTableRows(rows) {
+        const tbody = document.getElementById('excelTableBody');
+        if (rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center py-5 text-muted"><i class="bi bi-inbox fs-2 d-block mb-1"></i>無符合篩選條件的設備資料</td></tr>';
+            return;
+        }
+
+        let html = '';
+        rows.forEach(it => {
+            const isDirty = dirtyIPs.has(it.ip);
+            const dirtyCls = isDirty ? 'dirty' : '';
+            const stateClass = getStateSelectClass(it.source_state);
+
+            let typeOptions = '';
+            DEVICE_TYPES.forEach(t => {
+                const sel = (it.device_type === t) ? 'selected' : '';
+                typeOptions += `<option value="${t}" ${sel}>${t}</option>`;
+            });
+            if (!DEVICE_TYPES.includes(it.device_type) && it.device_type && it.device_type !== '-') {
+                typeOptions += `<option value="${it.device_type}" selected>${it.device_type}</option>`;
+            }
+
+            const safeIPID = it.ip.replace(/\./g, '_');
+            const isDHCP = (it.source_state === 'DHCP');
+            const isStatic = (it.source_state === 'STATIC' || it.source_state === 'OFFLINE_STATIC');
+            const isRogue = (it.source_state === 'ROGUE' || it.source_state === 'CONFLICT');
+
+            html += `
+                <tr id="row-${safeIPID}">
+                    <td>
+                        <span class="font-monospace fw-bold text-primary" style="font-size: 15.5px;">${it.ip}</span>
+                    </td>
+                    <td>
+						<input type="text" class="excel-cell-input font-monospace ${dirtyCls}" 
+							   value="${escapeHtml(it.mac)}" placeholder="00:11:22:33:44:55" 
+							   onchange="onFieldChange('${it.ip}', 'mac', this.value)">
+					</td>
+                    <td>
+                        <input type="text" class="excel-cell-input fw-bold ${dirtyCls}" 
+                               value="${escapeHtml(it.device_name)}" placeholder="(輸入設備名稱)" 
+                               onchange="onFieldChange('${it.ip}', 'device_name', this.value)">
+                    </td>
+                    <td>
+                        <select class="excel-state-select ${stateClass} ${dirtyCls}" 
+                                onchange="onSourceStateChange('${it.ip}', this)">
+                            <option value="DHCP" ${isDHCP ? 'selected' : ''}>🟢 DHCP 動態配發</option>
+                            <option value="STATIC" ${isStatic ? 'selected' : ''}>🔵 固定 IP (已列管)</option>
+                            <option value="ROGUE" ${isRogue ? 'selected' : ''}>🔴 私設 IP (未列管)</option>
+                        </select>
+                    </td>
+                    <td>
+                        <select class="excel-cell-input ${dirtyCls}" onchange="onFieldChange('${it.ip}', 'device_type', this.value)">
+                            ${typeOptions}
+                        </select>
+                    </td>
+                    <td>
+                        <input type="text" class="excel-cell-input ${dirtyCls}" 
+                               value="${escapeHtml(it.brand_model)}" placeholder="如: Aruba CX8100" 
+                               onchange="onFieldChange('${it.ip}', 'brand_model', this.value)">
+                    </td>
+                    <td>
+                        <div class="d-flex align-items-center">
+                            <i class="bi bi-geo-alt text-secondary me-1"></i>
+                            <input type="text" class="excel-cell-input ${dirtyCls}" 
+                                   value="${escapeHtml(it.location)}" placeholder="如: NIC, E304" 
+                                   onchange="onFieldChange('${it.ip}', 'location', this.value)">
+                        </div>
+                    </td>
+                    <td>
+                        <span class="small text-secondary font-monospace">${it.interface || '-'}</span>
+                    </td>
+                    <td>
+                        <span class="small text-secondary font-monospace">${it.last_seen || '-'}</span>
+                    </td>
+                </tr>
+            `;
+        });
+        tbody.innerHTML = html;
+    }
+
+    function onSourceStateChange(ip, selElem) {
+        const newVal = selElem.value;
+        const it = allDevices.find(d => d.ip === ip);
+        if (!it) return;
+
+        it.source_state = newVal;
+        it.manual_state = newVal;
+        dirtyIPs.add(ip);
+
+        selElem.className = 'excel-state-select ' + getStateSelectClass(newVal) + ' dirty';
+        updateDirtyBadge();
+        recalcTopCardCounters();
+    }
+
+    function renderTrafficPagination(current, total) {
+        const ul = document.getElementById('paginationUl');
+        ul.innerHTML = '';
+        if (total <= 1) return;
+
+        const maxVisible = 10;
+        let startPage = Math.max(1, current - Math.floor(maxVisible / 2));
+        let endPage = startPage + maxVisible - 1;
+        if (endPage > total) {
+            endPage = total;
+            startPage = Math.max(1, endPage - maxVisible + 1);
+        }
+
+        ul.innerHTML += `
+            <li class="page-item ${current === 1 ? 'disabled' : ''}">
+                <a class="page-link" href="#" onclick="gotoPage(1); return false;" title="第一頁">
+                    <i class="bi bi-chevron-double-left"></i>
+                </a>
+            </li>`;
+
+        ul.innerHTML += `
+            <li class="page-item ${current === 1 ? 'disabled' : ''}">
+                <a class="page-link" href="#" onclick="gotoPage(${current - 1}); return false;" title="前一頁">
+                    <i class="bi bi-chevron-left"></i>
+                </a>
+            </li>`;
+
+        for (let i = startPage; i <= endPage; i++) {
+            ul.innerHTML += `
+                <li class="page-item ${i === current ? 'active' : ''}">
+                    <a class="page-link" href="#" onclick="gotoPage(${i}); return false;">${i}</a>
+                </li>`;
+        }
+
+        ul.innerHTML += `
+            <li class="page-item ${current === total ? 'disabled' : ''}">
+                <a class="page-link" href="#" onclick="gotoPage(${current + 1}); return false;" title="後一頁">
+                    <i class="bi bi-chevron-right"></i>
+                </a>
+            </li>`;
+
+        ul.innerHTML += `
+            <li class="page-item ${current === total ? 'disabled' : ''}">
+                <a class="page-link" href="#" onclick="gotoPage(${total}); return false;" title="最終頁">
+                    <i class="bi bi-chevron-double-right"></i>
+                </a>
+            </li>`;
+    }
+
+    function gotoPage(p) {
+        currentPage = p;
+        applyFilterAndRender();
+        const container = document.querySelector('.table-scroll-container');
+        if (container) container.scrollTop = 0;
+    }
+
+    function onFieldChange(ip, field, value) {
+        const item = allDevices.find(d => d.ip === ip);
+        if (!item) return;
+
+        item[field] = value;
+        dirtyIPs.add(ip);
+        updateDirtyBadge();
+
+        const row = document.getElementById(`row-${ip.replace(/\./g, '_')}`);
+        if (row) {
+            row.querySelectorAll('.excel-cell-input').forEach(el => el.classList.add('dirty'));
+        }
+    }
+
+    function updateDirtyBadge() {
+        const badge = document.getElementById('dirtyCountBadge');
+        if (dirtyIPs.size > 0) {
+            badge.innerText = `已修改 ${dirtyIPs.size} 筆未儲存`;
+            badge.classList.remove('d-none');
+        } else {
+            badge.classList.add('d-none');
+        }
+    }
+
+    function cancelEdits() {
+        if (dirtyIPs.size === 0) {
+            alert('目前沒有尚未儲存的修改。');
+            return;
+        }
+        if (!confirm(`確定放棄目前修改過的 ${dirtyIPs.size} 筆資料嗎？`)) return;
+
+        allDevices = JSON.parse(JSON.stringify(originalDevices));
+        dirtyIPs.clear();
+        updateDirtyBadge();
+        recalcTopCardCounters();
+        applyFilterAndRender();
+    }
+
+    function saveEdits() {
+        if (dirtyIPs.size === 0) {
+            alert('資料未變更，無需儲存。');
+            return;
+        }
+
+        const btnSave = document.getElementById('btnSave');
+        btnSave.disabled = true;
+        btnSave.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>儲存中...';
+
+        const payload = Array.from(dirtyIPs).map(ip => {
+            const it = allDevices.find(d => d.ip === ip);
+            let brandVal = '';
+            let modelVal = it.brand_model || '';
+            if (modelVal.includes(' ')) {
+                const p = modelVal.split(' ');
+                brandVal = p[0];
+                modelVal = p.slice(1).join(' ');
+            }
+
+            return {
+                ip: it.ip,
+                mac: (it.mac && it.mac !== '-') ? it.mac.trim().toLowerCase() : '', // 👈 🌟 傳送手動輸入的 MAC
+                name: (it.device_name && it.device_name !== '-') ? it.device_name : '',
+                location: (it.location && it.location !== '-') ? it.location : '',
+                device_type: (it.device_type && it.device_type !== '-') ? it.device_type : '桌上電腦',
+                brand: brandVal,
+                model: modelVal,
+                manual_state: it.manual_state || it.source_state
+            };
+        });
+
+        fetch('/api/devices/batch-save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.json())
+        .then(res => {
+            if (res.status === 'success') {
+                alert(`✅ ${res.message || '儲存成功！'}`);
+                originalDevices = JSON.parse(JSON.stringify(allDevices));
+                dirtyIPs.clear();
+                updateDirtyBadge();
+                recalcTopCardCounters();
+                applyFilterAndRender();
+            } else {
+                alert('❌ 儲存失敗: ' + res.message);
+            }
+        })
+        .catch(err => {
+            alert('❌ 儲存發生錯誤: ' + err);
+        })
+        .finally(() => {
+            btnSave.disabled = false;
+            btnSave.innerHTML = '<i class="bi bi-check2-circle me-1"></i>確認儲存';
+        });
+    }
+
+    function uploadCSV() {
+        const fileInput = document.getElementById('csvFileInput');
+        if (!fileInput.files || fileInput.files.length === 0) {
+            alert('請先選擇 CSV 檔案！');
+            return;
+        }
+        const formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+
+        const statusBox = document.getElementById('uploadStatus');
+        statusBox.className = 'alert alert-info small mb-0 font-monospace';
+        statusBox.innerText = '⏳ 正在分析比對並更新資料庫...';
+        statusBox.classList.remove('d-none');
+
+        fetch('/api/devices/import-csv', { method: 'POST', body: formData })
+            .then(res => res.json())
+            .then(res => {
+                if (res.status === 'success') {
+                    statusBox.className = 'alert alert-success small mb-0 font-monospace';
+                    statusBox.innerText = res.message;
+                    setTimeout(() => {
+                        const modal = bootstrap.Modal.getInstance(document.getElementById('importModal'));
+                        modal.hide();
+                        reloadFromServer();
+                    }, 1200);
+                } else {
+                    statusBox.className = 'alert alert-danger small mb-0 font-monospace';
+                    statusBox.innerText = '❌ 匯入失敗: ' + res.message;
+                }
+            })
+            .catch(err => {
+                statusBox.className = 'alert alert-danger small mb-0 font-monospace';
+                statusBox.innerText = '❌ 連線錯誤: ' + err;
+            });
+    }
+
+    function escapeHtml(str) {
+        if (!str || str === '-') return '';
+        return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        reloadFromServer();
+    });
+</script>
+{% endblock %}

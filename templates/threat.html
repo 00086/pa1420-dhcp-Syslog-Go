@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}PA-1420 資安威脅日誌分析系統{% endblock %}
+{% block title %}{{ fw_model }} 資安威脅日誌分析系統{% endblock %}
 
 {% block extra_styles %}
 .table-sticky-header th { 
@@ -64,6 +64,24 @@
 @keyframes spin {
     100% { transform: rotate(360deg); }
 }
+
+/* 告警指標卡片點擊效果與高亮狀態 */
+.clickable-card {
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+    user-select: none;
+    border: 1px solid transparent;
+}
+.clickable-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08) !important;
+}
+.card-filter-active {
+    border: 2px solid #dc3545 !important;
+    background-color: #fff5f5 !important;
+    box-shadow: 0 0 10px rgba(220, 53, 69, 0.35) !important;
+}
+
 {% endblock %}
 
 {% block content %}
@@ -79,7 +97,7 @@
 <div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white" style="overflow: visible;">
-            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2" style="overflow-x: auto; overflow-y: hidden;">
+    <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2" style="overflow: visible;">
                 
                 <!-- 條件篩選輸入組 (左側強制一列) -->
                 <div class="d-flex align-items-center gap-1 flex-nowrap flex-shrink-0">
@@ -190,10 +208,10 @@
         </div>
     </div>
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
-            <small class="text-muted">高危險/重大威脅 (High/Crit)</small>
-            <h5 class="mb-0 fw-bold font-monospace text-danger" id="metric-critical-high">-- 筆</h5>
-        </div>
+        <div class="card border-0 shadow-sm p-2 bg-white text-center clickable-card" id="card-threat-crit-filter" onclick="toggleThreatCritFilter()" title="點擊僅顯示高危險/重大威脅，再按一次復原">
+			<small class="text-muted"><i class="bi bi-funnel-fill text-danger me-1"></i>高危險/重大威脅 (High/Crit)</small>
+			<h5 class="mb-0 fw-bold font-monospace text-danger" id="metric-critical-high">-- 筆</h5>
+		</div>
     </div>
     <div class="col">
         <div class="card border-0 shadow-sm p-2 bg-white text-center">
@@ -659,6 +677,46 @@
         refreshSyslogStatus();
         setInterval(refreshSyslogStatus, 3000);
     });
+	
+	// 🌟 卡片點擊篩選切換 (再次點擊即復原)
+    let isCritFiltered = false;
+
+    function toggleThreatCritFilter() {
+        const card = document.getElementById('card-threat-crit-filter');
+        const sevSelect = document.getElementById('threat-severity');
+
+        isCritFiltered = !isCritFiltered;
+
+        if (isCritFiltered) {
+            card.classList.add('card-filter-active');
+            let opt = sevSelect.querySelector('option[value="crit_high"]');
+            if (!opt) {
+                opt = document.createElement('option');
+                opt.value = 'crit_high';
+                opt.innerText = '重大/高危 (Crit/High)';
+                sevSelect.appendChild(opt);
+            }
+            sevSelect.value = 'crit_high';
+        } else {
+            card.classList.remove('card-filter-active');
+            sevSelect.value = 'all';
+        }
+
+        queryThreatLogs(1);
+    }
+
+    // 🌟 覆蓋原本的 resetThreatFilters，重置時清除高亮狀態
+    function resetThreatFilters() {
+        isCritFiltered = false;
+        const card = document.getElementById('card-threat-crit-filter');
+        if (card) card.classList.remove('card-filter-active');
+        document.getElementById('threat-src').value = '';
+        document.getElementById('threat-dst').value = '';
+        document.getElementById('threat-name').value = '';
+        document.getElementById('threat-severity').value = 'all';
+        document.getElementById('threat-action').value = 'all';
+        queryThreatLogs(1);
+    }
 	
 </script>
 {% endblock %}

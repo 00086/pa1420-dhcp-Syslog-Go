@@ -1,0 +1,497 @@
+{% extends "base.html" %}
+
+{% block title %}{{ fw_model }} 組態紀錄分析系統{% endblock %}
+
+{% block extra_styles %}
+.table-sticky-header th { 
+    position: sticky; 
+    top: 0; 
+    background-color: #f8f9fa; 
+    z-index: 2; 
+    white-space: nowrap; 
+}
+.table-scroll-container { 
+    overflow-y: scroll; 
+    flex-grow: 1; 
+}
+
+/* 固定欄寬與文字截斷 */
+.config-table-fixed {
+    table-layout: fixed;
+    width: 100%;
+    min-width: 1600px;
+    margin-bottom: 0;
+}
+.config-table-fixed th, 
+.config-table-fixed td {
+    vertical-align: middle;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-top: 3px;
+    padding-bottom: 3px;
+    padding-left: 6px;
+    padding-right: 6px;
+    line-height: 1.35;
+}
+
+.config-col-time { text-overflow: clip !important; }
+.result-success { color: #0ea5e9; font-weight: bold; }
+.result-fail { color: #dc3545; font-weight: bold; }
+
+.spin-anim { animation: spin 0.6s linear infinite; }
+@keyframes spin { 100% { transform: rotate(360deg); } }
+{% endblock %}
+
+{% block content %}
+<!-- 查詢工具列 -->
+<div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
+    <div class="col-12">
+        <div class="card shadow-sm border-0 bg-white" style="overflow: visible;">
+            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2" style="overflow: visible;">
+                
+                <div class="d-flex align-items-center gap-1 flex-nowrap flex-shrink-0">
+                    <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-warning"></i> 條件篩選：</span>
+                    
+                    <div class="input-group input-group-sm flex-nowrap" style="width: auto;">
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeConfigDate(-1)" title="前一日"><i class="bi bi-chevron-left"></i></button>
+                        <input type="date" class="form-control form-control-sm font-monospace text-warning-emphasis fw-bold" style="width: 125px; cursor: pointer;" id="config-date" onclick="this.showPicker()">
+                        <span class="input-group-text bg-white text-warning-emphasis fw-bold px-2 font-monospace" id="config-weekday" style="font-size: 13px;">(五)</span>
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeConfigDate(1)" title="後一日"><i class="bi bi-chevron-right"></i></button>
+                    </div>
+
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="管理員 (Admin)" style="width: 120px;" id="config-admin">
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="主機 IP (Client)" style="width: 130px;" id="config-client">
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="命令或路徑關鍵字" style="width: 160px;" id="config-keyword">
+
+                    <button class="btn btn-outline-secondary btn-sm px-2 text-nowrap ms-1" onclick="resetConfigFilters()">重置</button>
+                    <button class="btn btn-primary btn-sm px-2 shadow-sm text-nowrap" onclick="queryConfigLogs(1)">
+                        <i class="bi bi-search me-1"></i>執行檢索
+                    </button>
+
+                    <div class="input-group input-group-sm ms-1" style="width: auto; position: relative;">
+                        <button class="btn btn-outline-secondary dropdown-toggle fw-bold d-flex align-items-center gap-1 bg-light text-dark py-1" type="button" id="refreshIntervalDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                            <span id="currentIntervalLabel">30 秒</span>
+                            <span id="countdownBadge" class="badge bg-warning text-dark font-monospace" style="font-size: 10px;">30s</span>
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-end shadow border" style="z-index: 1060; min-width: 110px;">
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-10" onclick="setRefreshInterval(10, '10 秒')">10 秒</a></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-30" onclick="setRefreshInterval(30, '30 秒')">30 秒</a></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-60" onclick="setRefreshInterval(60, '60 秒')">60 秒</a></li>
+                            <li><hr class="dropdown-divider my-1"></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-manual" onclick="setRefreshInterval(0, '手動')">手動</a></li>
+                        </ul>
+                        <button class="btn btn-outline-warning text-dark px-2 shadow-sm d-flex align-items-center justify-content-center" id="refresh-config-btn" onclick="refreshDisplayNow()">
+                            <i class="bi bi-arrow-clockwise fs-6" id="refresh-icon"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 右側狀態徽章 (1:1 對齊 traffic, threat 與 system) -->
+                <div class="d-flex align-items-center gap-2 ms-auto flex-shrink-0">
+                    <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
+                    <span class="badge bg-warning-subtle text-warning-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" style="font-size: 12px;">
+                        <span class="spinner-grow spinner-grow-sm text-warning" style="width: 6px; height: 6px;"></span>
+                        <span id="config-syslog-flush-text">Syslog 514: Config 0 筆</span>
+                    </span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 直方圖面板 -->
+<div class="row mb-2 flex-shrink-0" id="histogram-card-row">
+    <div class="col-12">
+        <div class="card shadow-sm border-0 bg-white">
+            <div class="card-header bg-white py-1 px-3 d-flex justify-content-between align-items-center border-bottom-0">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="small fw-bold text-dark"><i class="bi bi-bar-chart-fill text-warning me-1"></i>組態變更 24 小時分佈直方圖</span>
+                    <button class="btn btn-outline-secondary btn-sm py-0 px-2 d-flex align-items-center gap-1 border-0" id="chart-toggle-btn" onclick="toggleHistogram()" style="font-size: 11px; height: 22px;">
+                        <i class="bi bi-chevron-up" id="chart-toggle-icon"></i>
+                        <span id="chart-toggle-text">收合圖表</span>
+                    </button>
+                </div>
+                <span class="small text-muted font-monospace" id="chart-time-range">時段：00:00 ~ 23:00</span>
+            </div>
+            <div class="card-body py-1 px-3" id="histogram-card-body" style="position: relative; height: 115px; width: 100%;">
+                <canvas id="configHistogramChart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 指標卡片 -->
+<div class="row g-2 mb-2 flex-shrink-0">
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">組態日誌總筆數</small>
+            <h5 class="mb-0 fw-bold font-monospace text-primary" id="metric-total-logs">-- 筆</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">當日資料庫容量</small>
+            <h5 class="mb-0 fw-bold font-monospace text-info" id="metric-db-size">--</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">最活躍管理員</small>
+            <h5 class="mb-0 fw-bold font-monospace text-danger" id="metric-top-admin">--</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">Top 1 執行命令</small>
+            <h5 class="mb-0 fw-bold font-monospace text-dark text-truncate px-1" id="metric-top-cmd">--</h5>
+        </div>
+    </div>
+</div>
+
+<!-- 9 大欄位表格 -->
+<div class="row flex-grow-1 overflow-hidden">
+    <div class="col-12 h-100">
+        <div class="card shadow-sm h-100 d-flex flex-column border-0">
+            <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <span class="fw-bold small"><i class="bi bi-list-columns-reverse text-warning me-1"></i>組態紀錄明細 (Parquet 列式儲存)</span>
+                <span class="badge bg-secondary font-monospace" id="config-count-badge">共 0 筆</span>
+            </div>
+            <div class="card-body p-0 table-scroll-container">
+                <div class="table-responsive h-100">
+                    <table class="table table-hover table-striped table-sm table-sticky-header font-monospace config-table-fixed" style="font-size: 14px;">
+                        <colgroup>
+                            <col style="width: 170px;"> <!-- 接收時間 -->
+                            <col style="width: 110px;"> <!-- 管理員 -->
+                            <col style="width: 140px;"> <!-- 主機 -->
+                            <col style="width: 80px;">  <!-- 用戶端 -->
+                            <col style="width: 90px;">  <!-- 命令 -->
+                            <col style="width: 100px;"> <!-- 結果 -->
+                            <col style="width: 250px;"> <!-- 組態路徑 -->
+                            <col style="width: 180px;"> <!-- FULL PATH -->
+                            <col style="width: 160px;"> <!-- 變更前 -->
+                            <col style="width: 160px;"> <!-- 變更後 -->
+                            <col style="width: 160px;"> <!-- 序號 -->
+                        </colgroup>
+                        <thead>
+                            <tr class="table-light">
+                                <th>接收時間</th>
+                                <th>管理員</th>
+                                <th>主機</th>
+                                <th>用戶端</th>
+                                <th>命令</th>
+                                <th>結果</th>
+                                <th>組態路徑</th>
+                                <th>FULL PATH</th>
+                                <th>變更前</th>
+                                <th>變更後</th>
+                                <th>序號</th>
+                            </tr>
+                        </thead>
+                        <tbody id="config-table-body">
+                            <tr>
+                                <td colspan="11" class="text-center py-5 text-muted">載入組態資料中...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="card-footer bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <span class="small text-muted"><i class="bi bi-info-circle me-1"></i>Palo Alto 次世代防火牆組態變更紀錄；滑鼠懸停於內容上方可檢視完整說明字串。</span>
+                <nav><ul class="pagination pagination-sm mb-0" id="config-pagination-ul"></ul></nav>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function getLocalDateString() {
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+	
+    function updateConfigWeekday(dateVal) {
+        if (!dateVal) return;
+        const dt = new Date(dateVal.split('-')[0], dateVal.split('-')[1] - 1, dateVal.split('-')[2]);
+        document.getElementById('config-weekday').innerText = ['(日)', '(一)', '(二)', '(三)', '(四)', '(五)', '(六)'][dt.getDay()];
+    }
+
+    function changeConfigDate(deltaDays) {
+        const dateInput = document.getElementById('config-date');
+        let curVal = dateInput.value || todayStr;
+        const dt = new Date(curVal.split('-')[0], curVal.split('-')[1] - 1, curVal.split('-')[2]);
+        dt.setDate(dt.getDate() + deltaDays);
+        dateInput.value = `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+        updateConfigWeekday(dateInput.value);
+        queryConfigLogs(1);
+    }
+	
+    const todayStr = getLocalDateString();
+    let currentConfigPage = 1;
+    let configHistogramChartInstance = null;
+    let countdownTimer = null;
+    let currentIntervalSeconds = 30;
+    let remainingSeconds = 30;
+
+    document.getElementById('config-date').value = todayStr;
+
+    function toggleHistogram() {
+        const body = document.getElementById('histogram-card-body');
+        const icon = document.getElementById('chart-toggle-icon');
+        const text = document.getElementById('chart-toggle-text');
+        if (body.classList.contains('d-none')) {
+            body.classList.remove('d-none');
+            icon.className = 'bi bi-chevron-up';
+            text.innerText = '收合圖表';
+            localStorage.setItem('config_chart_collapsed', 'false');
+            if (configHistogramChartInstance) configHistogramChartInstance.resize();
+        } else {
+            body.classList.add('d-none');
+            icon.className = 'bi bi-chevron-down';
+            text.innerText = '展開圖表';
+            localStorage.setItem('config_chart_collapsed', 'true');
+        }
+    }
+
+    function initHistogramCollapseState() {
+        if (localStorage.getItem('config_chart_collapsed') === 'true') {
+            document.getElementById('histogram-card-body').classList.add('d-none');
+            document.getElementById('chart-toggle-icon').className = 'bi bi-chevron-down';
+            document.getElementById('chart-toggle-text').innerText = '展開圖表';
+        }
+    }
+
+    function setRefreshInterval(seconds, label) {
+        currentIntervalSeconds = seconds;
+        remainingSeconds = seconds;
+        document.getElementById('currentIntervalLabel').innerText = label;
+        const badge = document.getElementById('countdownBadge');
+        if (seconds > 0) {
+            badge.classList.remove('d-none');
+            badge.innerText = `${remainingSeconds}s`;
+            if (countdownTimer) clearInterval(countdownTimer);
+            countdownTimer = setInterval(() => {
+                remainingSeconds--;
+                if (remainingSeconds <= 0) {
+                    remainingSeconds = currentIntervalSeconds;
+                    triggerSilentRefresh();
+                }
+                badge.innerText = `${remainingSeconds}s`;
+            }, 1000);
+        } else {
+            badge.classList.add('d-none');
+            if (countdownTimer) clearInterval(countdownTimer);
+        }
+    }
+
+    // 🌟 立即手動刷新 (帶旋轉動畫與 Syslog 同步)
+    function refreshDisplayNow() {
+        const icon = document.getElementById('refresh-icon');
+        if (icon) icon.classList.add('spin-anim');
+
+        remainingSeconds = currentIntervalSeconds;
+        const badge = document.getElementById('countdownBadge');
+        if (currentIntervalSeconds > 0 && badge) badge.innerText = `${remainingSeconds}s`;
+
+        queryConfigLogs(currentConfigPage, true, () => {
+            if (icon) setTimeout(() => icon.classList.remove('spin-anim'), 400);
+        });
+        refreshSyslogStatus();
+    }
+
+    // 🌟 倒數計時定時靜默刷新
+    function triggerSilentRefresh() {
+        const icon = document.getElementById('refresh-icon');
+        if (icon) icon.classList.add('spin-anim');
+        queryConfigLogs(currentConfigPage, true, () => {
+            if (icon) setTimeout(() => icon.classList.remove('spin-anim'), 400);
+        });
+        refreshSyslogStatus();
+    }
+
+    // 🌟 定時自動輪詢 Syslog 514 即時接收統計 (對齊 system 與 threat)
+    function refreshSyslogStatus() {
+        fetch(`/api/syslog-status?_t=${Date.now()}`)
+            .then(res => res.json())
+            .then(res => {
+                if (res.status === 'success' && res.data) {
+                    const batchIns = (res.data.config_last_flush_insert || 0).toLocaleString();
+                    const textElem = document.getElementById('config-syslog-flush-text');
+                    if (textElem) {
+                        textElem.innerText = `Syslog 514: Config ${batchIns} 筆`;
+                    }
+                }
+            })
+            .catch(() => {});
+    }
+	
+    function resetConfigFilters() {
+        document.getElementById('config-admin').value = '';
+        document.getElementById('config-client').value = '';
+        document.getElementById('config-keyword').value = '';
+        queryConfigLogs(1);
+    }
+
+    function renderConfigHistogram(histogram) {
+        if (!histogram || histogram.length === 0) return;
+        const labels = histogram.map(h => h.time_bucket);
+        const dataVals = histogram.map(h => h.count);
+
+        if (!configHistogramChartInstance) {
+            const ctx = document.getElementById('configHistogramChart').getContext('2d');
+            configHistogramChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '組態日誌數',
+                        data: dataVals,
+                        backgroundColor: '#f59e0b',
+                        hoverBackgroundColor: '#d97706',
+                        borderRadius: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+                        y: { beginAtZero: true, grid: { color: '#f1f5f9' }, ticks: { font: { size: 10 } } }
+                    }
+                }
+            });
+        } else {
+            const currentData = configHistogramChartInstance.data.datasets[0].data;
+            for (let i = 0; i < dataVals.length; i++) currentData[i] = dataVals[i];
+            configHistogramChartInstance.update('none');
+        }
+    }
+
+    function queryConfigLogs(page = 1, silent = false, callback = null) {
+        currentConfigPage = page;
+        const date = document.getElementById('config-date').value || todayStr;
+        const admin = document.getElementById('config-admin').value.trim();
+        const client = document.getElementById('config-client').value.trim();
+        const keyword = document.getElementById('config-keyword').value.trim();
+
+        const tbody = document.getElementById('config-table-body');
+        if (!silent) {
+            tbody.innerHTML = '<tr><td colspan="11" class="text-center py-4 text-warning"><div class="spinner-border spinner-border-sm me-2"></div>正在透過 DuckDB 引擎極速載入...</td></tr>';
+        }
+
+        // 🌟 加入 _t 時間戳記，徹底破除瀏覽器快取
+        const url = `/api/config-query?date=${date}&admin=${encodeURIComponent(admin)}&client_ip=${encodeURIComponent(client)}&keyword=${encodeURIComponent(keyword)}&page=${page}&per_page=50&_t=${Date.now()}`;
+
+        fetch(url)
+            .then(res => res.json())
+            .then(data => {
+                if (data.status !== 'success') {
+                    tbody.innerHTML = `<tr><td colspan="11" class="text-center text-danger py-4">查詢失敗：${data.message}</td></tr>`;
+                    return;
+                }
+
+                const totalLogs = data.total_logs || 0;
+                const totalPages = data.total_pages || 1;
+                const currentPage = data.current_page || 1;
+                const logsList = data.logs || [];
+
+                document.getElementById('metric-total-logs').innerText = `${totalLogs.toLocaleString()} 筆`;
+                document.getElementById('metric-db-size').innerText = data.db_size || '0 B';
+                document.getElementById('metric-top-admin').innerText = data.top_admin || '-';
+                document.getElementById('metric-top-admin').title = data.top_admin || '-';
+                document.getElementById('metric-top-cmd').innerText = data.top_command || '-';
+                document.getElementById('metric-top-cmd').title = data.top_command || '-';
+                document.getElementById('config-count-badge').innerText = `共 ${totalLogs.toLocaleString()} 筆 (頁次 ${currentPage} / ${totalPages})`;
+
+                renderConfigHistogram(data.histogram || []);
+
+                tbody.innerHTML = '';
+                if (logsList.length === 0) {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="11" class="text-center py-5 text-muted">
+                                <i class="bi bi-inbox fs-2 d-block mb-2 text-secondary"></i>
+                                該日期/條件查無組態變更紀錄。
+                            </td>
+                        </tr>`;
+                    renderConfigPagination(1, 1);
+                    return;
+                }
+
+                // 🌟 安全渲染各欄位，嚴格防範 null/undefined 引發 toLowerCase 崩潰
+                logsList.forEach(row => {
+                    const tr = document.createElement('tr');
+                    const resStr = (row.result || '').toLowerCase();
+                    const resClass = resStr.includes('succeed') ? 'result-success' : (resStr.includes('fail') ? 'result-fail' : '');
+                    const before = row.before_change || '-';
+                    const after = row.after_change || '-';
+
+                    tr.innerHTML = `
+                        <td class="config-col-time text-primary" title="${row.timestamp || ''}">${row.timestamp || '-'}</td>
+                        <td class="text-primary fw-bold" title="${row.admin || ''}">${row.admin || '-'}</td>
+                        <td class="text-primary fw-bold" title="${row.client || ''}">${row.client || '-'}</td>
+                        <td title="${row.client_app || ''}">${row.client_app || '-'}</td>
+                        <td class="text-info fw-bold" title="${row.command || ''}">${row.command || '-'}</td>
+                        <td class="${resClass}" title="${row.result || ''}">${row.result || '-'}</td>
+                        <td class="text-dark text-truncate" title="${row.config_path || ''}">${row.config_path || '-'}</td>
+                        <td class="text-primary text-truncate" title="${row.full_path || ''}">${row.full_path || '-'}</td>
+                        <td class="text-truncate text-secondary" title="${before}">${before}</td>
+                        <td class="text-truncate text-dark" title="${after}">${after}</td>
+                        <td class="font-monospace text-muted" title="${row.sequence_no || ''}">${row.sequence_no || '-'}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+
+                renderConfigPagination(currentPage, totalPages);
+            })
+            .catch(err => {
+                if (!silent) {
+                    tbody.innerHTML = `<tr><td colspan="11" class="text-center text-danger py-4">網路傳輸異常：${err}</td></tr>`;
+                }
+            })
+            .finally(() => {
+                if (callback) callback();
+            });
+    }
+	
+    function renderConfigPagination(current, total) {
+        const ul = document.getElementById('config-pagination-ul');
+        ul.innerHTML = '';
+        if (total <= 1) return;
+
+        let start = Math.max(1, current - 4);
+        let end = Math.min(total, start + 9);
+        if (end - start < 9) start = Math.max(1, end - 9);
+
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryConfigLogs(1); return false;"><i class="bi bi-chevron-double-left"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryConfigLogs(${current - 1}); return false;"><i class="bi bi-chevron-left"></i></a></li>`;
+        for (let i = start; i <= end; i++) {
+            ul.innerHTML += `<li class="page-item ${i === current ? 'active' : ''}"><a class="page-link" href="#" onclick="queryConfigLogs(${i}); return false;">${i}</a></li>`;
+        }
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryConfigLogs(${current + 1}); return false;"><i class="bi bi-chevron-right"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryConfigLogs(${total}); return false;"><i class="bi bi-chevron-double-right"></i></a></li>`;
+    }
+
+    function fetchConfigNow() {
+        fetch('/api/config-fetch-now?count=2500', { method: 'POST' }).then(r => r.json()).then(res => {
+            alert(res.message); queryConfigLogs(1);
+        });
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        initHistogramCollapseState();
+        setRefreshInterval(30, '30 秒');
+        updateConfigWeekday(todayStr);
+        queryConfigLogs(1);
+		refreshSyslogStatus();
+		setInterval(refreshSyslogStatus, 3000); // 🌟 每 3 秒動態更新一次即時接收筆數
+    });
+</script>
+{% endblock %}

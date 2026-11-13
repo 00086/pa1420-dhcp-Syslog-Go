@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}PA-1420 流量日誌分析系統{% endblock %}
+{% block title %}{{ fw_model }} 流量日誌分析系統{% endblock %}
 
 {% block extra_styles %}
 .table-sticky-header th { 
@@ -58,76 +58,103 @@
 @keyframes spin {
     100% { transform: rotate(360deg); }
 }
+
+/* 告警指標卡片點擊效果與高亮狀態 */
+.clickable-card {
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+    user-select: none;
+    border: 1px solid transparent;
+}
+.clickable-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08) !important;
+}
+.card-filter-active {
+    border: 2px solid #dc3545 !important;
+    background-color: #fff5f5 !important;
+    box-shadow: 0 0 10px rgba(220, 53, 69, 0.35) !important;
+}
+
+/* 點擊加入過濾條件的儲存格僅顯示手型游標，不改變儲存格底色 */
+.filterable-cell {
+    cursor: pointer;
+}
 {% endblock %}
 
 {% block content %}
-<!-- 流量查詢工具列 (強制同一列不折行 flex-nowrap) -->
+<!-- 流量查詢工具列 -->
 <div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white" style="overflow: visible;">
-            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2" style="overflow-x: auto; overflow-y: hidden;">
+            <div class="card-body py-2 px-3 d-flex flex-column gap-2" style="overflow: visible;">
                 
-                <!-- 條件篩選輸入組 (左側所有控制元件強制一列) -->
-                <div class="d-flex align-items-center gap-1 flex-nowrap flex-shrink-0">
-                    <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-primary"></i> 條件篩選：</span>
-                    
-                    <!-- 日期選擇器、星期顯示與前後日快捷按鈕群組 -->
-                    <div class="input-group input-group-sm flex-nowrap" style="width: auto;">
-                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeTrafficDate(-1)" title="前一日 (快速切換)">
-                            <i class="bi bi-chevron-left"></i>
-                        </button>
-                        <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold" style="width: 125px; cursor: pointer;" id="traffic-date" onclick="this.showPicker()">
-                        <span class="input-group-text bg-white text-primary fw-bold px-2 font-monospace" id="traffic-weekday" style="font-size: 13px;">(六)</span>
-                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeTrafficDate(1)" title="後一日 (快速切換)">
-                            <i class="bi bi-chevron-right"></i>
-                        </button>
+                <!-- 第一列：日期、排序、每頁筆數、自動更新與右側狀態徽章 -->
+                <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 w-100">
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                        <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-primary"></i> 條件篩選：</span>
+                        
+                        <div class="input-group input-group-sm flex-nowrap" style="width: auto;">
+                            <button class="btn btn-outline-secondary px-2" type="button" onclick="changeTrafficDate(-1)" title="前一日 (快速切換)">
+                                <i class="bi bi-chevron-left"></i>
+                            </button>
+                            <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold" style="width: 125px; cursor: pointer;" id="traffic-date" onclick="this.showPicker()">
+                            <span class="input-group-text bg-white text-primary fw-bold px-2 font-monospace" id="traffic-weekday" style="font-size: 13px;">(三)</span>
+                            <button class="btn btn-outline-secondary px-2" type="button" onclick="changeTrafficDate(1)" title="後一日 (快速切換)">
+                                <i class="bi bi-chevron-right"></i>
+                            </button>
+                        </div>
+
+                        <select class="form-select form-select-sm font-monospace fw-bold text-dark" style="width: 85px;" id="traffic-order" onchange="changeTrafficOrder(this.value)" title="日誌排序方式">
+                            <option value="DESC" selected>DESC</option>
+                            <option value="ASC">ASC</option>
+                        </select>
+
+                        <select class="form-select form-select-sm" style="width: 110px;" id="traffic-per-page" onchange="changeTrafficPerPage(this.value)" title="每頁顯示筆數">
+                            <option value="50" selected>每頁 50 筆</option>
+                            <option value="100">每頁 100 筆</option>
+                            <option value="200">每頁 200 筆</option>
+                        </select>
+
+                        <div class="input-group input-group-sm flex-nowrap" style="width: auto; position: relative;">
+                            <button class="btn btn-outline-secondary dropdown-toggle fw-bold d-flex align-items-center gap-1 bg-light text-dark py-1 text-nowrap" type="button" id="refreshIntervalDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                                <span id="currentIntervalLabel">10 秒</span>
+                                <span id="countdownBadge" class="badge bg-primary text-white font-monospace" style="font-size: 10px;">10s</span>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end shadow border" aria-labelledby="refreshIntervalDropdown" style="z-index: 1060; min-width: 110px;">
+                                <li><a class="dropdown-item" href="javascript:void(0)" id="item-10" onclick="setRefreshInterval(10, '10 秒')">10 秒</a></li>
+                                <li><a class="dropdown-item" href="javascript:void(0)" id="item-30" onclick="setRefreshInterval(30, '30 秒')">30 秒</a></li>
+                                <li><a class="dropdown-item" href="javascript:void(0)" id="item-60" onclick="setRefreshInterval(60, '60 秒')">60 秒</a></li>
+                                <li><hr class="dropdown-divider my-1"></li>
+                                <li><a class="dropdown-item" href="javascript:void(0)" id="item-manual" onclick="setRefreshInterval(0, '手動')">手動</a></li>
+                            </ul>
+                            <button class="btn btn-outline-primary px-2 shadow-sm d-flex align-items-center justify-content-center" id="refresh-traffic-btn" onclick="refreshDisplayNow()" title="立即重新顯示最新流量">
+                                <i class="bi bi-arrow-clockwise fs-6" id="refresh-icon"></i>
+                            </button>
+                        </div>
                     </div>
 
-                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="來源 (SRC)" style="width: 105px;" id="traffic-src">
-                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="目的地 (DST)" style="width: 110px;" id="traffic-dst">
-                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="應用 (APP)" style="width: 95px;" id="traffic-app">
-                    <select class="form-select form-select-sm" style="width: 90px;" id="traffic-action">
-                        <option value="all">動作: 全部</option>
-                        <option value="allow">allow</option>
-                        <option value="deny">deny/drop</option>
-                    </select>
-                    <select class="form-select form-select-sm" style="width: 80px;" id="traffic-zone">
-                        <option value="all">區域: 全部</option>
-                        <option value="LAN">LAN</option>
-                        <option value="WAN">WAN</option>
-                    </select>
-
-                    <button class="btn btn-outline-secondary btn-sm px-2 text-nowrap ms-1" onclick="resetTrafficFilters()">重置</button>
-                    <button class="btn btn-primary btn-sm px-2 shadow-sm text-nowrap" onclick="queryTrafficLogs(1)">
-                        <i class="bi bi-search me-1"></i>執行檢索
-                    </button>
-
-                    <!-- 重新顯示時間下拉群組 -->
-                    <div class="input-group input-group-sm ms-1" style="width: auto; position: relative;">
-                        <button class="btn btn-outline-secondary dropdown-toggle fw-bold d-flex align-items-center gap-1 bg-light text-dark py-1" type="button" id="refreshIntervalDropdown" data-bs-toggle="dropdown" aria-expanded="false" title="設定重新顯示週期">
-                            <span id="currentIntervalLabel">10 秒</span>
-                            <span id="countdownBadge" class="badge bg-primary text-white font-monospace" style="font-size: 10px;">10s</span>
-                        </button>
-                        <ul class="dropdown-menu dropdown-menu-end shadow border" aria-labelledby="refreshIntervalDropdown" style="z-index: 1060; min-width: 110px;">
-                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-10" onclick="setRefreshInterval(10, '10 秒')">10 秒</a></li>
-                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-30" onclick="setRefreshInterval(30, '30 秒')">30 秒</a></li>
-                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-60" onclick="setRefreshInterval(60, '60 秒')">60 秒</a></li>
-                            <li><hr class="dropdown-divider my-1"></li>
-                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-manual" onclick="setRefreshInterval(0, '手動')">手動</a></li>
-                        </ul>
-                        <button class="btn btn-outline-primary px-2 shadow-sm d-flex align-items-center justify-content-center" id="refresh-traffic-btn" onclick="refreshDisplayNow()" title="立即重新顯示最新流量">
-                            <i class="bi bi-arrow-clockwise fs-6" id="refresh-icon"></i>
-                        </button>
+                    <div class="d-flex align-items-center gap-2 ms-auto flex-shrink-0">
+                        <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
+                        <span class="badge bg-success-subtle text-success-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" id="syslog-status-badge" style="font-size: 12px;">
+                            <span class="spinner-grow spinner-grow-sm text-success" style="width: 6px; height: 6px;"></span>
+                            <span id="syslog-flush-text">Syslog 514: Traffic 0 筆</span>
+                        </span>
                     </div>
                 </div>
 
-                <!-- 右側狀態徽章 (固定不折行) -->
-                <div class="d-flex align-items-center gap-2 ms-auto flex-shrink-0">
-                    <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
-                    <span class="badge bg-success-subtle text-success-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" id="syslog-status-badge" style="font-size: 12px;">
-                        <span class="spinner-grow spinner-grow-sm text-success" style="width: 6px; height: 6px;"></span>
-                        <span id="syslog-flush-text">Syslog 514: Traffic 0 筆</span>
-                    </span>
+                <!-- 第二列：全寬 PA Monitor 查詢命令列 -->
+                <div class="d-flex align-items-center gap-2 w-100" style="min-width: 0;">
+                    <div class="input-group input-group-sm flex-grow-1 flex-nowrap" style="min-width: 0;">
+                        <span class="input-group-text bg-light text-secondary flex-shrink-0"><i class="bi bi-search"></i></span>
+                        <input type="text" class="form-control font-monospace text-primary fw-bold" style="min-width: 0;" id="traffic-search-filter" placeholder="點擊下方紀錄欄位加入AND條件(支援src/natsrc/dst/natdst/dport/app/action/zone/rule/reason)，IP 輸入CIDR/萬用字元(src:192.168.1.0/24 and dst:163.21.*)，按「執行檢索」查詢" onkeydown="if(event.key==='Enter') executeFreshTrafficSearch()">
+                    </div>
+                    <button class="btn btn-outline-secondary btn-sm px-2 text-nowrap flex-shrink-0" type="button" onclick="resetTrafficFilters()">
+                        <i class="bi bi-x-lg"></i> 重置
+                    </button>
+                    <button class="btn btn-primary btn-sm px-3 shadow-sm text-nowrap flex-shrink-0" type="button" onclick="executeFreshTrafficSearch()">
+                        <i class="bi bi-search me-1"></i>執行檢索
+                    </button>
                 </div>
 
             </div>
@@ -164,7 +191,6 @@
             <h5 class="mb-0 fw-bold font-monospace text-primary" id="metric-total-flows">-- 筆</h5>
         </div>
     </div>
-    <!-- 🌟 當日 Parquet 檔案大小 -->
     <div class="col">
         <div class="card border-0 shadow-sm p-2 bg-white text-center">
             <small class="text-muted">當日資料庫容量</small>
@@ -184,14 +210,14 @@
         </div>
     </div>
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
-            <small class="text-muted">防火牆主動阻擋事件</small>
+        <div class="card border-0 shadow-sm p-2 bg-white text-center clickable-card" id="card-traffic-deny-filter" onclick="toggleTrafficDenyFilter()" title="點擊僅顯示防火牆主動阻擋事件，再按一次復原">
+            <small class="text-muted"><i class="bi bi-funnel-fill text-danger me-1"></i>防火牆主動阻擋事件</small>
             <h5 class="mb-0 fw-bold font-monospace text-danger" id="metric-deny-flows">-- 筆</h5>
         </div>
     </div>
 </div>
 
-<!-- 14 大繁體中文欄位明細清單 (精確欄寬優化) -->
+<!-- 14 大繁體中文欄位明細清單 -->
 <div class="row flex-grow-1 overflow-hidden">
     <div class="col-12 h-100">
         <div class="card shadow-sm h-100 d-flex flex-column border-0">
@@ -203,20 +229,20 @@
                 <div class="table-responsive h-100">
                     <table class="table table-hover table-striped table-sm table-sticky-header font-monospace traffic-table-fixed" style="font-size: 14.5px;">
                         <colgroup>
-                            <col style="width: 185px;"> <!-- 1. 接收時間 -->
-                            <col style="width: 55px;">  <!-- 2. 類型 -->
-                            <col style="width: 75px;">  <!-- 3. 來源區域 -->
-                            <col style="width: 75px;">  <!-- 4. 目的地區 -->
-                            <col style="width: 180px;"> <!-- 5. 來源 -->
-                            <col style="width: 135px;"> <!-- 6. NAT 來源 IP -->
-                            <col style="width: 155px;"> <!-- 7. 目的地 -->
-                            <col style="width: 135px;"> <!-- 8. NAT 目的地 IP -->
-                            <col style="width: 95px;">  <!-- 9. 目的連接埠 -->
-                            <col style="width: 135px;"> <!-- 10. 應用程式 -->
-                            <col style="width: 80px;">  <!-- 11. 動作 -->
-                            <col style="width: 145px;"> <!-- 12. 規則 -->
-                            <col style="width: 125px;"> <!-- 13. 工作階段結束原因 -->
-                            <col style="width: 95px;">  <!-- 14. 位元組 -->
+                            <col style="width: 185px;">
+                            <col style="width: 55px;">
+                            <col style="width: 75px;">
+                            <col style="width: 75px;">
+                            <col style="width: 180px;">
+                            <col style="width: 135px;">
+                            <col style="width: 155px;">
+                            <col style="width: 135px;">
+                            <col style="width: 95px;">
+                            <col style="width: 135px;">
+                            <col style="width: 80px;">
+                            <col style="width: 145px;">
+                            <col style="width: 125px;">
+                            <col style="width: 95px;">
                         </colgroup>
                         <thead>
                             <tr class="table-light">
@@ -248,7 +274,10 @@
                 </div>
             </div>
             <div class="card-footer bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
-                <span class="small text-muted"><i class="bi bi-info-circle me-1"></i>Syslog UDP 514 串流接收中；滑鼠懸停於內容上方可檢視完整數值。</span>
+                <div class="d-flex align-items-center gap-3">
+                    <span class="small text-muted font-monospace" id="traffic-pagination-summary">顯示第 0 筆，共 0 筆</span>
+                    <span class="small text-muted d-none d-lg-inline"><i class="bi bi-info-circle me-1"></i>Syslog UDP 514 串流接收中；點擊下方紀錄欄位可自動加入上方查詢列。</span>
+                </div>
                 <nav><ul class="pagination pagination-sm mb-0" id="traffic-pagination-ul"></ul></nav>
             </div>
         </div>
@@ -266,7 +295,7 @@
         return `${year}-${month}-${day}`;
     }
 	
-	// 🌟 更新星期顯示（去除「星期」兩字）
+    // 更新星期顯示
     function updateTrafficWeekday(dateVal) {
         if (!dateVal) return;
         const [y, m, d] = dateVal.split('-').map(Number);
@@ -276,7 +305,7 @@
         if (el) el.innerText = weekdays[dt.getDay()];
     }
 
-    // 🌟 前一日 / 後一日切換
+    // 前一日 / 後一日切換
     function changeTrafficDate(deltaDays) {
         const dateInput = document.getElementById('traffic-date');
         let curVal = dateInput.value || todayStr;
@@ -290,17 +319,92 @@
         dateInput.value = `${newY}-${newM}-${newD}`;
 
         updateTrafficWeekday(dateInput.value);
+        totalFlowsCount = 0;
+		isSummaryLoaded = false;
+
+        const tbody = document.getElementById('traffic-table-body');
+        if (tbody) {
+            tbody.innerHTML = '<tr><td colspan="14" class="text-center py-4 text-primary"><div class="spinner-border spinner-border-sm me-2"></div>檢索每日 Parquet 檔案中...</td></tr>';
+        }
         queryTrafficLogs(1);
     }
 	
     const todayStr = getLocalDateString();
     let currentTrafficPage = 1;
+    let currentPerPage = 50;           
+    let currentSortOrder = 'DESC';     
+    let totalFlowsCount = 0;           
+    let isSummaryLoaded = false;       
     let messageCountChartInstance = null;
     let countdownTimer = null;
     let currentIntervalSeconds = 10;
     let remainingSeconds = 10;
+	
+    let trafficAbortController = null;
+    let activeTrafficRequestId = 0;
+	let activeSummaryRequestId = 0; 
 
-    function toggleHistogram() {
+    let lastSearchedFilterKey = '';
+    const historicalSummaryCache = {};
+    let appliedFilterStr = ''; // 🌟 僅儲存已按下「執行檢索」套用的條件
+
+    // 🌟 解析單一查詢命令列（支援 10 種欄位過濾，相容 : 與 = 寫法）
+    function parseSearchFilter(filterStr) {
+        let params = {
+            src: '', natsrc: '', dst: '', natdst: '',
+            dport: '', app: '', action: 'all', zone: 'all',
+            rule: '', reason: ''
+        };
+        if (!filterStr) return params;
+
+        const regex = /\b(src|natsrc|dst|natdst|dport|app|action|zone|rule|reason)\s*[:=]\s*(?:"([^"]+)"|'([^']+)'|([^\s]+))/gi;
+        let match;
+        while ((match = regex.exec(filterStr)) !== null) {
+            const key = match[1].toLowerCase();
+            const val = (match[2] || match[3] || match[4] || '').trim();
+            params[key] = val;
+        }
+        return params;
+    }
+
+    // 🌟 將擴充條件打包進 app 參數傳遞給後端（完全相容既有 API 路由）
+    function buildPackedAppParam(params) {
+        const ext = {};
+        if (params.natsrc) ext.natsrc = params.natsrc;
+        if (params.natdst) ext.natdst = params.natdst;
+        if (params.dport) ext.dport = params.dport;
+        if (params.rule) ext.rule = params.rule;
+        if (params.reason) ext.reason = params.reason;
+        
+        if (Object.keys(ext).length === 0) {
+            return params.app || '';
+        }
+        return `${params.app || ''}__EXT__${JSON.stringify(ext)}`;
+    }
+
+    // 🌟 點擊表格欄位時，僅組裝條件填入查詢列（必須按下「執行檢索」才真正查詢）
+    function addFilterToSearchBar(key, value) {
+        if (!value || value === '-' || value === 'all') return;
+        const searchInput = document.getElementById('traffic-search-filter');
+        let currentFilter = searchInput.value.trim();
+
+        const safeValue = /\s/.test(value) ? `"${value}"` : value;
+        const newCondition = `${key}:${safeValue}`;
+
+        if (currentFilter.includes(newCondition)) return;
+
+        const keyRegex = new RegExp(`\\b${key}\\s*:\\s*(?:"[^"]+"|'[^']+'|[^\\s]+)`, 'gi');
+        if (keyRegex.test(currentFilter)) {
+            searchInput.value = currentFilter.replace(keyRegex, newCondition);
+        } else {
+            searchInput.value = currentFilter === '' ? newCondition : `${currentFilter} and ${newCondition}`;
+        }
+
+        // 提示條件已填入，等待按下「執行檢索」
+        searchInput.classList.add('border-warning', 'bg-warning-subtle');
+    }
+	
+	function toggleHistogram() {
         const body = document.getElementById('histogram-card-body');
         const icon = document.getElementById('chart-toggle-icon');
         const text = document.getElementById('chart-toggle-text');
@@ -368,7 +472,34 @@
         }
     }
 
+    function executeFreshTrafficSearch() {
+        const dateInput = document.getElementById('traffic-date');
+        const date = dateInput ? (dateInput.value || todayStr) : todayStr;
+        const searchInput = document.getElementById('traffic-search-filter');
+
+        appliedFilterStr = searchInput ? searchInput.value.trim() : '';
+        if (searchInput) {
+            searchInput.classList.remove('border-warning', 'bg-warning-subtle');
+        }
+
+        const params = parseSearchFilter(appliedFilterStr);
+        const packedApp = buildPackedAppParam(params);
+        const currentKey = `${date}|${params.src}|${params.dst}|${packedApp}|${params.action}|${params.zone}`;
+
+        if (date !== todayStr && isSummaryLoaded && currentKey === lastSearchedFilterKey) {
+            queryTrafficLogs(1);
+            return;
+        }
+
+        totalFlowsCount = 0;
+        isSummaryLoaded = false;
+        queryTrafficLogs(1);
+    }
+	
     function refreshDisplayNow() {
+        const dateInput = document.getElementById('traffic-date');
+        const currentViewDate = dateInput ? (dateInput.value || todayStr) : todayStr;
+
         const icon = document.getElementById('refresh-icon');
         icon.classList.add('spin-anim');
 
@@ -376,13 +507,35 @@
         const badge = document.getElementById('countdownBadge');
         if (currentIntervalSeconds > 0) badge.innerText = `${remainingSeconds}s`;
 
-        queryTrafficLogs(currentTrafficPage, true, () => {
-            setTimeout(() => icon.classList.remove('spin-anim'), 400);
-        });
-        refreshSyslogStatus();
+        if (currentViewDate === todayStr || !isSummaryLoaded) {
+            lastFullSummaryRefreshAt = 0;
+            queryTrafficLogs(currentTrafficPage, true, () => {
+                setTimeout(() => icon.classList.remove('spin-anim'), 400);
+            });
+            refreshSyslogStatus();
+        } else {
+            queryTrafficLogs(currentTrafficPage, true, () => {
+                setTimeout(() => icon.classList.remove('spin-anim'), 400);
+            });
+        }
     }
+	
+    let lastFullSummaryRefreshAt = 0;
 
     function triggerSilentRefresh() {
+        const dateInput = document.getElementById('traffic-date');
+        const currentViewDate = dateInput ? (dateInput.value || todayStr) : todayStr;
+        if (currentViewDate !== todayStr) {
+            return;
+        }
+
+        // 🌟 若查詢欄有尚未按下「執行檢索」的條件，暫停定時刷新，避免以舊條件抓出 allow 覆蓋畫面
+        const searchInput = document.getElementById('traffic-search-filter');
+        const draftFilter = searchInput ? searchInput.value.trim() : '';
+        if (draftFilter !== appliedFilterStr) {
+            return;
+        }
+
         const icon = document.getElementById('refresh-icon');
         icon.classList.add('spin-anim');
         queryTrafficLogs(currentTrafficPage, true, () => {
@@ -390,7 +543,7 @@
         });
         refreshSyslogStatus();
     }
-
+	
     function refreshSyslogStatus() {
         fetch(`/api/syslog-status?_t=${Date.now()}`)
             .then(res => res.json())
@@ -407,14 +560,20 @@
     }
 	
     function resetTrafficFilters() {
-        document.getElementById('traffic-src').value = '';
-        document.getElementById('traffic-dst').value = '';
-        document.getElementById('traffic-app').value = '';
-        document.getElementById('traffic-action').value = 'all';
-        document.getElementById('traffic-zone').value = 'all';
+        isDenyFiltered = false;
+        const card = document.getElementById('card-traffic-deny-filter');
+        if (card) card.classList.remove('card-filter-active');
+        const searchInput = document.getElementById('traffic-search-filter');
+        if (searchInput) {
+            searchInput.value = '';
+            searchInput.classList.remove('border-warning', 'bg-warning-subtle');
+        }
+        appliedFilterStr = '';
+        totalFlowsCount = 0;
+        isSummaryLoaded = false;
         queryTrafficLogs(1);
     }
-
+	
     function renderMessageCountChart(histogram) {
         if (!histogram || histogram.length === 0) return;
         const labels = histogram.map(h => h.time_bucket);
@@ -483,69 +642,215 @@
         if (bytes >= 1024) return (bytes / 1024).toFixed(1) + 'k';
         return bytes.toString();
     }
+	
+    function changeTrafficPerPage(val) {
+        currentPerPage = parseInt(val, 10) || 50;
+        totalFlowsCount = 0;
+		isSummaryLoaded = false;
+        queryTrafficLogs(1);
+    }
+
+    function changeTrafficOrder(val) {
+        currentSortOrder = (val === 'ASC') ? 'ASC' : 'DESC';
+        totalFlowsCount = 0;
+		isSummaryLoaded = false;
+        queryTrafficLogs(1);
+    }
 
     function queryTrafficLogs(page = 1, silent = false, callback = null) {
         currentTrafficPage = page;
-        const date = document.getElementById('traffic-date').value || todayStr;
-        const src = document.getElementById('traffic-src').value.trim();
-        const dst = document.getElementById('traffic-dst').value.trim();
-        const app = document.getElementById('traffic-app').value.trim();
-        const action = document.getElementById('traffic-action').value;
-        const zone = document.getElementById('traffic-zone').value;
+        const dateInput = document.getElementById('traffic-date');
+        const date = dateInput ? (dateInput.value || todayStr) : todayStr;
+        
+        // 🌟 鎖定本次請求發起當下的過濾條件快照，供第 520 行非同步回應比對
+        const requestedFilterStr = appliedFilterStr;
+        const params = parseSearchFilter(requestedFilterStr);
+        const src = params.src;
+        const dst = params.dst;
+        const app = buildPackedAppParam(params);
+        const action = params.action || 'all';
+        const zone = params.zone || 'all';
+
+        if (trafficAbortController) {
+            trafficAbortController.abort();
+        }
+        trafficAbortController = new AbortController();
+        const signal = trafficAbortController.signal;
+
+        const thisRequestId = ++activeTrafficRequestId;
+        const requestedDate = date;
 
         const tbody = document.getElementById('traffic-table-body');
-        if (!silent) {
+        if (!silent && tbody) {
             tbody.innerHTML = '<tr><td colspan="14" class="text-center py-4 text-primary"><div class="spinner-border spinner-border-sm me-2"></div>檢索每日 Parquet 檔案中...</td></tr>';
         }
 
-        const url = `/api/traffic-query?date=${date}&src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&app=${encodeURIComponent(app)}&action=${action}&zone=${zone}&page=${page}&per_page=50&_t=${Date.now()}`;
+        const isTodayView = (date === todayStr);
+        const currentFilterKey = `${date}|${src}|${dst}|${app}|${action}|${zone}`;
+        lastSearchedFilterKey = currentFilterKey;
 
-        fetch(url)
+        if (!isTodayView && !isSummaryLoaded && historicalSummaryCache[currentFilterKey]) {
+            const cached = historicalSummaryCache[currentFilterKey];
+            totalFlowsCount = cached.total_flows;
+            isSummaryLoaded = true;
+            document.getElementById('metric-total-flows').innerText = `${totalFlowsCount.toLocaleString()} 筆`;
+            document.getElementById('metric-db-size').innerText = cached.db_size || '0 B';
+            document.getElementById('metric-total-bytes').innerText = cached.total_bytes || '0 B';
+            document.getElementById('metric-top-app').innerText = cached.top_app || '-';
+            document.getElementById('metric-deny-flows').innerText = `${(cached.deny_flows || 0).toLocaleString()} 筆`;
+            try { renderMessageCountChart(cached.histogram || []); } catch (e) {}
+        }
+
+        const isFirstLoad = (page === 1 && !isSummaryLoaded && totalFlowsCount === 0);
+        const nowMs = Date.now();
+        const needSilentFullStats = isTodayView && silent && isSummaryLoaded && (nowMs - lastFullSummaryRefreshAt >= 60000);
+        const isOnlyLogs = (page > 1) || (!isTodayView && isSummaryLoaded) || (silent && !needSilentFullStats);
+        if (isFirstLoad || !isOnlyLogs) {
+            lastFullSummaryRefreshAt = nowMs;
+        }
+		
+        const url = `/api/traffic-query?date=${date}&src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&app=${encodeURIComponent(app)}&action=${action}&zone=${zone}&page=${page}&per_page=${currentPerPage}&order=${currentSortOrder}&total_count=${totalFlowsCount}&only_logs=${isOnlyLogs}&first_load=${isFirstLoad}&_t=${Date.now()}`;
+
+        fetch(url, { signal })
             .then(res => res.json())
             .then(data => {
-                if (data.status !== 'success') {
-                    tbody.innerHTML = `<tr><td colspan="14" class="text-center text-danger py-4">查詢失敗：${data.message}</td></tr>`;
+                const currentDate = document.getElementById('traffic-date').value || todayStr;
+                if (thisRequestId !== activeTrafficRequestId || requestedDate !== currentDate || requestedFilterStr !== appliedFilterStr) {
                     return;
                 }
 
-                const totalFlows = data.total_flows || 0;
-                const totalPages = data.total_pages || 1;
-                const currentPage = data.current_page || 1;
-                const logsList = data.logs || [];
-
-                document.getElementById('metric-total-flows').innerText = `${totalFlows.toLocaleString()} 筆`;
-                document.getElementById('metric-db-size').innerText = data.db_size || '0 B';
-				document.getElementById('metric-total-bytes').innerText = data.total_bytes || '0 B';
-                document.getElementById('metric-top-app').innerText = data.top_app || '-';
-                document.getElementById('metric-deny-flows').innerText = `${(data.deny_flows || 0).toLocaleString()} 筆`;
-                document.getElementById('traffic-count-badge').innerText = `共 ${totalFlows.toLocaleString()} 筆 (頁次 ${currentPage} / ${totalPages})`;
-
-                // 🌟 1. 先清空等待載入提示文字
-                tbody.innerHTML = '';
-
-                // 🌟 2. 安全繪製直方圖 (容錯保護)
-                try {
-                    renderMessageCountChart(data.histogram || []);
-                } catch (e) {
-                    console.warn("直方圖繪製略過:", e);
+                if (data.status !== 'success') {
+                    const errMsg = data.message || '';
+                    if ((errMsg.includes('Cannot open file') || errMsg.includes('No such file')) && !window._trafficRetryOnce) {
+                        window._trafficRetryOnce = true;
+                        setTimeout(() => queryTrafficLogs(page, silent, callback), 150);
+                        return;
+                    }
+                    window._trafficRetryOnce = false;
+                    if (tbody) tbody.innerHTML = `<tr><td colspan="14" class="text-center text-danger py-4">查詢失敗：${errMsg}</td></tr>`;
+                    return;
                 }
+                window._trafficRetryOnce = false;
+
+                const logsList = data.logs || [];
+                const currentPage = data.current_page || 1;
 
                 if (logsList.length === 0) {
-                    tbody.innerHTML = `
-                        <tr>
-                            <td colspan="14" class="text-center py-5 text-muted">
-                                <i class="bi bi-inbox fs-2 d-block mb-2 text-secondary"></i>
-                                該日期/條件查無流量紀錄 (正在等待 Syslog 送達...)
-                            </td>
-                        </tr>`;
+                    totalFlowsCount = 0;
+					isSummaryLoaded = true;
+                    document.getElementById('metric-total-flows').innerText = '0 筆';
+                    document.getElementById('metric-db-size').innerText = data.db_size || '0 B';
+                    document.getElementById('metric-total-bytes').innerText = '0 B';
+                    document.getElementById('metric-top-app').innerText = '-';
+                    document.getElementById('metric-deny-flows').innerText = '0 筆';
+                    document.getElementById('traffic-count-badge').innerText = '共 0 筆';
+
+                    const summaryElem = document.getElementById('traffic-pagination-summary');
+                    if (summaryElem) {
+                        summaryElem.innerText = '顯示第 0 筆，共 0 筆';
+                    }
+
+                    if (tbody) {
+                        tbody.innerHTML = '<tr><td colspan="14" class="text-center py-5 text-muted"><i class="bi bi-inbox fs-2 d-block mb-2 text-secondary"></i>查無流量紀錄</td></tr>';
+                    }
+                    try { renderMessageCountChart(data.histogram || []); } catch (e) {}
                     renderTrafficPagination(1, 1);
                     return;
                 }
 
+                const hasCustomFilter = (src !== '' || dst !== '' || app !== '' || action !== 'all' || zone !== 'all');
+
+                if (isFirstLoad) {
+                    const hasExactMetaTotal = (!hasCustomFilter && data.total_flows > 0);
+                    totalFlowsCount = data.total_flows || (logsList.length * 10);
+                    const initTotalPages = Math.max(data.total_pages || 1, Math.ceil(totalFlowsCount / currentPerPage));
+
+                    if (hasExactMetaTotal) {
+                        document.getElementById('metric-total-flows').innerText = `${totalFlowsCount.toLocaleString()} 筆`;
+                        document.getElementById('traffic-count-badge').innerText = `共 ${totalFlowsCount.toLocaleString()} 筆 (頁次 1 / ${initTotalPages})`;
+                    } else {
+                        document.getElementById('metric-total-flows').innerHTML = `<span class="spinner-border spinner-border-sm text-primary"></span> 統計中...`;
+                        document.getElementById('traffic-count-badge').innerText = `已就緒前 ${initTotalPages} 頁 (背景統計全日總數中...)`;
+                    }
+
+                    document.getElementById('metric-db-size').innerText = data.db_size || '0 B';
+                    document.getElementById('metric-total-bytes').innerHTML = `<small class="text-muted">計算中...</small>`;
+                    document.getElementById('metric-top-app').innerText = '-';
+                    document.getElementById('metric-deny-flows').innerHTML = `<small class="text-muted">計算中...</small>`;
+
+                    if (data.histogram && data.histogram.some(h => h.count > 0)) {
+                        try { renderMessageCountChart(data.histogram); } catch (e) {}
+                    }
+
+                    const summaryElem = document.getElementById('traffic-pagination-summary');
+                    if (summaryElem) {
+                        const endIdx = Math.min(currentPerPage, logsList.length);
+                        summaryElem.innerText = hasExactMetaTotal
+                            ? `顯示第 1 - ${endIdx} 筆，共 ${totalFlowsCount.toLocaleString()} 筆 (第 1 / ${initTotalPages} 頁)`
+                            : `顯示第 1 - ${endIdx} 筆 (已預載前 ${initTotalPages} 頁分頁，背景統計全日總筆數中...)`;
+                    }
+
+                    renderTrafficPagination(currentPage, initTotalPages);
+                } else if (!isOnlyLogs) {
+                    totalFlowsCount = (data.total_flows !== undefined && data.total_flows !== null) ? data.total_flows : 0;
+                    isSummaryLoaded = true;
+                    document.getElementById('metric-total-flows').innerText = `${totalFlowsCount.toLocaleString()} 筆`;
+                    document.getElementById('metric-db-size').innerText = data.db_size || '0 B';
+                    document.getElementById('metric-total-bytes').innerText = data.total_bytes || '0 B';
+                    document.getElementById('metric-top-app').innerText = data.top_app || '-';
+                    document.getElementById('metric-deny-flows').innerText = `${(data.deny_flows || 0).toLocaleString()} 筆`;
+                } else if (isOnlyLogs && data.total_flows && data.total_flows > 0) {
+                    if (!hasCustomFilter || data.total_flows > totalFlowsCount) {
+                        totalFlowsCount = data.total_flows;
+                        if (isSummaryLoaded) {
+                            document.getElementById('metric-total-flows').innerText = `${totalFlowsCount.toLocaleString()} 筆`;
+                        }
+                        if (data.db_size) {
+                            document.getElementById('metric-db-size').innerText = data.db_size;
+                        }
+                    }
+                }
+
+                if (!isFirstLoad) {
+                    const totalPages = Math.max(data.total_pages || 1, Math.ceil(totalFlowsCount / currentPerPage));
+                    const startIdx = (currentPage - 1) * currentPerPage + 1;
+                    const endIdx = startIdx + logsList.length - 1;
+                    const summaryElem = document.getElementById('traffic-pagination-summary');
+
+                    if (isSummaryLoaded) {
+                        document.getElementById('traffic-count-badge').innerText = `共 ${totalFlowsCount.toLocaleString()} 筆 (頁次 ${currentPage} / ${totalPages})`;
+                        if (summaryElem) {
+                            summaryElem.innerText = `顯示第 ${startIdx.toLocaleString()} - ${Math.min(endIdx, totalFlowsCount).toLocaleString()} 筆，共 ${totalFlowsCount.toLocaleString()} 筆 (第 ${currentPage} / ${totalPages} 頁)`;
+                        }
+                    } else {
+                        document.getElementById('traffic-count-badge').innerText = `頁次 ${currentPage} / ${totalPages}+ (背景統計總數中...)`;
+                        if (summaryElem) {
+                            summaryElem.innerText = `顯示第 ${startIdx.toLocaleString()} - ${endIdx.toLocaleString()} 筆 (背景持續統計全日總數中...)`;
+                        }
+                    }
+                }
+
+                if (tbody) tbody.innerHTML = '';
+                if (!isOnlyLogs && !isFirstLoad) {
+                    try { renderMessageCountChart(data.histogram || []); } catch (e) {}
+                }
+
+                const cleanZeroVal = (val) => {
+                    if (val === undefined || val === null || val === '' || val === 0 || val === '0' || val === '0.0.0.0' || val === '-') {
+                        return '-';
+                    }
+                    return val;
+                };
+
+                // 跳脫雙引號避免 HTML 屬性錯誤
+                const escAttr = (v) => (v === '-' || v === null || v === undefined) ? '' : String(v).replace(/"/g, '&quot;');
+
                 logsList.forEach(row => {
                     const tr = document.createElement('tr');
                     const actionStr = (row.action || '').toLowerCase();
-                    const isDeny = ['deny', 'drop', 'reset-both', 'reset-server', 'reset-client'].includes(actionStr);
+                    
+                    // 🌟 嚴格排除 reset-both / reset-client / reset-server 等，僅 deny 與 drop 才標註紅色底色
+                    const isDeny = (actionStr === 'deny' || actionStr === 'drop');
 
                     if (isDeny) {
                         tr.className = 'row-drop-deny';
@@ -559,29 +864,43 @@
                     const fullSrcTitle = row.src_hostname ? `${row.source} (${row.src_hostname})` : row.source;
                     const fullBytesTitle = `${(row.bytes || 0).toLocaleString()} Bytes`;
 
+                    const displaySrc = cleanZeroVal(row.source);
+                    const displayNatSrc = cleanZeroVal(row.nat_source_ip);
+                    const displayDst = cleanZeroVal(row.destination);
+                    const displayNatDst = cleanZeroVal(row.nat_dest_ip);
+                    const displayPort = cleanZeroVal(row.to_port);
+
+                    // 🌟 使用 data-fkey 與 data-fval 將值安全綁定至 DOM，由上方事件監聽器抓取
                     tr.innerHTML = `
                         <td class="traffic-col-time text-primary" title="${row.timestamp}">${row.timestamp}</td>
                         <td title="${row.type || 'end'}">${row.type || 'end'}</td>
-                        <td title="${row.from_zone || '-'}">${row.from_zone || '-'}</td>
-                        <td title="${row.to_zone || '-'}">${row.to_zone || '-'}</td>
-                        <td title="${fullSrcTitle}"><strong class="text-primary">${row.source}</strong>${hostDisplay}</td>
-                        <td class="text-secondary" title="${row.nat_source_ip || '-'}">${row.nat_source_ip || '-'}</td>
-                        <td title="${row.destination}">${row.destination}</td>
-                        <td class="text-secondary" title="${row.nat_dest_ip || '-'}">${row.nat_dest_ip || '-'}</td>
-                        <td class="fw-bold text-primary" title="${row.to_port}">${row.to_port}</td>
-                        <td title="${row.application || '-'}"><span class="text-primary">${row.application || '-'}</span></td>
-                        <td title="${row.action}">${actionDisplay}</td>
-                        <td title="${row.rule || ''}">${row.rule || '-'}</td>
-                        <td class="text-muted" title="${row.session_end_reason || '-'}">${row.session_end_reason || '-'}</td>
+                        <td title="${row.from_zone || '-'}" class="filterable-cell" data-fkey="zone" data-fval="${escAttr(row.from_zone)}">${row.from_zone || '-'}</td>
+                        <td title="${row.to_zone || '-'}" class="filterable-cell" data-fkey="zone" data-fval="${escAttr(row.to_zone)}">${row.to_zone || '-'}</td>
+                        <td title="${fullSrcTitle}" class="filterable-cell" data-fkey="src" data-fval="${escAttr(displaySrc)}"><strong class="text-primary">${displaySrc}</strong>${hostDisplay}</td>
+                        <td class="text-secondary filterable-cell" title="${displayNatSrc}" data-fkey="natsrc" data-fval="${escAttr(displayNatSrc)}">${displayNatSrc}</td>
+                        <td title="${displayDst}" class="filterable-cell" data-fkey="dst" data-fval="${escAttr(displayDst)}">${displayDst}</td>
+                        <td class="text-secondary filterable-cell" title="${displayNatDst}" data-fkey="natdst" data-fval="${escAttr(displayNatDst)}">${displayNatDst}</td>
+                        <td class="fw-bold text-primary filterable-cell" title="${displayPort}" data-fkey="dport" data-fval="${escAttr(displayPort)}">${displayPort}</td>
+                        <td title="${row.application || '-'}" class="filterable-cell" data-fkey="app" data-fval="${escAttr(row.application)}"><span class="text-primary">${row.application || '-'}</span></td>
+                        <td title="${row.action}" class="filterable-cell" data-fkey="action" data-fval="${escAttr(row.action)}">${actionDisplay}</td>
+                        <td title="${row.rule || ''}" class="filterable-cell" data-fkey="rule" data-fval="${escAttr(row.rule)}">${row.rule || '-'}</td>
+                        <td class="text-muted filterable-cell" title="${row.session_end_reason || '-'}" data-fkey="reason" data-fval="${escAttr(row.session_end_reason)}">${row.session_end_reason || '-'}</td>
                         <td class="fw-bold font-monospace text-primary text-end" title="${fullBytesTitle}">${formatPanBytes(row.bytes)}</td>
                     `;
                     tbody.appendChild(tr);
                 });
 
-                renderTrafficPagination(currentPage, totalPages);
+                if (isFirstLoad) {
+                    const summaryReqId = ++activeSummaryRequestId;
+                    fetchTrafficSummaryInBackground(date, src, dst, app, action, zone, summaryReqId);
+                } else {
+                    const displayTotalPages = Math.max(data.total_pages || 1, Math.ceil(totalFlowsCount / currentPerPage));
+                    renderTrafficPagination(currentPage, displayTotalPages);
+                }
             })
             .catch(err => {
-                if (!silent) {
+                if (err.name === 'AbortError') return;
+                if (!silent && tbody) {
                     tbody.innerHTML = `<tr><td colspan="14" class="text-center text-danger py-4">網路傳輸異常：${err}</td></tr>`;
                 }
             })
@@ -589,7 +908,62 @@
                 if (callback) callback();
             });
     }
+	
+    function fetchTrafficSummaryInBackground(date, src, dst, app, action, zone, reqId) {
+        const countUrl = `/api/traffic-query?date=${date}&src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&app=${encodeURIComponent(app)}&action=${action}&zone=${zone}&count_only=true&_t=${Date.now()}`;
+        
+        fetch(countUrl)
+            .then(res => res.json())
+            .then(data => {
+                const currentDate = document.getElementById('traffic-date').value || todayStr;
+                if (reqId !== activeSummaryRequestId || date !== currentDate) {
+                    return;
+                }
 
+                if (data.status === 'success') {
+                    totalFlowsCount = data.total_flows || 0;
+                    isSummaryLoaded = true;
+                    const totalPages = data.total_pages || 1;
+                    const activePage = currentTrafficPage || 1;
+					
+                    if (date !== todayStr) {
+                        const cacheKey = `${date}|${src}|${dst}|${app}|${action}|${zone}`;
+                        historicalSummaryCache[cacheKey] = {
+                            total_flows: totalFlowsCount,
+                            db_size: data.db_size || '0 B',
+                            total_bytes: data.total_bytes || '0 B',
+                            top_app: data.top_app || '-',
+                            deny_flows: data.deny_flows || 0,
+                            histogram: data.histogram || []
+                        };
+                    }
+
+                    document.getElementById('metric-total-flows').innerText = `${totalFlowsCount.toLocaleString()} 筆`;
+                    document.getElementById('metric-db-size').innerText = data.db_size || '0 B';
+                    document.getElementById('metric-total-bytes').innerText = data.total_bytes || '0 B';
+                    document.getElementById('metric-top-app').innerText = data.top_app || '-';
+                    document.getElementById('metric-deny-flows').innerText = `${(data.deny_flows || 0).toLocaleString()} 筆`;
+
+                    try { renderMessageCountChart(data.histogram || []); } catch (e) {}
+
+                    document.getElementById('traffic-count-badge').innerText = `共 ${totalFlowsCount.toLocaleString()} 筆 (頁次 ${activePage} / ${totalPages})`;
+                    const summaryElem = document.getElementById('traffic-pagination-summary');
+                    if (summaryElem) {
+                        const startIdx = (activePage - 1) * currentPerPage + 1;
+                        const endIdx = Math.min(activePage * currentPerPage, totalFlowsCount);
+                        summaryElem.innerText = `顯示第 ${startIdx.toLocaleString()} - ${endIdx.toLocaleString()} 筆，共 ${totalFlowsCount.toLocaleString()} 筆 (第 ${activePage} / ${totalPages} 頁)`;
+                    }
+
+                    renderTrafficPagination(activePage, totalPages);
+                } else {
+                    document.getElementById('metric-total-flows').innerText = `${currentPerPage} 筆 (未統計全日)`;
+                }
+            })
+            .catch(err => {
+                document.getElementById('metric-total-flows').innerText = `${currentPerPage} 筆 (未統計全日)`;
+            });
+    }
+	
     function renderTrafficPagination(current, total) {
         const ul = document.getElementById('traffic-pagination-ul');
         ul.innerHTML = '';
@@ -618,14 +992,37 @@
         const labelMap = { 10: '10 秒', 30: '30 秒', 60: '60 秒', 0: '手動' };
         setRefreshInterval(savedSec, labelMap[savedSec] || '10 秒');
 
-        const dateInput = document.getElementById('traffic-date');
-        dateInput.value = todayStr;
-        updateTrafficWeekday(todayStr); // 🌟 載入當日星期
+        const initSearchInput = document.getElementById('traffic-search-filter');
+        if (initSearchInput && initSearchInput.value.trim() !== '') {
+            appliedFilterStr = initSearchInput.value.trim();
+        }
 
-        dateInput.addEventListener('change', () => {
-            updateTrafficWeekday(dateInput.value); // 🌟 月曆選取後即時更新星期
-            queryTrafficLogs(1);
-        });
+        const dateInput = document.getElementById('traffic-date');
+        if (dateInput) {
+            dateInput.value = todayStr;
+            updateTrafficWeekday(todayStr);
+
+            dateInput.addEventListener('change', () => {
+                updateTrafficWeekday(dateInput.value);
+                totalFlowsCount = 0;
+				isSummaryLoaded = false;
+                queryTrafficLogs(1);
+            });
+        }
+
+        // 🌟 事件委派：點擊表格任一可過濾欄位，自動加入查詢欄
+        const trafficTbody = document.getElementById('traffic-table-body');
+        if (trafficTbody) {
+            trafficTbody.addEventListener('click', (e) => {
+                const cell = e.target.closest('.filterable-cell');
+                if (!cell) return;
+                const fkey = cell.getAttribute('data-fkey');
+                const fval = cell.getAttribute('data-fval');
+                if (fkey && fval) {
+                    addFilterToSearchBar(fkey, fval);
+                }
+            });
+        }
 
         queryTrafficLogs(1);
         refreshSyslogStatus();
@@ -633,5 +1030,30 @@
 	
     setInterval(refreshSyslogStatus, 3000);
 	
+    let isDenyFiltered = false;
+
+    function toggleTrafficDenyFilter() {
+        const card = document.getElementById('card-traffic-deny-filter');
+        const searchInput = document.getElementById('traffic-search-filter');
+        let currentFilter = searchInput.value.trim();
+
+        isDenyFiltered = !isDenyFiltered;
+
+        if (isDenyFiltered) {
+            card.classList.add('card-filter-active');
+            // 🌟 將原有的 action:deny 改為 action:deny_drop
+            if (!/\baction\s*:\s*deny_drop\b/i.test(currentFilter)) {
+                searchInput.value = currentFilter ? `${currentFilter} and action:deny_drop` : `action:deny_drop`;
+            }
+        } else {
+            card.classList.remove('card-filter-active');
+            searchInput.value = currentFilter.replace(/(?:and\s+)?\baction\s*:\s*deny_drop\b/gi, '').trim();
+            if (searchInput.value.toLowerCase().startsWith('and ')) {
+                searchInput.value = searchInput.value.substring(4).trim();
+            }
+        }
+
+        executeFreshTrafficSearch();
+    }
 </script>
 {% endblock %}

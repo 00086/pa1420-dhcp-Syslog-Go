@@ -1,0 +1,670 @@
+{% extends "base.html" %}
+
+{% block title %}{{ fw_model }} 系統紀錄分析系統{% endblock %}
+
+{% block extra_styles %}
+.table-sticky-header th { 
+    position: sticky; 
+    top: 0; 
+    background-color: #f8f9fa; 
+    z-index: 2; 
+    white-space: nowrap; 
+}
+.table-scroll-container { 
+    overflow-y: scroll; 
+    flex-grow: 1; 
+}
+
+/* 固定欄寬與文字截斷 */
+.system-table-fixed {
+    table-layout: fixed;
+    width: 100%;
+    min-width: 1400px;
+    margin-bottom: 0;
+}
+.system-table-fixed th, 
+.system-table-fixed td {
+    vertical-align: middle;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-top: 3px;
+    padding-bottom: 3px;
+    padding-left: 6px;
+    padding-right: 6px;
+    line-height: 1.35;
+}
+
+.system-col-time {
+    text-overflow: clip !important;
+}
+
+/* 嚴重性徽章樣式 (圖一 informational 為綠色底) */
+.badge-critical { background-color: #721c24; color: #fff; }
+.badge-high { background-color: #dc3545; color: #fff; }
+.badge-medium { background-color: #fd7e14; color: #fff; }
+.badge-low { background-color: #0dcaf0; color: #000; }
+.badge-informational { background-color: #97c024; color: #fff; font-weight: bold; }
+
+.spin-anim {
+    animation: spin 0.6s linear infinite;
+}
+@keyframes spin {
+    100% { transform: rotate(360deg); }
+}
+
+/* 告警指標卡片點擊效果與高亮狀態 */
+.clickable-card {
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+    user-select: none;
+    border: 1px solid transparent;
+}
+.clickable-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08) !important;
+}
+.card-filter-active {
+    border: 2px solid #dc3545 !important;
+    background-color: #fff5f5 !important;
+    box-shadow: 0 0 10px rgba(220, 53, 69, 0.35) !important;
+}
+
+{% endblock %}
+
+{% block content %}
+<!-- 系統日誌查詢工具列 -->
+<div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
+    <div class="col-12">
+        <div class="card shadow-sm border-0 bg-white" style="overflow: visible;">
+            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2" style="overflow: visible;">
+                
+                <!-- 條件篩選輸入組 -->
+                <div class="d-flex align-items-center gap-1 flex-nowrap flex-shrink-0">
+                    <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-info"></i> 條件篩選：</span>
+                    
+                    <!-- 日期選擇器群組 -->
+                    <div class="input-group input-group-sm flex-nowrap" style="width: auto;">
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeSystemDate(-1)" title="前一日">
+                            <i class="bi bi-chevron-left"></i>
+                        </button>
+                        <input type="date" class="form-control form-control-sm font-monospace text-info fw-bold" style="width: 125px; cursor: pointer;" id="system-date" onclick="this.showPicker()">
+                        <span class="input-group-text bg-white text-info fw-bold px-2 font-monospace" id="system-weekday" style="font-size: 13px;">(四)</span>
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeSystemDate(1)" title="後一日">
+                            <i class="bi bi-chevron-right"></i>
+                        </button>
+                    </div>
+
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="類型 (如 general)" style="width: 120px;" id="system-subtype">
+                    <select class="form-select form-select-sm" style="width: 120px;" id="system-severity">
+                        <option value="all">嚴重性: 全部</option>
+                        <option value="critical">critical</option>
+                        <option value="high">high</option>
+                        <option value="medium">medium</option>
+                        <option value="low">low</option>
+                        <option value="informational">informational</option>
+                    </select>
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="事件 (如 lease-start)" style="width: 140px;" id="system-event">
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="說明/物件關鍵字" style="width: 140px;" id="system-keyword">
+
+                    <button class="btn btn-outline-secondary btn-sm px-2 text-nowrap ms-1" onclick="resetSystemFilters()">重置</button>
+                    <button class="btn btn-primary btn-sm px-2 shadow-sm text-nowrap" onclick="querySystemLogs(1)">
+                        <i class="bi bi-search me-1"></i>執行檢索
+                    </button>
+
+                    <!-- 重新顯示時間下拉群組 -->
+                    <div class="input-group input-group-sm ms-1" style="width: auto; position: relative;">
+                        <button class="btn btn-outline-secondary dropdown-toggle fw-bold d-flex align-items-center gap-1 bg-light text-dark py-1" type="button" id="refreshIntervalDropdown" data-bs-toggle="dropdown" aria-expanded="false" title="設定重新顯示週期">
+                            <span id="currentIntervalLabel">30 秒</span>
+                            <span id="countdownBadge" class="badge bg-info text-dark font-monospace" style="font-size: 10px;">30s</span>
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-end shadow border" aria-labelledby="refreshIntervalDropdown" style="z-index: 1060; min-width: 110px;">
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-10" onclick="setRefreshInterval(10, '10 秒')">10 秒</a></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-30" onclick="setRefreshInterval(30, '30 秒')">30 秒</a></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-60" onclick="setRefreshInterval(60, '60 秒')">60 秒</a></li>
+                            <li><hr class="dropdown-divider my-1"></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" id="item-manual" onclick="setRefreshInterval(0, '手動')">手動</a></li>
+                        </ul>
+                        <button class="btn btn-outline-info px-2 shadow-sm d-flex align-items-center justify-content-center" id="refresh-system-btn" onclick="refreshDisplayNow()" title="立即重新顯示最新紀錄">
+                            <i class="bi bi-arrow-clockwise fs-6" id="refresh-icon"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 右側狀態徽章 (固定不折行，1:1 對齊 traffic 與 threat) -->
+                <div class="d-flex align-items-center gap-2 ms-auto flex-shrink-0">
+                    <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
+                    <span class="badge bg-info-subtle text-info-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" style="font-size: 12px;">
+                        <span class="spinner-grow spinner-grow-sm text-info" style="width: 6px; height: 6px;"></span>
+                        <span id="system-syslog-flush-text">Syslog 514: System 0 筆</span>
+                    </span>
+                </div>
+
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 系統日誌時間分佈直方圖 -->
+<div class="row mb-2 flex-shrink-0" id="histogram-card-row">
+    <div class="col-12">
+        <div class="card shadow-sm border-0 bg-white">
+            <div class="card-header bg-white py-1 px-3 d-flex justify-content-between align-items-center border-bottom-0">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="small fw-bold text-dark"><i class="bi bi-bar-chart-fill text-info me-1"></i>系統日誌 24 小時分佈直方圖</span>
+                    <button class="btn btn-outline-secondary btn-sm py-0 px-2 d-flex align-items-center gap-1 border-0" id="chart-toggle-btn" onclick="toggleHistogram()" style="font-size: 11px; height: 22px;">
+                        <i class="bi bi-chevron-up" id="chart-toggle-icon"></i>
+                        <span id="chart-toggle-text">收合圖表</span>
+                    </button>
+                </div>
+                <span class="small text-muted font-monospace" id="chart-time-range">時段：00:00 ~ 23:00</span>
+            </div>
+            <div class="card-body py-1 px-3" id="histogram-card-body" style="position: relative; height: 115px; width: 100%;">
+                <canvas id="systemHistogramChart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 系統概況五大指標卡片 -->
+<div class="row g-2 mb-2 flex-shrink-0">
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">系統日誌總筆數</small>
+            <h5 class="mb-0 fw-bold font-monospace text-primary" id="metric-total-logs">-- 筆</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">當日資料庫容量</small>
+            <h5 class="mb-0 fw-bold font-monospace text-info" id="metric-db-size">--</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center clickable-card" id="card-important-filter" onclick="toggleImportantFilter()" title="點擊僅顯示中高風險事件，再按一次復原">
+			<small class="text-muted"><i class="bi bi-funnel-fill text-danger me-1"></i>中高風險告警事件</small>
+			<h5 class="mb-0 fw-bold font-monospace text-danger" id="metric-important-logs">-- 筆</h5>
+		</div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">Top 1 日誌類型</small>
+            <h5 class="mb-0 fw-bold font-monospace text-dark text-truncate px-1" id="metric-top-subtype" title="--">--</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">Top 1 觸發事件</small>
+            <h5 class="mb-0 fw-bold font-monospace text-secondary text-truncate px-1" id="metric-top-event" title="--">--</h5>
+        </div>
+    </div>
+</div>
+
+<!-- 對齊圖一之 6 大欄位表格 -->
+<div class="row flex-grow-1 overflow-hidden">
+    <div class="col-12 h-100">
+        <div class="card shadow-sm h-100 d-flex flex-column border-0">
+            <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <span class="fw-bold small"><i class="bi bi-list-columns-reverse text-info me-1"></i>系統日誌紀錄明細 (Parquet 列式儲存 + DuckDB 向量加速)</span>
+                <span class="badge bg-secondary font-monospace" id="system-count-badge">共 0 筆</span>
+            </div>
+            <div class="card-body p-0 table-scroll-container">
+                <div class="table-responsive h-100">
+                    <table class="table table-hover table-striped table-sm table-sticky-header font-monospace system-table-fixed" style="font-size: 14px;">
+                        <colgroup>
+                            <col style="width: 170px;"> <!-- 1. 接收時間 -->
+                            <col style="width: 110px;"> <!-- 2. 類型 -->
+                            <col style="width: 120px;"> <!-- 3. 嚴重性 -->
+                            <col style="width: 160px;"> <!-- 4. 事件 -->
+                            <col style="width: 130px;"> <!-- 5. 物件 -->
+                            <col style="width: auto;">  <!-- 6. 說明 -->
+                        </colgroup>
+                        <thead>
+                            <tr class="table-light">
+                                <th>接收時間</th>
+                                <th>類型</th>
+                                <th>嚴重性</th>
+                                <th>事件</th>
+                                <th>物件</th>
+                                <th>說明</th>
+                            </tr>
+                        </thead>
+                        <tbody id="system-table-body">
+                            <tr>
+                                <td colspan="6" class="text-center py-5 text-muted">
+                                    <i class="bi bi-inbox fs-2 d-block mb-2 text-secondary"></i>
+                                    載入系統資料中...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="card-footer bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <span class="small text-muted"><i class="bi bi-info-circle me-1"></i>Palo Alto 次世代防火牆系統紀錄；滑鼠懸停於內容上方可檢視完整說明字串。</span>
+                <nav><ul class="pagination pagination-sm mb-0" id="system-pagination-ul"></ul></nav>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function getLocalDateString() {
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+	
+    function updateSystemWeekday(dateVal) {
+        if (!dateVal) return;
+        const [y, m, d] = dateVal.split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        const weekdays = ['(日)', '(一)', '(二)', '(三)', '(四)', '(五)', '(六)'];
+        const el = document.getElementById('system-weekday');
+        if (el) el.innerText = weekdays[dt.getDay()];
+    }
+
+    function changeSystemDate(deltaDays) {
+        const dateInput = document.getElementById('system-date');
+        let curVal = dateInput.value || todayStr;
+        const [y, m, d] = curVal.split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        dt.setDate(dt.getDate() + deltaDays);
+
+        const newY = dt.getFullYear();
+        const newM = String(dt.getMonth() + 1).padStart(2, '0');
+        const newD = String(dt.getDate()).padStart(2, '0');
+        dateInput.value = `${newY}-${newM}-${newD}`;
+
+        updateSystemWeekday(dateInput.value);
+        querySystemLogs(1);
+    }
+	
+    const todayStr = getLocalDateString();
+    let currentSystemPage = 1;
+    let systemHistogramChartInstance = null;
+    let countdownTimer = null;
+    let currentIntervalSeconds = 30;
+    let remainingSeconds = 30;
+
+    document.getElementById('system-date').value = todayStr;
+
+    function toggleHistogram() {
+        const body = document.getElementById('histogram-card-body');
+        const icon = document.getElementById('chart-toggle-icon');
+        const text = document.getElementById('chart-toggle-text');
+        const isHidden = body.classList.contains('d-none');
+
+        if (isHidden) {
+            body.classList.remove('d-none');
+            icon.className = 'bi bi-chevron-up';
+            text.innerText = '收合圖表';
+            localStorage.setItem('system_chart_collapsed', 'false');
+            if (systemHistogramChartInstance) {
+                systemHistogramChartInstance.resize();
+            }
+        } else {
+            body.classList.add('d-none');
+            icon.className = 'bi bi-chevron-down';
+            text.innerText = '展開圖表';
+            localStorage.setItem('system_chart_collapsed', 'true');
+        }
+    }
+
+    function initHistogramCollapseState() {
+        const isCollapsed = localStorage.getItem('system_chart_collapsed') === 'true';
+        if (isCollapsed) {
+            document.getElementById('histogram-card-body').classList.add('d-none');
+            document.getElementById('chart-toggle-icon').className = 'bi bi-chevron-down';
+            document.getElementById('chart-toggle-text').innerText = '展開圖表';
+        }
+    }
+
+    function setRefreshInterval(seconds, label) {
+        currentIntervalSeconds = seconds;
+        remainingSeconds = seconds;
+        localStorage.setItem('system_display_interval', seconds.toString());
+
+        document.querySelectorAll('.dropdown-item').forEach(el => el.classList.remove('active'));
+        const labelElem = document.getElementById('currentIntervalLabel');
+        const badge = document.getElementById('countdownBadge');
+
+        if (seconds > 0) {
+            labelElem.innerText = label;
+            const activeItem = document.getElementById(`item-${seconds}`);
+            if (activeItem) activeItem.classList.add('active');
+
+            badge.classList.remove('d-none');
+            badge.innerText = `${remainingSeconds}s`;
+
+            if (countdownTimer) clearInterval(countdownTimer);
+            countdownTimer = setInterval(() => {
+                remainingSeconds--;
+                if (remainingSeconds <= 0) {
+                    remainingSeconds = currentIntervalSeconds;
+                    triggerSilentRefresh();
+                }
+                badge.innerText = `${remainingSeconds}s`;
+            }, 1000);
+        } else {
+            labelElem.innerText = '手動';
+            document.getElementById('item-manual').classList.add('active');
+            badge.classList.add('d-none');
+            if (countdownTimer) {
+                clearInterval(countdownTimer);
+                countdownTimer = null;
+            }
+        }
+    }
+
+    function refreshDisplayNow() {
+        const icon = document.getElementById('refresh-icon');
+        icon.classList.add('spin-anim');
+
+        remainingSeconds = currentIntervalSeconds;
+        const badge = document.getElementById('countdownBadge');
+        if (currentIntervalSeconds > 0) badge.innerText = `${remainingSeconds}s`;
+
+        querySystemLogs(currentSystemPage, true, () => {
+            setTimeout(() => icon.classList.remove('spin-anim'), 400);
+        });
+    }
+
+    function triggerSilentRefresh() {
+        const icon = document.getElementById('refresh-icon');
+        icon.classList.add('spin-anim');
+        querySystemLogs(currentSystemPage, true, () => {
+            setTimeout(() => icon.classList.remove('spin-anim'), 400);
+        });
+    }
+
+    function resetSystemFilters() {
+        document.getElementById('system-subtype').value = '';
+        document.getElementById('system-severity').value = 'all';
+        document.getElementById('system-event').value = '';
+        document.getElementById('system-keyword').value = '';
+        querySystemLogs(1);
+    }
+
+    function getSeverityBadge(sev) {
+        const s = (sev || '').toLowerCase();
+        switch (s) {
+            case 'critical': return '<span class="badge badge-critical px-2 py-1">critical</span>';
+            case 'high': return '<span class="badge badge-high px-2 py-1">high</span>';
+            case 'medium': return '<span class="badge badge-medium px-2 py-1">medium</span>';
+            case 'low': return '<span class="badge badge-low px-2 py-1">low</span>';
+            case 'informational': return '<span class="badge badge-informational px-2 py-1">informational</span>';
+            default: return `<span class="badge bg-secondary px-2 py-1">${sev || '-'}</span>`;
+        }
+    }
+
+    function renderSystemHistogram(histogram) {
+        if (!histogram || histogram.length === 0) return;
+        const labels = histogram.map(h => h.time_bucket);
+        const dataVals = histogram.map(h => h.count);
+
+        if (!systemHistogramChartInstance) {
+            const ctx = document.getElementById('systemHistogramChart').getContext('2d');
+            systemHistogramChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '系統日誌數',
+                        data: dataVals,
+                        backgroundColor: '#0ea5e9',
+                        hoverBackgroundColor: '#0284c7',
+                        borderRadius: 2,
+                        barPercentage: 0.85,
+                        categoryPercentage: 0.95
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) { return `事件數: ${context.parsed.y.toLocaleString()} 筆`; }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+                        y: {
+                            beginAtZero: true,
+                            grid: { color: '#f1f5f9' },
+                            ticks: {
+                                font: { size: 10 },
+                                callback: function(value) { return value >= 1000 ? (value/1000) + 'k' : value; }
+                            }
+                        }
+                    }
+                }
+            });
+        } else {
+            let hasChanged = false;
+            const currentData = systemHistogramChartInstance.data.datasets[0].data;
+            for (let i = 0; i < dataVals.length; i++) {
+                if (currentData[i] !== dataVals[i]) {
+                    currentData[i] = dataVals[i];
+                    hasChanged = true;
+                }
+            }
+            if (hasChanged) {
+                systemHistogramChartInstance.update('none');
+            }
+        }
+    }
+
+    function querySystemLogs(page = 1, silent = false, callback = null) {
+        currentSystemPage = page;
+        const date = document.getElementById('system-date').value || todayStr;
+        const subtype = document.getElementById('system-subtype').value.trim();
+        const severity = document.getElementById('system-severity').value;
+        const eventID = document.getElementById('system-event').value.trim();
+        const keyword = document.getElementById('system-keyword').value.trim();
+
+        const tbody = document.getElementById('system-table-body');
+        if (!silent) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4 text-info"><div class="spinner-border spinner-border-sm me-2"></div>正在透過 DuckDB 引擎極速載入...</td></tr>';
+        }
+
+        const url = `/api/system-query?date=${date}&subtype=${encodeURIComponent(subtype)}&severity=${severity}&event_id=${encodeURIComponent(eventID)}&keyword=${encodeURIComponent(keyword)}&page=${page}&per_page=50&_t=${Date.now()}`;
+
+        fetch(url)
+            .then(res => res.json())
+            .then(data => {
+                if (data.status !== 'success') {
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">查詢失敗：${data.message}</td></tr>`;
+                    return;
+                }
+
+                const totalLogs = data.total_logs || 0;
+                const totalPages = data.total_pages || 1;
+                const currentPage = data.current_page || 1;
+                const logsList = data.logs || [];
+
+                document.getElementById('metric-total-logs').innerText = `${totalLogs.toLocaleString()} 筆`;
+                document.getElementById('metric-db-size').innerText = data.db_size || '0 B';
+                document.getElementById('metric-important-logs').innerText = `${(data.important_logs || 0).toLocaleString()} 筆`;
+                document.getElementById('metric-top-subtype').innerText = data.top_subtype || '-';
+                document.getElementById('metric-top-subtype').title = data.top_subtype || '-';
+                document.getElementById('metric-top-event').innerText = data.top_event || '-';
+                document.getElementById('metric-top-event').title = data.top_event || '-';
+
+                document.getElementById('system-count-badge').innerText = `共 ${totalLogs.toLocaleString()} 筆 (頁次 ${currentPage} / ${totalPages})`;
+
+                renderSystemHistogram(data.histogram || []);
+
+                tbody.innerHTML = '';
+                if (logsList.length === 0) {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="6" class="text-center py-5 text-muted">
+                                <i class="bi bi-inbox fs-2 d-block mb-2 text-secondary"></i>
+                                該日期/條件查無系統紀錄。
+                            </td>
+                        </tr>`;
+                    renderSystemPagination(1, 1);
+                    return;
+                }
+
+                logsList.forEach(row => {
+                    const tr = document.createElement('tr');
+                    const descSafe = row.description || '-';
+                    const objSafe = row.object || '-';
+
+                    tr.innerHTML = `
+                        <td class="system-col-time text-primary" title="${row.timestamp}">${row.timestamp}</td>
+                        <td class="text-primary fw-bold" title="${row.subtype}">${row.subtype}</td>
+                        <td title="${row.severity}">${getSeverityBadge(row.severity)}</td>
+                        <td class="text-primary fw-bold" title="${row.event_id}">${row.event_id}</td>
+                        <td class="text-secondary" title="${objSafe}">${objSafe}</td>
+                        <td class="text-primary text-truncate text-start px-3" title="${descSafe}">${descSafe}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+
+                renderSystemPagination(currentPage, totalPages);
+            })
+            .catch(err => {
+                if (!silent) {
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">網路傳輸異常：${err}</td></tr>`;
+                }
+            })
+            .finally(() => {
+                if (callback) callback();
+            });
+    }
+
+    function renderSystemPagination(current, total) {
+        const ul = document.getElementById('system-pagination-ul');
+        ul.innerHTML = '';
+        if (!total || total <= 1) return;
+
+        const maxVisible = 10;
+        let startPage = Math.max(1, current - Math.floor(maxVisible / 2));
+        let endPage = startPage + maxVisible - 1;
+        if (endPage > total) { endPage = total; startPage = Math.max(1, endPage - maxVisible + 1); }
+
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="querySystemLogs(1); return false;"><i class="bi bi-chevron-double-left"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="querySystemLogs(${current - 1}); return false;"><i class="bi bi-chevron-left"></i></a></li>`;
+
+        for (let i = startPage; i <= endPage; i++) {
+            ul.innerHTML += `<li class="page-item ${i === current ? 'active' : ''}"><a class="page-link" href="#" onclick="querySystemLogs(${i}); return false;">${i}</a></li>`;
+        }
+
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="querySystemLogs(${current + 1}); return false;"><i class="bi bi-chevron-right"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="querySystemLogs(${total}); return false;"><i class="bi bi-chevron-double-right"></i></a></li>`;
+    }
+
+    // 🌟 定時自動輪詢 Syslog 514 即時接收統計 (對齊圖二)
+    function refreshSyslogStatus() {
+        fetch(`/api/syslog-status?_t=${Date.now()}`)
+            .then(res => res.json())
+            .then(res => {
+                if (res.status === 'success' && res.data) {
+                    const batchIns = (res.data.system_last_flush_insert || 0).toLocaleString();
+                    const textElem = document.getElementById('system-syslog-flush-text');
+                    if (textElem) {
+                        textElem.innerText = `Syslog 514: System ${batchIns} 筆`;
+                    }
+                }
+            })
+            .catch(() => {});
+    }
+
+    function refreshDisplayNow() {
+        const icon = document.getElementById('refresh-icon');
+        icon.classList.add('spin-anim');
+
+        remainingSeconds = currentIntervalSeconds;
+        const badge = document.getElementById('countdownBadge');
+        if (currentIntervalSeconds > 0) badge.innerText = `${remainingSeconds}s`;
+
+        querySystemLogs(currentSystemPage, true, () => {
+            setTimeout(() => icon.classList.remove('spin-anim'), 400);
+        });
+        refreshSyslogStatus();
+    }
+
+    function triggerSilentRefresh() {
+        const icon = document.getElementById('refresh-icon');
+        icon.classList.add('spin-anim');
+        querySystemLogs(currentSystemPage, true, () => {
+            setTimeout(() => icon.classList.remove('spin-anim'), 400);
+        });
+        refreshSyslogStatus();
+    }
+	
+    document.addEventListener('DOMContentLoaded', () => {
+        initHistogramCollapseState();
+
+        const savedSec = parseInt(localStorage.getItem('system_display_interval') || '30', 10);
+        const labelMap = { 10: '10 秒', 30: '30 秒', 60: '60 秒', 0: '手動' };
+        setRefreshInterval(savedSec, labelMap[savedSec] || '30 秒');
+
+        const dateInput = document.getElementById('system-date');
+        dateInput.value = todayStr;
+        updateSystemWeekday(todayStr);
+
+        dateInput.addEventListener('change', () => {
+            updateSystemWeekday(dateInput.value);
+            querySystemLogs(1);
+        });
+
+        querySystemLogs(1);
+		refreshSyslogStatus();
+		setInterval(refreshSyslogStatus, 3000); // 🌟 每 3 秒動態更新一次即時接收筆數
+    });
+	
+	// 🌟 卡片點擊篩選切換 (再次點擊即復原)
+    let isImportantFiltered = false;
+
+    function toggleImportantFilter() {
+        const card = document.getElementById('card-important-filter');
+        const sevSelect = document.getElementById('system-severity');
+
+        isImportantFiltered = !isImportantFiltered;
+
+        if (isImportantFiltered) {
+            card.classList.add('card-filter-active');
+            // 若後端有支援複合篩選，可指定 important；或直接選定 high/critical
+            // 這裡設定特殊標記 "important"
+            let opt = sevSelect.querySelector('option[value="important"]');
+            if (!opt) {
+                opt = document.createElement('option');
+                opt.value = 'important';
+                opt.innerText = '中高風險 (Medium+)';
+                sevSelect.appendChild(opt);
+            }
+            sevSelect.value = 'important';
+        } else {
+            card.classList.remove('card-filter-active');
+            sevSelect.value = 'all';
+        }
+
+        querySystemLogs(1);
+    }
+
+    // 🌟 覆蓋原本的 resetSystemFilters，確保點擊重置時也移除卡片高亮
+    function resetSystemFilters() {
+        isImportantFiltered = false;
+        const card = document.getElementById('card-important-filter');
+        if (card) card.classList.remove('card-filter-active');
+        document.getElementById('system-subtype').value = '';
+        document.getElementById('system-severity').value = 'all';
+        document.getElementById('system-event').value = '';
+        document.getElementById('system-keyword').value = '';
+        querySystemLogs(1);
+    }
+	
+</script>
+{% endblock %}

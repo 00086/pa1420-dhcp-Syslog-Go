@@ -1,0 +1,1025 @@
+{% extends "base.html" %}
+
+{% block title %}{{ fw_model }} 湖倉切分與整併稽核紀錄{% endblock %}
+
+{% block extra_styles %}
+.table-sticky-header th { 
+    position: sticky; 
+    top: 0; 
+    background-color: #f8f9fa; 
+    z-index: 2; 
+    white-space: nowrap; 
+}
+.table-scroll-container { 
+    overflow-y: scroll; 
+    flex-grow: 1; 
+}
+.audit-table-fixed {
+    table-layout: fixed;
+    width: 100%;
+    min-width: 1680px;
+    margin-bottom: 0;
+}
+.audit-table-fixed th, 
+.audit-table-fixed td {
+    vertical-align: middle;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-top: 4px;
+    padding-bottom: 4px;
+    padding-left: 6px;
+    padding-right: 6px;
+    font-size: 13.5px;
+    line-height: 1.35;
+}
+.row-drop-deny {
+    background-color: #fde8e5 !important;
+}
+.row-drop-deny:hover {
+    background-color: #fcd5cf !important;
+}
+.clickable-card {
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+    user-select: none;
+    border: 1px solid transparent;
+}
+.clickable-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08) !important;
+}
+.card-filter-active {
+    border: 2px solid #dc3545 !important;
+    background-color: #fff5f5 !important;
+    box-shadow: 0 0 10px rgba(220, 53, 69, 0.35) !important;
+}
+{% endblock %}
+
+{% block content %}
+<!-- 工具列 -->
+<div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
+    <div class="col-12">
+        <div class="card shadow-sm border-0 bg-white">
+            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2">
+                <div class="d-flex align-items-center gap-1 flex-nowrap flex-shrink-0">
+                    <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-primary"></i> 條件篩選：</span>
+                    
+                    <div class="input-group input-group-sm flex-nowrap" style="width: auto;">
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeAuditDate(-1)">
+                            <i class="bi bi-chevron-left"></i>
+                        </button>
+                        <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold" style="width: 125px; cursor: pointer;" id="audit-date" onclick="this.showPicker()">
+                        <span class="input-group-text bg-white text-primary fw-bold px-2 font-monospace" id="audit-weekday" style="font-size: 13px;">(二)</span>
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeAuditDate(1)">
+                            <i class="bi bi-chevron-right"></i>
+                        </button>
+                    </div>
+
+                    <select class="form-select form-select-sm" style="width: 110px;" id="audit-status">
+                        <option value="all">狀態: 全部</option>
+                        <option value="SUCCESS">SUCCESS 成功</option>
+                        <option value="FAILED">FAILED 失敗</option>
+                        <option value="QUEUED">QUEUED 排隊中</option>
+                        <option value="CANCELLED">CANCELLED 已取消</option>
+                    </select>
+
+                    <select class="form-select form-select-sm" style="width: 105px;" id="audit-model">
+                        <option value="all">型號: 全部</option>
+                        <option value="PA-5250">PA-5250</option>
+                        <option value="PA-1420">PA-1420</option>
+                    </select>
+
+                    <select class="form-select form-select-sm" style="width: 135px;" id="audit-category">
+                        <option value="all">分類: 全部</option>
+                        <option value="chunk切片">chunk切片 (10分)</option>
+                        <option value="分時parquet">分時parquet (小時)</option>
+                        <option value="rollup整併">rollup整併</option>
+                        <option value="raw_log歸檔">raw_log歸檔</option>
+                        <option value="14欄熱資料">14欄熱資料</option>
+                        <option value="NAS切分">NAS切分</option>
+                    </select>
+
+                    <input type="text" class="form-control form-control-sm font-monospace" placeholder="搜尋檔案 / 詳情 / 錯誤" style="width: 170px;" id="audit-keyword">
+
+                    <select class="form-select form-select-sm" style="width: 105px;" id="audit-per-page" onchange="queryAuditLogs(1)">
+                        <option value="50" selected>每頁 50 筆</option>
+                        <option value="100">每頁 100 筆</option>
+                        <option value="200">每頁 200 筆</option>
+                    </select>
+
+                    <button class="btn btn-outline-secondary btn-sm px-2 text-nowrap ms-1" onclick="resetAuditFilters()">重置</button>
+                    <button class="btn btn-primary btn-sm px-2 shadow-sm text-nowrap" onclick="queryAuditLogs(1)">
+                        <i class="bi bi-search me-1"></i>執行檢索
+                    </button>
+
+                    <button class="btn btn-outline-primary btn-sm px-2 ms-1" onclick="queryAuditLogs(currentAuditPage)" title="重新整理">
+                        <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                    <button class="btn btn-outline-info btn-sm px-2 ms-1 text-nowrap" onclick="triggerReconcile()" title="自動對賬盤點磁碟，若有缺失切片立即排入佇列補齊">
+                        <i class="bi bi-patch-check me-1"></i>對賬補齊
+                    </button>
+                    <button class="btn btn-outline-danger btn-sm px-2 ms-1 text-nowrap" onclick="purgeEntireQueue()" title="若排隊卡住或重複，可瞬間清空所有待處理任務">
+                        <i class="bi bi-trash3 me-1"></i>清空佇列
+                    </button>
+                    <button class="btn btn-outline-primary btn-sm px-2 ms-1 text-nowrap fw-bold" onclick="openColdToHotModal()" title="掃描冷資料庫並單選或多選轉換為熱資料">
+                        <i class="bi bi-snow2 me-1"></i>冷轉熱維護
+                    </button>
+                </div>
+
+                <div class="d-flex align-items-center gap-2 ms-auto flex-shrink-0">
+                    <span class="badge bg-primary text-white"><i class="bi bi-shield-check"></i> WORM 不可變稽核庫</span>
+                    <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 加速</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 五大指標卡片 -->
+<div class="row g-2 mb-2 flex-shrink-0">
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">今日稽核事件總數</small>
+            <h5 class="mb-0 fw-bold font-monospace text-primary" id="metric-audit-total">-- 筆</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">正常處理成功</small>
+            <h5 class="mb-0 fw-bold font-monospace text-success" id="metric-audit-success">-- 筆</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center clickable-card" id="card-failed-filter" onclick="toggleFailedFilter()" title="點擊僅顯示失敗事件">
+            <small class="text-muted"><i class="bi bi-exclamation-triangle-fill text-danger me-1"></i>失敗異常事件</small>
+            <h5 class="mb-0 fw-bold font-monospace text-danger" id="metric-audit-failed">-- 筆</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">累積處理日誌量</small>
+            <h5 class="mb-0 fw-bold font-monospace text-info" id="metric-audit-rows">-- 筆</h5>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">累積產出容量</small>
+            <h5 class="mb-0 fw-bold font-monospace text-warning-emphasis" id="metric-audit-mb">-- MB</h5>
+        </div>
+    </div>
+</div>
+
+<!-- 稽核明細表格 -->
+<div class="row flex-grow-1 overflow-hidden">
+    <div class="col-12 h-100">
+        <div class="card shadow-sm h-100 d-flex flex-column border-0">
+            <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <span class="fw-bold small"><i class="bi bi-journal-code text-primary me-1"></i>切分、整併與轉換歷程 (Parquet 不可變安全存儲)</span>
+                <span class="badge bg-secondary font-monospace" id="audit-count-badge">共 0 筆</span>
+            </div>
+            <div class="card-body p-0 table-scroll-container">
+                <div class="table-responsive h-100">
+                    <table class="table table-hover table-striped table-sm table-sticky-header font-monospace audit-table-fixed">
+                        <colgroup>
+                            <col style="width: 165px;"> <!-- 1. 時間 -->
+                            <col style="width: 85px;">  <!-- 2. 型號 -->
+                            <col style="width: 105px;"> <!-- 3. 分類 -->
+                            <col style="width: 75px;">  <!-- 4. 類別 -->
+                            <col style="width: 105px;"> <!-- 5. 目標時段 -->
+                            <col style="width: 115px;"> <!-- 6. 狀態與重試數 -->
+                            <col style="width: 100px;"> <!-- 7. 筆數 -->
+                            <col style="width: 95px;">  <!-- 8. 容量 (GB/MB) -->
+                            <col style="width: 95px;">  <!-- 9. 耗時 (分/秒) -->
+                            <col style="width: 220px;"> <!-- 10. 產出檔案 -->
+                            <col style="width: 190px;"> <!-- 11. 詳情 -->
+                            <col style="width: 235px;"> <!-- 12. 失敗原因與重試控制 -->
+                            <col style="width: 120px;"> <!-- 13. 來源 -->
+                        </colgroup>
+                        <thead>
+                            <tr class="table-light">
+                                <th>紀錄時間</th>
+                                <th>設備型號</th>
+                                <th>分類</th>
+                                <th>日誌</th>
+                                <th>目標時段</th>
+                                <th>狀態</th>
+                                <th class="text-end">處理筆數</th>
+                                <th class="text-end">檔案大小</th>
+                                <th class="text-end">耗時</th>
+                                <th>產出檔案</th>
+                                <th>任務詳情</th>
+                                <th>失敗原因 / 重試操作</th>
+                                <th>來源</th>
+                            </tr>
+                        </thead>
+                        <tbody id="audit-table-body">
+                            <tr>
+                                <td colspan="13" class="text-center py-5 text-muted">
+                                    <div class="spinner-border spinner-border-sm me-2"></div>載入稽核紀錄中...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="card-footer bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <span class="small text-muted font-monospace" id="audit-pagination-summary">顯示第 0 筆，共 0 筆</span>
+                <nav><ul class="pagination pagination-sm mb-0" id="audit-pagination-ul"></ul></nav>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 🌟 冷資料轉熱資料互動維護視窗 (Bootstrap Modal) -->
+<div class="modal fade" id="coldToHotModal" tabindex="-1" data-bs-backdrop="static" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+        <div class="modal-content border-0 shadow-lg">
+            <div class="modal-header bg-primary text-white py-2 px-3">
+                <h6 class="modal-title fw-bold mb-0">
+                    <i class="bi bi-snow2 me-2"></i>冷資料 (RAW) 轉換熱資料維護工具
+                </h6>
+                <button type="button" class="btn-close btn-close-white" id="c2h-close-x" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body bg-light p-3">
+                <!-- 操作規則說明列 -->
+                <div class="alert alert-warning py-2 px-3 mb-2 small d-flex align-items-center justify-content-between">
+                    <div>
+                        <i class="bi bi-exclamation-triangle-fill text-warning-emphasis me-1"></i>
+                        <strong>覆蓋重建規則：</strong>轉換選定日期時，系統將<strong>完全移除該日期既有的熱資料（包含所有零碎檔案）</strong>，並由冷資料重新萃取去重生成單一標準熱主檔。
+                    </div>
+                    <span class="badge bg-dark font-monospace ms-2">DuckDB 向量引擎</span>
+                </div>
+
+                <!-- 轉換統計摘要卡片 (對齊稽核頁面風格) -->
+                <div class="row g-2 mb-2">
+                    <div class="col-3">
+                        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+                            <small class="text-muted">已選取轉換日期</small>
+                            <h6 class="mb-0 fw-bold font-monospace text-primary" id="c2h-stat-selected">0 天</h6>
+                        </div>
+                    </div>
+                    <div class="col-3">
+                        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+                            <small class="text-muted">原始冷資料總筆數</small>
+                            <h6 class="mb-0 fw-bold font-monospace text-secondary" id="c2h-stat-raw">0 筆</h6>
+                        </div>
+                    </div>
+                    <div class="col-3">
+                        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+                            <small class="text-muted">轉換後有效熱資料筆數</small>
+                            <h6 class="mb-0 fw-bold font-monospace text-success" id="c2h-stat-valid">0 筆</h6>
+                        </div>
+                    </div>
+                    <div class="col-3">
+                        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+                            <small class="text-muted">已清除舊熱檔/碎片數</small>
+                            <h6 class="mb-0 fw-bold font-monospace text-danger" id="c2h-stat-removed">0 檔</h6>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 快捷勾選工具列 -->
+                <div class="card border-0 shadow-sm">
+                    <div class="card-header bg-white py-2 px-3 d-flex align-items-center justify-content-between">
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="fw-bold small text-dark"><i class="bi bi-hdd-stack text-primary me-1"></i>可用冷資料清單 (支援單選與多選)</span>
+                            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2" style="font-size: 12px;" onclick="selectAllColdDates(true)">全選</button>
+                            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2" style="font-size: 12px;" onclick="selectAllColdDates(false)">取消全選</button>
+                            <button type="button" class="btn btn-outline-info btn-sm py-0 px-2" style="font-size: 12px;" onclick="selectOnlyMissingHotDates()">僅選尚未有熱資料</button>
+                        </div>
+                        <button type="button" class="btn btn-outline-primary btn-sm py-0 px-2" style="font-size: 12px;" id="c2h-refresh-btn" onclick="loadColdArchiveList()">
+                            <i class="bi bi-arrow-clockwise me-1"></i>重新掃描目錄
+                        </button>
+                    </div>
+                    <div class="card-body p-0" style="max-height: 340px; overflow-y: auto;">
+                        <table class="table table-hover table-sm table-sticky-header font-monospace mb-0" style="font-size: 13px;">
+                            <thead class="table-light">
+                                <tr>
+                                    <th class="text-center" style="width: 45px;">
+                                        <input class="form-check-input" type="checkbox" id="c2h-check-all" onchange="selectAllColdDates(this.checked)">
+                                    </th>
+                                    <th style="width: 145px;">冷資料日期</th>
+                                    <th style="width: 150px;">來源目錄</th>
+                                    <th class="text-end" style="width: 215px;">冷檔明細 (點擊展開選時)</th>
+                                    <th style="width: 215px;">目前熱資料狀態</th>
+                                    <th>轉換狀態與筆數結果 (原始 ➔ 有效)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="c2h-table-body">
+                                <tr>
+                                    <td colspan="6" class="text-center py-4 text-muted">請點擊開啟視窗載入冷資料清單...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer bg-white py-2 px-3 d-flex justify-content-between">
+                <span class="small text-muted font-monospace" id="c2h-footer-hint">請勾選欲轉換的日期 (可單選或多選)</span>
+                <div class="d-flex gap-2">
+                    <button type="button" class="btn btn-secondary btn-sm px-3" id="c2h-cancel-btn" data-bs-dismiss="modal">關閉</button>
+                    <button type="button" class="btn btn-primary btn-sm px-3 fw-bold shadow-sm" id="c2h-start-btn" onclick="executeSelectedColdToHot()" disabled>
+                        <i class="bi bi-play-fill me-1"></i>開始轉換已選日期
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+	let coldArchiveItems = [];
+    let isColdConverting = false;
+
+    function openColdToHotModal() {
+        const modalEl = document.getElementById('coldToHotModal');
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        modal.show();
+        loadColdArchiveList();
+    }
+
+    function loadColdArchiveList() {
+        if (isColdConverting) return;
+        const tbody = document.getElementById('c2h-table-body');
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4 text-primary"><div class="spinner-border spinner-border-sm me-2"></div>正在快速掃描磁碟中的冷資料目錄...</td></tr>';
+
+        document.getElementById('c2h-stat-selected').innerText = '0 天';
+        document.getElementById('c2h-stat-raw').innerText = '轉換後結算';
+        document.getElementById('c2h-stat-valid').innerText = '0 筆';
+        document.getElementById('c2h-stat-removed').innerText = '0 檔';
+        document.getElementById('c2h-check-all').checked = false;
+
+        fetch(`/api/cold-archives/list?_t=${Date.now()}`)
+            .then(res => res.json())
+            .then(data => {
+                if (data.status !== 'success') {
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">掃描失敗：${data.message}</td></tr>`;
+                    return;
+                }
+
+                coldArchiveItems = data.items || [];
+                if (coldArchiveItems.length === 0) {
+                    const scannedHint = (data.scanned_paths || []).join(' , ');
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center py-5 text-muted">
+                        <i class="bi bi-folder-x fs-2 d-block mb-2"></i>
+                        目前在 [${data.os || 'OS'}] 冷資料目錄下未偵測到任何冷資料檔案
+                        <div class="small mt-1 text-secondary">已掃描路徑：${scannedHint || 'traffic_raw_logs'}</div>
+                    </td></tr>`;
+                    updateColdSelectionStats();
+                    return;
+                }
+
+                const weekdays = ['(日)', '(一)', '(二)', '(三)', '(四)', '(五)', '(六)'];
+                tbody.innerHTML = '';
+
+                coldArchiveItems.forEach(item => {
+                    const [y, m, d] = item.date.split('-').map(Number);
+                    const wk = weekdays[new Date(y, m - 1, d).getDay()];
+                    const files = item.files || [];
+
+                    const hotBadge = item.hot_exists
+                        ? `<span class="badge bg-warning text-dark"><i class="bi bi-exclamation-circle me-1"></i>已有熱檔 (${item.hot_file_count} 檔 / ${formatSizeMB(item.hot_size_mb)})</span>`
+                        : `<span class="badge bg-secondary-subtle text-secondary-emphasis">尚未建立熱資料</span>`;
+
+                    // 1. 主日期列
+                    const tr = document.createElement('tr');
+                    tr.id = `c2h-row-${item.date}`;
+                    tr.style.cursor = 'pointer';
+                    tr.onclick = (e) => {
+                        if (isColdConverting || e.target.type === 'checkbox' || e.target.closest('button')) return;
+                        toggleColdHourDrawer(item.date, true);
+                    };
+
+                    tr.innerHTML = `
+                        <td class="text-center align-middle">
+                            <input class="form-check-input c2h-date-cb" type="checkbox" id="c2h-cb-${item.date}" value="${item.date}" onchange="onDateCheckboxChanged('${item.date}', this.checked)">
+                        </td>
+                        <td class="align-middle fw-bold text-primary">${item.date} <small class="text-muted">${wk}</small></td>
+                        <td class="align-middle"><small class="text-muted">${(item.source_dirs || []).join(', ')}</small></td>
+                        <td class="align-middle text-end">
+                            <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2 font-monospace" id="c2h-expand-btn-${item.date}" onclick="toggleColdHourDrawer('${item.date}', false)" title="點擊展開/收合所有分時冷資料檔案">
+                                <i class="bi bi-folder2-open me-1"></i><span id="c2h-file-cnt-label-${item.date}">${item.file_count} 檔</span> / ${formatSizeMB(item.total_size_mb)}
+                                <i class="bi bi-chevron-down ms-1" id="c2h-chevron-${item.date}"></i>
+                            </button>
+                        </td>
+                        <td class="align-middle">${hotBadge}</td>
+                        <td class="align-middle" id="c2h-status-${item.date}">
+                            <span class="text-muted small">待命</span>
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+
+                    // 2. 可展開的分時檔案抽屜列 (預設全部勾選，支援全選 / 取消全選)
+                    const subTr = document.createElement('tr');
+                    subTr.id = `c2h-subrow-${item.date}`;
+                    subTr.className = 'd-none bg-light';
+
+                    let fileCheckboxesHtml = '';
+                    files.forEach((f, idx) => {
+                        const cbId = `c2h-fcb-${item.date}-${idx}`;
+                        const hotDot = f.hot_exists
+                            ? `<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1" style="font-size:10px;">已有熱檔</span>`
+                            : `<span class="badge bg-light text-muted border ms-1" style="font-size:10px;">未轉</span>`;
+
+                        fileCheckboxesHtml += `
+                            <div class="col-md-3 col-sm-6">
+                                <label class="border rounded bg-white p-1 px-2 d-flex align-items-center justify-content-between shadow-sm" style="cursor: pointer; font-size: 12px;" for="${cbId}" title="${f.file_name}">
+                                    <div class="d-flex align-items-center text-truncate">
+                                        <input class="form-check-input me-2 mt-0 c2h-file-cb c2h-file-cb-${item.date}" type="checkbox" id="${cbId}" value="${f.full_path}" checked onchange="onHourFileCheckboxChanged('${item.date}')">
+                                        <span class="fw-bold text-dark">${f.hour_label}</span>
+                                        ${hotDot}
+                                    </div>
+                                    <span class="text-muted ms-1 flex-shrink-0">${formatSizeMB(f.size_mb)}</span>
+                                </label>
+                            </div>
+                        `;
+                    });
+
+                    subTr.innerHTML = `
+                        <td colspan="6" class="p-2 px-3 border-bottom">
+                            <div class="border rounded bg-white p-2 shadow-sm">
+                                <div class="d-flex align-items-center justify-content-between mb-2 pb-1 border-bottom">
+                                    <div class="small fw-bold text-primary">
+                                        <i class="bi bi-clock-history me-1"></i>${item.date} 分時冷資料檔案清單
+                                        <span class="badge bg-primary ms-1" id="c2h-sub-badge-${item.date}">已選 ${files.length} / ${files.length} 檔</span>
+                                    </div>
+                                    <div class="d-flex gap-1">
+                                        <button type="button" class="btn btn-outline-primary btn-sm py-0 px-2" style="font-size: 11px;" onclick="toggleAllHourFiles('${item.date}', true)">
+                                            <i class="bi bi-check2-all me-1"></i>全選
+                                        </button>
+                                        <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2" style="font-size: 11px;" onclick="toggleAllHourFiles('${item.date}', false)">
+                                            <i class="bi bi-x-lg me-1"></i>取消全選
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="row g-1">
+                                    ${fileCheckboxesHtml}
+                                </div>
+                            </div>
+                        </td>
+                    `;
+                    tbody.appendChild(subTr);
+                });
+
+                updateColdSelectionStats();
+            })
+            .catch(err => {
+                tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">連線異常：${err}</td></tr>`;
+            });
+    }
+
+    // 點擊日期或 XX 檔按鈕展開/收合分時檔案清單
+    function toggleColdHourDrawer(date, autoCheckDate) {
+        if (isColdConverting) return;
+        const subRow = document.getElementById(`c2h-subrow-${date}`);
+        const chevron = document.getElementById(`c2h-chevron-${date}`);
+        if (!subRow) return;
+
+        const isHidden = subRow.classList.contains('d-none');
+        if (isHidden) {
+            subRow.classList.remove('d-none');
+            if (chevron) chevron.className = 'bi bi-chevron-up ms-1';
+            // 若點下日期展開且該日期尚未勾選，自動為其勾選並確保分時檔案預設全選
+            const dateCb = document.getElementById(`c2h-cb-${date}`);
+            if (autoCheckDate && dateCb && !dateCb.checked) {
+                dateCb.checked = true;
+                onDateCheckboxChanged(date, true);
+            }
+        } else {
+            subRow.classList.add('d-none');
+            if (chevron) chevron.className = 'bi bi-chevron-down ms-1';
+        }
+    }
+
+    // 勾選或取消主日期 Checkbox
+    function onDateCheckboxChanged(date, checked) {
+        const fileCbs = document.querySelectorAll(`.c2h-file-cb-${date}`);
+        if (checked) {
+            // 若勾選日期時底下沒有任何檔案被選中，自動全選所有分時檔案
+            const anyChecked = Array.from(fileCbs).some(cb => cb.checked);
+            if (!anyChecked) {
+                fileCbs.forEach(cb => cb.checked = true);
+            }
+        }
+        syncDateBadgeCount(date);
+        updateColdSelectionStats();
+    }
+
+    // 在分時抽屜內點擊「全選」或「取消全選」
+    function toggleAllHourFiles(date, checked) {
+        if (isColdConverting) return;
+        const fileCbs = document.querySelectorAll(`.c2h-file-cb-${date}`);
+        fileCbs.forEach(cb => cb.checked = checked);
+
+        const dateCb = document.getElementById(`c2h-cb-${date}`);
+        if (dateCb) {
+            dateCb.checked = checked;
+        }
+        syncDateBadgeCount(date);
+        updateColdSelectionStats();
+    }
+
+    // 單獨勾選或取消某一個小時檔案
+    function onHourFileCheckboxChanged(date) {
+        const fileCbs = Array.from(document.querySelectorAll(`.c2h-file-cb-${date}`));
+        const checkedCnt = fileCbs.filter(cb => cb.checked).length;
+
+        const dateCb = document.getElementById(`c2h-cb-${date}`);
+        if (dateCb) {
+            dateCb.checked = (checkedCnt > 0);
+        }
+        syncDateBadgeCount(date);
+        updateColdSelectionStats();
+    }
+
+    function syncDateBadgeCount(date) {
+        const fileCbs = Array.from(document.querySelectorAll(`.c2h-file-cb-${date}`));
+        const checkedCnt = fileCbs.filter(cb => cb.checked).length;
+        const totalCnt = fileCbs.length;
+
+        const subBadge = document.getElementById(`c2h-sub-badge-${date}`);
+        if (subBadge) {
+            subBadge.innerText = `已選 ${checkedCnt} / ${totalCnt} 檔`;
+        }
+        const cntLabel = document.getElementById(`c2h-file-cnt-label-${date}`);
+        if (cntLabel) {
+            cntLabel.innerText = (checkedCnt < totalCnt)
+                ? `已選 ${checkedCnt}/${totalCnt} 檔`
+                : `${totalCnt} 檔`;
+        }
+    }
+
+    function selectAllColdDates(checked) {
+        if (isColdConverting) return;
+        document.querySelectorAll('.c2h-date-cb').forEach(cb => {
+            cb.checked = checked;
+            if (checked) {
+                document.querySelectorAll(`.c2h-file-cb-${cb.value}`).forEach(fcb => fcb.checked = true);
+            }
+            syncDateBadgeCount(cb.value);
+        });
+        document.getElementById('c2h-check-all').checked = checked;
+        updateColdSelectionStats();
+    }
+
+    function selectOnlyMissingHotDates() {
+        if (isColdConverting) return;
+        coldArchiveItems.forEach(item => {
+            const cb = document.getElementById(`c2h-cb-${item.date}`);
+            if (cb) {
+                cb.checked = !item.hot_exists;
+                if (!item.hot_exists) {
+                    document.querySelectorAll(`.c2h-file-cb-${item.date}`).forEach(fcb => fcb.checked = true);
+                }
+                syncDateBadgeCount(item.date);
+            }
+        });
+        updateColdSelectionStats();
+    }
+
+    function updateColdSelectionStats() {
+        const checkedDates = Array.from(document.querySelectorAll('.c2h-date-cb:checked')).map(cb => cb.value);
+        let totalFilesSelected = 0;
+        checkedDates.forEach(dt => {
+            totalFilesSelected += document.querySelectorAll(`.c2h-file-cb-${dt}:checked`).length;
+        });
+
+        document.getElementById('c2h-stat-selected').innerText = `${checkedDates.length} 天 (${totalFilesSelected} 檔)`;
+        document.getElementById('c2h-stat-raw').innerText = checkedDates.length > 0 ? '轉換後結算' : '0 筆';
+
+        const startBtn = document.getElementById('c2h-start-btn');
+        startBtn.disabled = (totalFilesSelected === 0 || isColdConverting);
+        startBtn.innerHTML = totalFilesSelected > 0
+            ? `<i class="bi bi-play-fill me-1"></i>開始轉換已選項目 (${checkedDates.length} 天 / ${totalFilesSelected} 檔)`
+            : `<i class="bi bi-play-fill me-1"></i>開始轉換已選日期`;
+
+        const allBoxes = document.querySelectorAll('.c2h-date-cb');
+        document.getElementById('c2h-check-all').checked = (allBoxes.length > 0 && checkedDates.length === allBoxes.length);
+    }
+
+    async function executeSelectedColdToHot() {
+        const targetDates = Array.from(document.querySelectorAll('.c2h-date-cb:checked')).map(cb => cb.value);
+        if (targetDates.length === 0 || isColdConverting) return;
+
+        isColdConverting = true;
+        const startBtn = document.getElementById('c2h-start-btn');
+        const cancelBtn = document.getElementById('c2h-cancel-btn');
+        const closeX = document.getElementById('c2h-close-x');
+        const refreshBtn = document.getElementById('c2h-refresh-btn');
+        const hintEl = document.getElementById('c2h-footer-hint');
+
+        startBtn.disabled = true;
+        cancelBtn.disabled = true;
+        closeX.disabled = true;
+        refreshBtn.disabled = true;
+        document.querySelectorAll('.c2h-date-cb, .c2h-file-cb').forEach(cb => cb.disabled = true);
+
+        let totalRawConverted = 0;
+        let totalValidConverted = 0;
+        let totalRemovedFiles = 0;
+
+        document.getElementById('c2h-stat-raw').innerText = '0 筆';
+        document.getElementById('c2h-stat-valid').innerText = '0 筆';
+        document.getElementById('c2h-stat-removed').innerText = '0 檔';
+
+        for (let i = 0; i < targetDates.length; i++) {
+            const dt = targetDates[i];
+            const selectedFilePaths = Array.from(document.querySelectorAll(`.c2h-file-cb-${dt}:checked`)).map(cb => cb.value);
+            if (selectedFilePaths.length === 0) continue;
+
+            const statusCell = document.getElementById(`c2h-status-${dt}`);
+            hintEl.innerText = `正在轉換第 ${i + 1} / ${targetDates.length} 天 (${dt}，共 ${selectedFilePaths.length} 檔)...`;
+            statusCell.innerHTML = `<span class="badge bg-primary"><span class="spinner-border spinner-border-sm me-1" style="width:10px;height:10px;"></span>轉換 ${selectedFilePaths.length} 檔中...</span>`;
+
+            try {
+                const formData = new URLSearchParams();
+                formData.append('date', dt);
+                formData.append('files', JSON.stringify(selectedFilePaths));
+
+                const res = await fetch('/api/cold-to-hot', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: formData.toString()
+                });
+                const data = await res.json();
+
+                if (data.status === 'success') {
+                    const rawCnt = data.raw_count || 0;
+                    const validCnt = data.valid_count || 0;
+                    const remCnt = data.removed_hot_files || 0;
+
+                    totalRawConverted += rawCnt;
+                    totalValidConverted += validCnt;
+                    totalRemovedFiles += remCnt;
+
+                    document.getElementById('c2h-stat-raw').innerText = `${totalRawConverted.toLocaleString()} 筆`;
+                    document.getElementById('c2h-stat-valid').innerText = `${totalValidConverted.toLocaleString()} 筆`;
+                    document.getElementById('c2h-stat-removed').innerText = `${totalRemovedFiles} 檔`;
+
+                    statusCell.innerHTML = `
+                        <span class="badge bg-success me-1">完成 (${data.duration})</span>
+                        <span class="small fw-bold text-dark">原始: ${rawCnt.toLocaleString()} 筆 ➔ 有效: <span class="text-success">${validCnt.toLocaleString()} 筆</span></span>
+                        <small class="text-muted ms-1">(清 ${remCnt} 舊檔)</small>
+                    `;
+                } else {
+                    statusCell.innerHTML = `<span class="badge bg-danger me-1">失敗</span><small class="text-danger">${data.message}</small>`;
+                }
+            } catch (err) {
+                statusCell.innerHTML = `<span class="badge bg-danger me-1">異常</span><small class="text-danger">${err}</small>`;
+            }
+        }
+
+        isColdConverting = false;
+        cancelBtn.disabled = false;
+        closeX.disabled = false;
+        refreshBtn.disabled = false;
+        document.querySelectorAll('.c2h-date-cb, .c2h-file-cb').forEach(cb => cb.disabled = false);
+        hintEl.innerHTML = `<span class="text-success fw-bold"><i class="bi bi-check-circle-fill me-1"></i>批次轉換結束！共處理 ${targetDates.length} 天</span>`;
+        updateColdSelectionStats();
+        queryAuditLogs(1);
+    }
+	
+    // 🌟 新增：手動觸發冷資料轉熱資料
+    function triggerColdToHot() {
+        const currentDate = document.getElementById('audit-date').value || todayStr;
+        const choiceDate = prompt(`【⚠️ 冷資料轉熱資料維護】\n系統將會讀取 raw_archives/ 下的冷資料，重新萃取出熱資料，並與現有 traffic_logs 中的紀錄進行全量去重融合 (同時自動清除所有零碎檔)。\n\n請輸入要轉換的日期 (格式 YYYY-MM-DD)：`, currentDate);
+        
+        if (choiceDate === null || choiceDate.trim() === '') return;
+        
+        if (!confirm(`確定要對 ${choiceDate} 執行冷轉熱融合嗎？這可能需要數十秒時間。`)) return;
+
+        // 啟動遮罩或按鈕鎖定 (可選，此處使用簡單提示)
+        const btn = document.querySelector('button[onclick="triggerColdToHot()"]');
+        const orgHtml = btn.innerHTML;
+        btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>轉換中...`;
+        btn.disabled = true;
+
+        const formData = new URLSearchParams();
+        formData.append("date", choiceDate);
+
+        fetch('/api/cold-to-hot', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: formData.toString()
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert(`✅ 轉換成功！\n${data.message}\n總耗時：${data.duration}\n最終產生檔案：${data.file}`);
+                queryAuditLogs(1);
+            } else {
+                alert(`❌ 轉換失敗：\n${data.message}`);
+            }
+        })
+        .catch(err => alert("網路請求異常: " + err))
+        .finally(() => {
+            btn.innerHTML = orgHtml;
+            btn.disabled = false;
+        });
+    }
+
+    function triggerReconcile() {
+        const choice = prompt("請選擇自動對賬回溯範圍：\n【0】今日 00:00 至今全量盤點補齊\n【2】最近 2 小時 (覆蓋上一小時整點)\n【4】最近 4 小時\n\n請輸入數字 (預設 0)：", "0");
+        if (choice === null) return;
+        const hours = parseInt(choice);
+        const validHours = isNaN(hours) ? 0 : hours;
+
+        fetch('/api/audit/reconcile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `hours=${validHours}`
+        })
+        .then(res => res.json())
+        .then(data => {
+            alert(data.message);
+            setTimeout(() => queryAuditLogs(1), 1000);
+        })
+        .catch(err => alert("對賬請求發送失敗: " + err));
+    }
+
+    function purgeEntireQueue() {
+        if (!confirm("⚠️ 確定要【清空所有排隊中的切片任務】嗎？\n清空後，當前尚未執行的佇列將全數取消清空。")) return;
+
+        fetch('/api/audit/purge-queue', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                alert(data.message);
+                queryAuditLogs(1);
+            })
+            .catch(err => alert("清空請求失敗: " + err));
+    }
+
+    // 🌟 容量超過 1024MB 自動以 GB 呈現
+    function formatSizeMB(mb) {
+        if (!mb || mb === 0) return '0.0 MB';
+        if (mb >= 1024) {
+            return (mb / 1024).toFixed(2) + ' GB';
+        }
+        return mb.toFixed(1) + ' MB';
+    }
+
+    // 🌟 耗時超過 60 秒自動以分秒呈現
+    function formatDuration(sec) {
+        if (!sec || sec === 0) return '0.0s';
+        if (sec >= 60) {
+            const m = Math.floor(sec / 60);
+            const s = (sec % 60).toFixed(1);
+            return `${m}m ${s}s`;
+        }
+        return sec.toFixed(1) + 's';
+    }
+
+    // 🌟 手動加入重試排程
+    function retryAuditTask(date, slot, model, category) {
+        if (!confirm(`確定要將 ${date} ${slot} 的任務重新排入佇列嗎？`)) return;
+
+        const formData = new URLSearchParams();
+        formData.append("date", date);
+        formData.append("slot", slot);
+        formData.append("model", model);
+        formData.append("category", category);
+
+        fetch('/api/audit/retry', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: formData.toString()
+        }).then(res => res.json())
+          .then(data => {
+              if (data.status === 'success') {
+                  queryAuditLogs(currentAuditPage);
+              } else {
+                  alert("重試失敗: " + data.message);
+              }
+          }).catch(err => alert("網路請求異常: " + err));
+    }
+
+    // 🌟 手動停止重試
+    function stopRetryAuditTask(date, slot, model, category) {
+        if (!confirm(`確定要停止 ${date} ${slot} 的重試任務嗎？`)) return;
+
+        const formData = new URLSearchParams();
+        formData.append("date", date);
+        formData.append("slot", slot);
+        formData.append("model", model);
+        formData.append("category", category);
+
+        fetch('/api/audit/stop-retry', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: formData.toString()
+        }).then(res => res.json())
+          .then(data => {
+              if (data.status === 'success') {
+                  queryAuditLogs(currentAuditPage);
+              } else {
+                  alert("停止失敗: " + data.message);
+              }
+          }).catch(err => alert("網路請求異常: " + err));
+    }
+
+    function getLocalDateString() {
+        const now = new Date();
+        return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    }
+
+    function updateAuditWeekday(dateVal) {
+        if (!dateVal) return;
+        const [y, m, d] = dateVal.split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        const weekdays = ['(日)', '(一)', '(二)', '(三)', '(四)', '(五)', '(六)'];
+        document.getElementById('audit-weekday').innerText = weekdays[dt.getDay()];
+    }
+
+    function changeAuditDate(delta) {
+        const input = document.getElementById('audit-date');
+        const [y, m, d] = (input.value || todayStr).split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        dt.setDate(dt.getDate() + delta);
+        input.value = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+        updateAuditWeekday(input.value);
+        queryAuditLogs(1);
+    }
+
+    const todayStr = getLocalDateString();
+    let currentAuditPage = 1;
+    let isFailedFilterActive = false;
+
+    function toggleFailedFilter() {
+        isFailedFilterActive = !isFailedFilterActive;
+        const card = document.getElementById('card-failed-filter');
+        const select = document.getElementById('audit-status');
+        if (isFailedFilterActive) {
+            card.classList.add('card-filter-active');
+            select.value = 'FAILED';
+        } else {
+            card.classList.remove('card-filter-active');
+            select.value = 'all';
+        }
+        queryAuditLogs(1);
+    }
+
+    function resetAuditFilters() {
+        isFailedFilterActive = false;
+        document.getElementById('card-failed-filter').classList.remove('card-filter-active');
+        document.getElementById('audit-status').value = 'all';
+        document.getElementById('audit-model').value = 'all';
+        document.getElementById('audit-category').value = 'all';
+        document.getElementById('audit-keyword').value = '';
+        queryAuditLogs(1);
+    }
+
+    function queryAuditLogs(page = 1) {
+        currentAuditPage = page;
+        const date = document.getElementById('audit-date').value || todayStr;
+        const status = document.getElementById('audit-status').value;
+        const model = document.getElementById('audit-model').value;
+        const category = document.getElementById('audit-category').value;
+        const keyword = document.getElementById('audit-keyword').value.trim();
+        const perPage = document.getElementById('audit-per-page').value;
+
+        const tbody = document.getElementById('audit-table-body');
+        tbody.innerHTML = '<tr><td colspan="13" class="text-center py-4 text-primary"><div class="spinner-border spinner-border-sm me-2"></div>檢索 Parquet 稽核湖倉中...</td></tr>';
+
+        const url = `/api/audit-query?date=${date}&status=${status}&model=${model}&category=${encodeURIComponent(category)}&keyword=${encodeURIComponent(keyword)}&page=${page}&per_page=${perPage}&_t=${Date.now()}`;
+
+        fetch(url)
+            .then(res => res.json())
+            .then(data => {
+                if (data.status !== 'success') {
+                    tbody.innerHTML = `<tr><td colspan="13" class="text-center text-danger py-4">查詢失敗：${data.message}</td></tr>`;
+                    return;
+                }
+
+                document.getElementById('metric-audit-total').innerText = `${(data.total_events || 0).toLocaleString()} 筆`;
+                document.getElementById('metric-audit-success').innerText = `${(data.success_cnt || 0).toLocaleString()} 筆`;
+                document.getElementById('metric-audit-failed').innerText = `${(data.failed_cnt || 0).toLocaleString()} 筆`;
+                document.getElementById('metric-audit-rows').innerText = `${(data.total_rows || 0).toLocaleString()} 筆`;
+                document.getElementById('metric-audit-mb').innerText = formatSizeMB(data.total_mb || 0);
+
+                document.getElementById('audit-count-badge').innerText = `共 ${(data.total_events || 0).toLocaleString()} 筆 (第 ${data.current_page} / ${data.total_pages} 頁)`;
+
+                const logs = data.logs || [];
+                const summary = document.getElementById('audit-pagination-summary');
+                if (logs.length === 0) {
+                    summary.innerText = '顯示第 0 筆，共 0 筆';
+                    tbody.innerHTML = '<tr><td colspan="13" class="text-center py-5 text-muted"><i class="bi bi-inbox fs-2 d-block mb-2 text-secondary"></i>當日查無稽核紀錄</td></tr>';
+                    renderAuditPagination(1, 1);
+                    return;
+                }
+
+                const startIdx = (data.current_page - 1) * perPage + 1;
+                const endIdx = Math.min(startIdx + logs.length - 1, data.total_events);
+                summary.innerText = `顯示第 ${startIdx} - ${endIdx} 筆，共 ${data.total_events} 筆`;
+
+                tbody.innerHTML = '';
+                logs.forEach(row => {
+                    const tr = document.createElement('tr');
+                    const st = (row.status || '').toUpperCase();
+                    const isFailed = (st === 'FAILED');
+                    const isRunning = (st === 'RUNNING');
+                    const isQueued = (st === 'QUEUED');
+                    const isCancelled = (st === 'CANCELLED' || row.is_cancelled);
+                    const isActivelyWaiting = (row.is_retrying && isQueued);
+                    const retryCount = row.retry_count || 0;
+
+                    if (isFailed) tr.className = 'row-drop-deny';
+
+                    let statusBadge = '<span class="badge bg-success">SUCCESS</span>';
+                    if (isFailed) {
+                        statusBadge = `<span class="badge bg-danger">FAILED</span>${retryCount > 0 ? `<span class="badge bg-secondary font-monospace ms-1" title="重試次數">${retryCount}</span>` : ''}`;
+                    } else if (isRunning) {
+                        statusBadge = `<span class="badge bg-primary text-white"><span class="spinner-border spinner-border-sm me-1" style="width: 10px; height: 10px;"></span>執行中</span>${retryCount > 0 ? `<span class="badge bg-secondary font-monospace ms-1">${retryCount}</span>` : ''}`;
+                    } else if (isQueued) {
+                        if (isActivelyWaiting) {
+                            statusBadge = `<span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>排隊中</span>${retryCount > 0 ? `<span class="badge bg-secondary font-monospace ms-1">${retryCount}</span>` : ''}`;
+                        } else {
+                            statusBadge = `<span class="badge bg-light text-muted border">排入佇列</span>`;
+                        }
+                    } else if (isCancelled) {
+                        statusBadge = `<span class="badge bg-secondary">已停止</span>${retryCount > 0 ? `<span class="badge bg-dark font-monospace ms-1">${retryCount}</span>` : ''}`;
+                    }
+
+                    let actionHtml = '';
+                    if (isActivelyWaiting) {
+                        actionHtml = `
+                            <div class="mt-1 d-flex align-items-center gap-1">
+                                <button class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size: 11px;" onclick="stopRetryAuditTask('${row.target_date}', '${row.target_slot}', '${row.fw_model}', '${row.category}')">
+                                    <i class="bi bi-stop-circle me-1"></i>停止重試
+                                </button>
+                            </div>
+                        `;
+                    } else if (isFailed) {
+                        actionHtml = `
+                            <div class="mt-1 d-flex align-items-center gap-1">
+                                <button class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size: 11px;" onclick="retryAuditTask('${row.target_date}', '${row.target_slot}', '${row.fw_model}', '${row.category}')">
+                                    <i class="bi bi-arrow-repeat me-1"></i>重試 ${retryCount > 0 ? `<span class="badge bg-danger text-white ms-1 font-monospace">${retryCount}</span>` : ''}
+                                </button>
+                            </div>
+                        `;
+                    }
+
+                    tr.innerHTML = `
+                        <td class="text-primary">${row.timestamp}</td>
+                        <td><span class="badge bg-light text-dark border">${row.fw_model}</span></td>
+                        <td><span class="badge bg-secondary-subtle text-secondary-emphasis">${row.category}</span></td>
+                        <td>${row.log_type}</td>
+                        <td class="fw-bold">${row.target_slot || '-'}</td>
+                        <td>${statusBadge}</td>
+                        <td class="text-end fw-bold font-monospace">${(row.record_count || 0).toLocaleString()}</td>
+                        <td class="text-end font-monospace">${formatSizeMB(row.file_size_mb)}</td>
+                        <td class="text-end font-monospace">${formatDuration(row.duration_sec)}</td>
+                        <td title="${row.output_file || '-'}">${row.output_file || '-'}</td>
+                        <td title="${row.details || '-'}">${row.details || '-'}</td>
+                        <td class="${isFailed ? 'text-danger' : ''}" title="${row.error_reason || '-'}">
+                            <div class="text-truncate" style="max-width: 220px;">${row.error_reason || '-'}</div>
+                            ${actionHtml}
+                        </td>
+                        <td class="text-muted"><small>${row.operator || '-'}</small></td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+
+                renderAuditPagination(data.current_page, data.total_pages);
+            })
+            .catch(err => {
+                tbody.innerHTML = `<tr><td colspan="13" class="text-center text-danger py-4">網路連線異常：${err}</td></tr>`;
+            });
+    }
+
+    function renderAuditPagination(current, total) {
+        const ul = document.getElementById('audit-pagination-ul');
+        ul.innerHTML = '';
+        if (!total || total <= 1) return;
+
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryAuditLogs(1); return false;"><i class="bi bi-chevron-double-left"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryAuditLogs(${current - 1}); return false;"><i class="bi bi-chevron-left"></i></a></li>`;
+
+        const maxV = 7;
+        let s = Math.max(1, current - Math.floor(maxV / 2));
+        let e = s + maxV - 1;
+        if (e > total) { e = total; s = Math.max(1, e - maxV + 1); }
+
+        for (let i = s; i <= e; i++) {
+            ul.innerHTML += `<li class="page-item ${i === current ? 'active' : ''}"><a class="page-link" href="#" onclick="queryAuditLogs(${i}); return false;">${i}</a></li>`;
+        }
+
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryAuditLogs(${current + 1}); return false;"><i class="bi bi-chevron-right"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="queryAuditLogs(${total}); return false;"><i class="bi bi-chevron-double-right"></i></a></li>`;
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const input = document.getElementById('audit-date');
+        input.value = todayStr;
+        updateAuditWeekday(todayStr);
+        input.addEventListener('change', () => {
+            updateAuditWeekday(input.value);
+            queryAuditLogs(1);
+        });
+        queryAuditLogs(1);
+    });
+</script>
+{% endblock %}

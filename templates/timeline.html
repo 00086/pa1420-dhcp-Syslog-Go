@@ -1,0 +1,369 @@
+{% extends "base.html" %}
+
+{% block title %}{{ fw_model }} 單一主機 360° 全景鑑識時序軸{% endblock %}
+
+{% block extra_styles %}
+.timeline-container {
+    position: relative;
+    padding-left: 2.2rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+.timeline-container::before {
+    content: '';
+    position: absolute;
+    left: 1.1rem;
+    top: 15px;
+    bottom: 15px;
+    width: 3px;
+    background: linear-gradient(180deg, #3b82f6 0%, #cbd5e1 100%);
+    border-radius: 2px;
+}
+.timeline-item {
+    position: relative;
+    margin-bottom: 1rem;
+    transition: all 0.2s ease-in-out;
+}
+.timeline-item:hover {
+    transform: translateX(4px);
+}
+.timeline-icon-box {
+    position: absolute;
+    left: -2.2rem;
+    top: 6px;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 15px;
+    box-shadow: 0 0 0 4px #f8fafc;
+    z-index: 2;
+}
+
+.icon-system  { background-color: #8b5cf6; }
+.icon-threat  { background-color: #ef4444; }
+.icon-config  { background-color: #10b981; }
+.icon-traffic { background-color: #0ea5e9; }
+
+.filter-pill {
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.2s;
+}
+.filter-pill.active {
+    font-weight: bold;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+}
+{% endblock %}
+
+{% block content %}
+<!-- 查詢控制列 -->
+<div class="row mb-2 flex-shrink-0">
+    <div class="col-12">
+        <div class="card shadow-sm border-0 bg-white">
+            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <span class="fw-bold text-dark"><i class="bi bi-crosshair text-danger me-1"></i>鑑識目標：</span>
+                    
+                    <div class="input-group input-group-sm" style="width: auto;">
+                        <input type="text" class="form-control form-control-sm font-monospace fw-bold text-primary" placeholder="輸入 IP (如 192.168.1.1)" style="width: 200px;" id="investigate-ip" onkeydown="if(event.key==='Enter') startInvestigation()">
+                    </div>
+
+                    <!-- 日期選擇器與星期標籤 (1:1 對齊 traffic.html) -->
+                    <div class="input-group input-group-sm flex-nowrap" style="width: auto;">
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeTimelineDate(-1)" title="前一日"><i class="bi bi-chevron-left"></i></button>
+                        <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold" style="width: 125px; cursor: pointer;" id="timeline-date" onclick="this.showPicker()">
+                        <span class="input-group-text bg-white text-primary fw-bold px-2 font-monospace" id="timeline-weekday" style="font-size: 13px;">(五)</span>
+                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeTimelineDate(1)" title="後一日"><i class="bi bi-chevron-right"></i></button>
+                    </div>
+
+                    <button class="btn btn-primary btn-sm px-3 shadow-sm fw-bold" onclick="startInvestigation()">
+                        <i class="bi bi-search me-1"></i>開始全景鑑識
+                    </button>
+                </div>
+
+                <!-- 分類快速過濾按鈕群 -->
+                <div class="d-flex align-items-center gap-1" id="filter-pills-group">
+                    <span class="badge bg-dark filter-pill active py-2 px-3" onclick="filterTimeline('all', this)">全部 All</span>
+                    <span class="badge bg-danger filter-pill py-2 px-2" onclick="filterTimeline('threat', this)"><i class="bi bi-shield-slash-fill me-1"></i>威脅</span>
+                    <span class="badge bg-info text-dark filter-pill py-2 px-2" onclick="filterTimeline('traffic', this)"><i class="bi bi-arrow-left-right me-1"></i>連線/阻擋</span>
+                    <span class="badge filter-pill py-2 px-2" style="background-color: #8b5cf6; color: white;" onclick="filterTimeline('system', this)"><i class="bi bi-router-fill me-1"></i>系統/DHCP</span>
+                    <span class="badge bg-success filter-pill py-2 px-2" onclick="filterTimeline('config', this)"><i class="bi bi-gear-fill me-1"></i>組態變更</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 主機畫像指標卡片 -->
+<div class="row g-2 mb-2 flex-shrink-0" id="profile-cards">
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm p-2 bg-white">
+            <small class="text-muted"><i class="bi bi-laptop me-1"></i>主機名稱 (Hostname)</small>
+            <h5 class="mb-0 fw-bold font-monospace text-primary text-truncate" id="profile-hostname">--</h5>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card border-0 shadow-sm p-2 bg-white">
+            <small class="text-muted"><i class="bi bi-upc-scan me-1"></i>實體位址 (MAC)</small>
+            <h5 class="mb-0 fw-bold font-monospace text-secondary text-truncate" id="profile-mac">--</h5>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">全日關聯事件</small>
+            <h5 class="mb-0 fw-bold font-monospace text-dark" id="profile-total">0 筆</h5>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">資安威脅觸發</small>
+            <h5 class="mb-0 fw-bold font-monospace text-danger" id="profile-threats">0 次</h5>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+            <small class="text-muted">防火牆主動阻擋</small>
+            <h5 class="mb-0 fw-bold font-monospace text-warning" id="profile-blocks">0 次</h5>
+        </div>
+    </div>
+</div>
+
+<!-- 時序軸主卡片 (對齊 traffic.html 架構) -->
+<div class="row flex-grow-1 overflow-hidden">
+    <div class="col-12 h-100">
+        <div class="card shadow-sm h-100 d-flex flex-column border-0 bg-white">
+            <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <span class="fw-bold small"><i class="bi bi-clock-history text-primary me-1"></i>主機全景鑑識生命週期時序軸 (依秒數時間倒序呈現)</span>
+                <span class="badge bg-secondary font-monospace" id="timeline-count-badge">共 0 筆</span>
+            </div>
+            
+            <div class="card-body p-3 overflow-y-auto flex-grow-1" id="timeline-scroll-container">
+                <div id="timeline-box">
+                    <div class="text-center py-5 text-muted">
+                        <i class="bi bi-fingerprint fs-1 text-secondary mb-3 d-block"></i>
+                        請於上方輸入欲調查的主機 IP 位址並點擊「開始全景鑑識」。
+                    </div>
+                </div>
+            </div>
+
+            <!-- 卡片頁尾分頁列 (每頁 25 筆) -->
+            <div class="card-footer bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
+                <span class="small text-muted"><i class="bi bi-info-circle me-1"></i>全景鑑識時序軸；每頁固定呈現 25 筆事件。</span>
+                <nav><ul class="pagination pagination-sm mb-0" id="timeline-pagination-ul"></ul></nav>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let globalEvents = [];
+    let currentFilter = 'all';
+    let currentTimelinePage = 1;
+    const perPage = 25;
+
+    function getLocalDateString() {
+        const now = new Date();
+        const y = now.getFullYear();
+        const m = String(now.getMonth() + 1).padStart(2, '0');
+        const d = String(now.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+    }
+
+    function updateTimelineWeekday(dateVal) {
+        if (!dateVal) return;
+        const [y, m, d] = dateVal.split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        const weekdays = ['(日)', '(一)', '(二)', '(三)', '(四)', '(五)', '(六)'];
+        const el = document.getElementById('timeline-weekday');
+        if (el) el.innerText = weekdays[dt.getDay()];
+    }
+
+    function changeTimelineDate(delta) {
+        const dateInput = document.getElementById('timeline-date');
+        let curVal = dateInput.value || getLocalDateString();
+        const [y, m, d] = curVal.split('-').map(Number);
+        const dt = new Date(y, m - 1, d);
+        dt.setDate(dt.getDate() + delta);
+
+        const newY = dt.getFullYear();
+        const newM = String(dt.getMonth() + 1).padStart(2, '0');
+        const newD = String(dt.getDate()).padStart(2, '0');
+        dateInput.value = `${newY}-${newM}-${newD}`;
+
+        updateTimelineWeekday(dateInput.value);
+        if (document.getElementById('investigate-ip').value.trim()) {
+            startInvestigation();
+        }
+    }
+
+    function startInvestigation() {
+        const ipInput = document.getElementById('investigate-ip');
+        const dateInput = document.getElementById('timeline-date');
+        const ip = ipInput.value.trim();
+        let date = dateInput.value.trim();
+
+        if (!ip) {
+            alert('請輸入欲鑑識的主機 IP 位址！');
+            ipInput.focus();
+            return;
+        }
+
+        // 若日期欄位為空，自動設定為今日
+        if (!date) {
+            date = getLocalDateString();
+            dateInput.value = date;
+            updateTimelineWeekday(date);
+        }
+
+        const box = document.getElementById('timeline-box');
+        box.innerHTML = '<div class="text-center py-5 text-primary"><div class="spinner-border mb-3"></div><div class="fw-bold">正在透過 DuckDB 引擎併發檢索四大湖倉...</div></div>';
+
+        fetch(`/api/host-timeline?ip=${encodeURIComponent(ip)}&date=${date}&_t=${Date.now()}`)
+            .then(res => res.json())
+            .then(res => {
+                if (res.status !== 'success') {
+                    box.innerHTML = `<div class="alert alert-danger m-3">${res.message}</div>`;
+                    return;
+                }
+
+                const d = res.data;
+                document.getElementById('profile-hostname').innerText = d.hostname || '-';
+                document.getElementById('profile-mac').innerText = d.mac || '-';
+                document.getElementById('profile-total').innerText = `${d.total_events} 筆`;
+                document.getElementById('profile-threats').innerText = `${d.threat_count} 次`;
+                document.getElementById('profile-blocks').innerText = `${d.block_count} 次`;
+
+                globalEvents = d.events || [];
+                currentTimelinePage = 1;
+                applyFilterAndRender();
+            })
+            .catch(err => {
+                box.innerHTML = `<div class="alert alert-danger m-3">連線異常: ${err}</div>`;
+            });
+    }
+
+    function filterTimeline(cat, elem) {
+        currentFilter = cat;
+        currentTimelinePage = 1;
+        document.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));
+        if (elem) elem.classList.add('active');
+        applyFilterAndRender();
+    }
+
+    function gotoTimelinePage(page) {
+        currentTimelinePage = page;
+        applyFilterAndRender();
+        const scrollElem = document.getElementById('timeline-scroll-container');
+        if (scrollElem) scrollElem.scrollTop = 0;
+    }
+
+    function applyFilterAndRender() {
+        const box = document.getElementById('timeline-box');
+        const badge = document.getElementById('timeline-count-badge');
+
+        if (!globalEvents || globalEvents.length === 0) {
+            box.innerHTML = '<div class="text-center py-5 text-muted"><i class="bi bi-inbox fs-2 d-block mb-2"></i>該主機於指定日期無任何日誌軌跡。</div>';
+            badge.innerText = '共 0 筆';
+            renderTimelinePagination(1, 1);
+            return;
+        }
+
+        const filtered = globalEvents.filter(e => {
+            if (currentFilter === 'all') return true;
+            return e.category === currentFilter;
+        });
+
+        const totalItems = filtered.length;
+        const totalPages = Math.ceil(totalItems / perPage) || 1;
+        if (currentTimelinePage > totalPages) currentTimelinePage = totalPages;
+
+        badge.innerText = `共 ${totalItems.toLocaleString()} 筆 (頁次 ${currentTimelinePage} / ${totalPages})`;
+
+        if (totalItems === 0) {
+            box.innerHTML = '<div class="text-center py-5 text-muted">此分類條件下無相符事件。</div>';
+            renderTimelinePagination(1, 1);
+            return;
+        }
+
+        const startIndex = (currentTimelinePage - 1) * perPage;
+        const pageItems = filtered.slice(startIndex, startIndex + perPage);
+
+        let html = '<div class="timeline-container">';
+        pageItems.forEach(e => {
+            const borderClass = e.level === 'danger' ? 'border-danger border-2' : (e.level === 'warning' ? 'border-warning' : 'border-light');
+            const titleColor = e.level === 'danger' ? 'text-danger' : (e.level === 'warning' ? 'text-warning-emphasis' : (e.category === 'config' ? 'text-success' : 'text-primary'));
+
+            html += `
+                <div class="timeline-item">
+                    <div class="timeline-icon-box icon-${e.category}">
+                        <i class="bi ${e.icon}"></i>
+                    </div>
+                    <div class="card shadow-sm ${borderClass} bg-white">
+                        <div class="card-body py-2 px-3">
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <h6 class="mb-0 fw-bold ${titleColor}">${e.title}</h6>
+                                <span class="badge bg-light text-dark font-monospace border">${e.timestamp}</span>
+                            </div>
+                            <p class="mb-0 text-secondary font-monospace small">${e.description}</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        });
+        html += '</div>';
+        box.innerHTML = html;
+
+        renderTimelinePagination(currentTimelinePage, totalPages);
+    }
+
+    function renderTimelinePagination(current, total) {
+        const ul = document.getElementById('timeline-pagination-ul');
+        ul.innerHTML = '';
+        if (!total || total <= 1) return;
+
+        const maxVisible = 10;
+        let startPage = Math.max(1, current - Math.floor(maxVisible / 2));
+        let endPage = startPage + maxVisible - 1;
+        if (endPage > total) { endPage = total; startPage = Math.max(1, endPage - maxVisible + 1); }
+
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="gotoTimelinePage(1); return false;"><i class="bi bi-chevron-double-left"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === 1 ? 'disabled' : ''}"><a class="page-link" href="#" onclick="gotoTimelinePage(${current - 1}); return false;"><i class="bi bi-chevron-left"></i></a></li>`;
+
+        for (let i = startPage; i <= endPage; i++) {
+            ul.innerHTML += `<li class="page-item ${i === current ? 'active' : ''}"><a class="page-link" href="#" onclick="gotoTimelinePage(${i}); return false;">${i}</a></li>`;
+        }
+
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="gotoTimelinePage(${current + 1}); return false;"><i class="bi bi-chevron-right"></i></a></li>`;
+        ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="gotoTimelinePage(${total}); return false;"><i class="bi bi-chevron-double-right"></i></a></li>`;
+    }
+
+    // 🌟 在 DOMContentLoaded 內部百分之百確保日期載入
+    document.addEventListener('DOMContentLoaded', () => {
+        const dateInput = document.getElementById('timeline-date');
+        const defaultDate = getLocalDateString();
+        dateInput.value = defaultDate;
+        updateTimelineWeekday(defaultDate);
+
+        dateInput.addEventListener('change', () => {
+            updateTimelineWeekday(dateInput.value);
+            if (document.getElementById('investigate-ip').value.trim()) {
+                startInvestigation();
+            }
+        });
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const queryIP = urlParams.get('ip');
+        if (queryIP) {
+            document.getElementById('investigate-ip').value = queryIP;
+            startInvestigation();
+        }
+    });
+</script>
+{% endblock %}
+

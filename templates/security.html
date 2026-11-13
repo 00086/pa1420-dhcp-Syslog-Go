@@ -1,11 +1,8 @@
 {% extends "base.html" %}
 
-{% block title %}PA-1420 流量資安預警與威脅防禦中心{% endblock %}
+{% block title %}{{ fw_model }} 流量資安預警與威脅防禦中心{% endblock %}
 
 {% block extra_styles %}
-    /* ========================================================= */
-    /* 🌞 目前預設：標準淺色模式 (Light Theme)                   */
-    /* ========================================================= */
     .flow-sec-container {
         display: flex;
         flex-direction: column;
@@ -38,16 +35,21 @@
     .card-clickable:hover { transform: translateY(-3px); box-shadow: 0 6px 15px rgba(0,0,0,0.08) !important; }
     .card-active { box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.4) !important; filter: brightness(0.97); }
 
-    /* ========================================================= */
-    /* 🌙 原本深色模式 CSS (完整保留備查，待日後切換功能使用)   */
-    /* ========================================================= */
-    /*
-    .dark-theme .card-sec { background-color: #2d3748; border: 1px solid #4a5568; }
-    .dark-theme .sec-header { background-color: #2b0b0e; border-bottom: 1px solid #742a2a; color: #feb2b2; }
-    .dark-theme .table-sec th { background-color: #1a202c !important; color: #a0aec0; border-color: #4a5568; }
-    .dark-theme .table-sec td { border-color: #4a5568; }
-    .dark-theme .card-active { box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.4) !important; filter: brightness(1.2); }
-    */
+    /* 🌟 1:1 對齊流量檢索之點狀底線與懸停手勢效果 */
+    .clickable-link { 
+        cursor: pointer !important; 
+        text-decoration: underline !important; 
+        text-decoration-style: dotted !important; 
+        text-underline-offset: 3px; 
+        transition: 0.15s; 
+    }
+    .clickable-link:hover { 
+        color: #0d6efd !important; 
+        text-decoration-style: solid !important; 
+        background-color: rgba(13, 110, 253, 0.08); 
+        padding: 1px 4px; 
+        border-radius: 4px; 
+    }
 {% endblock %}
 
 {% block content %}
@@ -58,11 +60,10 @@
         <h5 class="m-0 text-danger fw-bold">
             <i class="bi bi-shield-slash-fill me-2"></i>Palo Alto 流量資安預警與重大威脅防禦中心
         </h5>
-        <<div class="d-flex gap-2">
+        <div class="d-flex gap-2">
             <button class="btn btn-sm btn-outline-info fw-bold shadow-sm" id="btnMaskIp" onclick="toggleIpMask()">
                 <i class="bi bi-eye-slash me-1"></i>隱藏內網 IP
             </button>
-            <!-- 🌟 新增：預警閥值設定按鈕 -->
             <button class="btn btn-sm btn-outline-warning text-dark fw-bold shadow-sm" onclick="openSecuritySettingsModal()" title="設定 6 大威脅分析靈敏度閥值">
                 <i class="bi bi-sliders me-1"></i>預警閥值設定
             </button>
@@ -75,7 +76,7 @@
         </div>
     </div>
 
-    <!-- 威脅分類小卡 (淺色白底背景)[cite: 13, 26] -->
+    <!-- 威脅分類小卡 -->
     <div class="row g-2 mb-2 flex-shrink-0">
         <div class="col-md-3">
             <div id="cardCRITICAL" class="card card-sec p-3 border-start border-4 border-danger card-clickable shadow-sm bg-white" onclick="toggleFilter('CRITICAL')" title="點擊過濾：僅顯示危急事件">
@@ -123,7 +124,7 @@
         </div>
     </div>
 
-    <!-- 威脅事件表格區塊 (改為淺色質感白底表格)[cite: 26] -->
+    <!-- 威脅事件表格區塊 -->
     <div class="card card-sec shadow flex-grow-1 d-flex flex-column bg-white border" style="min-height: 0;">
         <div class="sec-header d-flex justify-content-between align-items-center py-2 px-3 flex-shrink-0">
             <span class="fs-6" id="alertsTitle"><i class="bi bi-list-stars me-2"></i>即時資安威脅監測紀錄</span>
@@ -149,7 +150,7 @@
     </div>
 </div>
 
-<!-- ================= 彈出視窗：外部 IP 攻擊 Port 明細 (淺色白底) ================= -->
+<!-- ================= 彈出視窗：外部 IP 攻擊 Port 明細 ================= -->
 <div class="modal fade" id="singleIpDetailsModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content bg-white text-dark border-0 shadow-lg">
@@ -192,39 +193,31 @@
             </div>
             <div class="modal-body p-3">
                 <div class="row g-3">
-                    <!-- 第 1 項 -->
                     <div class="col-md-6">
                         <label class="form-label small fw-bold text-primary mb-1">1. 分析時間範圍視窗 (最近幾分鐘)</label>
                         <input type="number" id="setting_window_mins" class="form-control form-control-sm font-monospace" min="1" max="60" placeholder="5">
                         <small class="text-secondary d-block" style="font-size: 11.5px;">預警引擎分析最近 X 分鐘內的 PA 流量日誌特徵。</small>
                     </div>
-                    <!-- 第 2 項 -->
                     <div class="col-md-6">
                         <label class="form-label small fw-bold text-primary mb-1">2. Port Scan 掃描閥值 (Port 數)</label>
                         <input type="number" id="setting_port_scan" class="form-control form-control-sm font-monospace" min="5" max="1000" placeholder="50">
                         <small class="text-secondary d-block" style="font-size: 11.5px;">連線超過此數量的不同 Port 即觸發探測預警。</small>
                     </div>
-
-                    <!-- 第 3 項 -->
                     <div class="col-md-6">
                         <label class="form-label small fw-bold text-danger mb-1">3. DDoS 殭屍網路洪泛閥值 (MB)</label>
                         <input type="number" id="setting_ddos_mb" class="form-control form-control-sm font-monospace" min="10" max="10000" placeholder="300">
                         <small class="text-secondary d-block" style="font-size: 11.5px;">超過 10 個外網來源且流量達此 MB 數即觸發。</small>
                     </div>
-                    <!-- 第 4 項 -->
                     <div class="col-md-6">
                         <label class="form-label small fw-bold text-warning-emphasis mb-1">4. 密碼暴力破解閥值 (連線次數)</label>
                         <input type="number" id="setting_brute_force" class="form-control form-control-sm font-monospace" min="5" max="500" placeholder="30">
                         <small class="text-secondary d-block" style="font-size: 11.5px;">對 22/3389/445 高頻嘗試次數超過此門檻即觸發。</small>
                     </div>
-
-                    <!-- 第 5 項 -->
                     <div class="col-md-6">
                         <label class="form-label small fw-bold text-danger mb-1">5. 異常巨量資料外洩閥值 (MB)</label>
                         <input type="number" id="setting_data_exfil" class="form-control form-control-sm font-monospace" min="50" max="50000" placeholder="500">
                         <small class="text-secondary d-block" style="font-size: 11.5px;">內網主機向外部單一 IP 上傳超過此 MB 數即觸發。</small>
                     </div>
-                    <!-- 第 6 項 -->
                     <div class="col-md-6">
                         <label class="form-label small fw-bold text-dark mb-1">6. 採礦木馬 / 內網擴散閥值 (連線數)</label>
                         <div class="row g-2">
@@ -247,6 +240,23 @@
     </div>
 </div>
 
+<!-- ================= 彈出視窗：IP 來源與機構分析 ================= -->
+<div class="modal fade" id="ipInfoModal" tabindex="-1" aria-hidden="true" style="z-index: 1060;">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content shadow-lg bg-white border-0">
+            <div class="modal-header bg-light py-2 border-bottom">
+                <h6 class="modal-title text-primary fw-bold mb-0"><i class="bi bi-globe me-2"></i>IP 來源與所屬單位情資分析</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body text-dark p-3" id="ipInfoModalBody">
+                <div class="text-center py-4">
+                    <div class="spinner-border text-primary mb-2"></div>
+                    <p class="text-muted mb-0">正在穿透 DNS 快取與反向 PTR 解析中...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -312,6 +322,7 @@ function fetchAlerts() {
         .catch(err => console.log('讀取警報失敗:', err));
 }
 
+// 🌟 核心渲染：全面套用 .clickable-link 點狀底線與 title 浮動提示
 function renderAlertsTable(records) {
     const tbody = document.getElementById('securityAlertsBody');
     let cntCrit = 0, cntHigh = 0;
@@ -345,18 +356,31 @@ function renderAlertsTable(records) {
         const displayDst = maskIpText(r.dst_ip);
         const displayDetails = maskIpText(r.details);
 
-        let srcHtml = displaySrc;
+        // 🌟 來源主機：1:1 對齊點狀底線與浮動提示
+        let srcHtml = `<span class="clickable-link font-monospace text-primary fw-bold" 
+                             onclick="inspectIp('${r.src_ip}')" 
+                             oncontextmenu="event.preventDefault(); inspectIp('${r.src_ip}');"
+                             title="滑鼠左鍵/右鍵：查看身分與 MAC 分析">${displaySrc}</span>`;
         if (isExternal(r.src_ip)) {
-            srcHtml = `<a href="javascript:void(0)" class="text-danger text-decoration-underline fw-bold" onclick="inspectSingleExternalIp('${r.src_ip}')"><i class="bi bi-search me-1"></i>${displaySrc}</a>`;
+            srcHtml = `<span class="clickable-link font-monospace text-danger fw-bold" 
+                             onclick="inspectSingleExternalIp('${r.src_ip}')" 
+                             oncontextmenu="event.preventDefault(); inspectIp('${r.src_ip}');" 
+                             title="滑鼠左鍵：查看攻擊 Port 明細 | 滑鼠右鍵：解析單位身分與反向 DNS">${displaySrc}</span>`;
         }
+
+        // 🌟 目標主機 (例如 140.111.208.100)：1:1 對齊點狀底線與浮動提示
+        let dstHtml = `<span class="clickable-link font-monospace text-danger fw-bold" 
+                             onclick="inspectIp('${r.dst_ip}')" 
+                             oncontextmenu="event.preventDefault(); inspectIp('${r.dst_ip}');"
+                             title="滑鼠左鍵/右鍵：查看身分與組織單位分析">${displayDst}</span>`;
 
         html += `
             <tr>
                 <td class="font-monospace text-secondary">${r.ts}</td>
                 <td><span class="badge ${badgeClass} fw-bold">${sev}</span></td>
                 <td class="fw-bold text-danger"><i class="bi bi-exclamation-triangle-fill me-1"></i>${r.attack_type}</td>
-                <td class="font-monospace text-primary fw-bold">${srcHtml}</td>
-                <td class="font-monospace text-danger fw-bold">${displayDst}</td>
+                <td>${srcHtml}</td>
+                <td>${dstHtml}</td>
                 <td class="text-start px-3 text-dark">${displayDetails}</td>
             </tr>
         `;
@@ -371,7 +395,7 @@ function inspectSingleExternalIp(srcIp) {
     const modalBody = document.getElementById('singleIpModalBody');
 
     modalTitle.innerHTML = `<i class="bi bi-bug-fill me-2"></i>外部嫌疑 IP [${srcIp}] 攻擊 Port 明細`;
-    modalBody.innerHTML = `<tr><td colspan="4" class="text-muted py-4"><div class="spinner-border spinner-border-sm me-2"></div>正在自 DuckDB 撈取細節...</td></tr>`;
+    modalBody.innerHTML = `<tr><td colspan="4" class="text-muted py-4"><div class="spinner-border spinner-border-sm me-2"></div>正在自 DuckDB 調閱該 IP 探測紀錄...</td></tr>`;
     modal.show();
 
     fetch('/api/flow/security-single-ip-details', {
@@ -409,7 +433,6 @@ function clearSecurityAlerts() {
         });
 }
 
-// 🌟 開啟資安預警閥值設定彈窗 (從後端 SQLite 載入現存設定)
 function openSecuritySettingsModal() {
     fetch('/api/flow/security-settings')
         .then(r => r.json())
@@ -429,7 +452,6 @@ function openSecuritySettingsModal() {
         .catch(err => alert("讀取閥值設定失敗: " + err));
 }
 
-// 🌟 儲存資安預警閥值設定 (寫入 SQLite 並即時生效)
 function saveSecuritySettings() {
     const payload = {
         window_mins: parseInt(document.getElementById('setting_window_mins').value, 10) || 5,
@@ -451,7 +473,7 @@ function saveSecuritySettings() {
         if (res.success) {
             alert("✅ " + res.message);
             bootstrap.Modal.getInstance(document.getElementById('securitySettingsModal')).hide();
-            fetchAlerts(); // 立即重新整理事件
+            fetchAlerts();
         } else {
             alert("❌ 儲存失敗: " + res.message);
         }
@@ -459,5 +481,74 @@ function saveSecuritySettings() {
     .catch(err => alert("儲存連線失敗: " + err));
 }
 
+// 🌟 解析點擊的 IP 所屬機構與反向 DNS
+function inspectIp(ip) {
+    if (!ip) return;
+    
+    const modalEl = document.getElementById('ipInfoModal');
+    const modal = new bootstrap.Modal(modalEl);
+    const modalBody = document.getElementById('ipInfoModalBody');
+
+    if (ip.includes('Botnet') || ip.includes('WANs') || ip.includes('多主機')) {
+        modalBody.innerHTML = `
+            <div class="mb-3 border-bottom pb-2">
+                <span class="text-muted small d-block">來源屬性</span>
+                <span class="fs-5 fw-bold text-danger font-monospace">${ip}</span>
+            </div>
+            <div class="p-3 rounded border bg-light">
+                <span class="text-muted small d-block mb-1">情資說明</span>
+                <span class="text-dark">此項目為系統行為引擎彙整之外部來源集合，請參考右側「目標 IP」以獲取具體存取對象。</span>
+            </div>
+        `;
+        modal.show();
+        return;
+    }
+
+    modalBody.innerHTML = `<div class="text-center py-4"><div class="spinner-border text-primary mb-2"></div><p class="text-muted mb-0">正在反向解析主機名稱與所屬單位...</p></div>`;
+    modal.show();
+
+    fetch(`/api/tools/ip-lookup/${encodeURIComponent(ip)}`)
+        .then(r => r.json())
+        .then(res => {
+            if (res.success) {
+                const badge = res.is_internal 
+                    ? `<span class="badge bg-success ms-2">內網設備</span>` 
+                    : `<span class="badge bg-danger ms-2">外部來源</span>`;
+                
+                let extraHtml = '';
+                if (res.is_internal) {
+                    const srcLabel = res.mac_source ? ` (取自 ${res.mac_source})` : '';
+                    extraHtml = `
+                    <div class="p-3 rounded border bg-light">
+                        <span class="text-muted small d-block mb-1">實體網卡 MAC<span class="text-primary fw-bold">${srcLabel}</span></span>
+                        <span class="fs-5 fw-bold text-success font-monospace">${res.mac_address || '無對應租約 / ARP 紀錄'}</span>
+                    </div>`;
+                } else {
+                    extraHtml = `
+                    <div class="p-3 rounded border bg-light">
+                        <span class="text-muted small d-block mb-1">所屬組織 / 單位情資</span>
+                        <span class="fs-6 fw-bold text-danger font-monospace"><i class="bi bi-building me-1"></i>${res.org_desc || '網際網路外部公網主機'}</span>
+                    </div>`;
+                }
+
+                modalBody.innerHTML = `
+                    <div class="mb-3 border-bottom pb-2">
+                        <span class="text-muted small d-block">目標 IP 位址</span>
+                        <span class="fs-5 fw-bold text-primary font-monospace">${res.ip}</span> ${badge}
+                    </div>
+                    <div class="mb-3">
+                        <span class="text-muted small d-block">反向解析主機名稱 (Reverse DNS / PTR)</span>
+                        <span class="fw-bold text-dark font-monospace">${res.hostname !== '-' ? res.hostname : '<span class="text-muted">該 IP 無註冊 PTR 反向記錄</span>'}</span>
+                    </div>
+                    ${extraHtml}
+                `;
+            } else {
+                modalBody.innerHTML = `<div class="alert alert-danger">查詢失敗</div>`;
+            }
+        })
+        .catch(err => {
+            modalBody.innerHTML = `<div class="alert alert-danger">查詢發生異常：${err}</div>`;
+        });
+}
 </script>
 {% endblock %}
