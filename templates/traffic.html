@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+{% extends "base.html" %}{# v2.2 #}
 
 {% block title %}{{ fw_model }} 流量日誌分析系統{% endblock %}
 
@@ -11,15 +11,22 @@
     white-space: nowrap; 
 }
 .table-scroll-container { 
-    overflow-y: scroll; 
+    overflow: hidden; 
     flex-grow: 1; 
+    min-height: 0; 
+
+}
+.table-scroll-container > .table-responsive {
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: auto;
 }
 
 /* 固定欄寬、文字截斷 (...) 與微調字級邊距 */
 .traffic-table-fixed {
     table-layout: fixed;
     width: 100%;
-    min-width: 1680px;
+    min-width: 100%;
     margin-bottom: 0;
 }
 .traffic-table-fixed th, 
@@ -28,8 +35,8 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    padding-top: 3px;
-    padding-bottom: 3px;
+    padding-top: 1px;
+    padding-bottom: 1px;
     padding-left: 6px;
     padding-right: 6px;
     line-height: 1.35;
@@ -49,6 +56,19 @@
 }
 .row-drop-deny:hover {
     background-color: #fcd5cf !important;
+}
+
+/* 命中惡意情資 IOC 紀錄之高警示深紅底色標註 */
+.row-ioc-malicious {
+    background-color: #fee2e2 !important;
+    border-left: 4px solid #dc2626 !important;
+}
+.row-ioc-malicious > td {
+    background-color: transparent !important;
+    color: #7f1d1d !important;
+}
+.row-ioc-malicious:hover {
+    background-color: #fecaca !important;
 }
 
 /* 重新整理旋轉動畫 */
@@ -80,46 +100,62 @@
 .filterable-cell {
     cursor: pointer;
 }
+
+/* 跨日預聚合統計總表：固定欄寬、強制單行不折行、防止數值重疊 */
+.rollup-table-fit {
+    table-layout: fixed;
+    width: 100%;
+    font-size: 13px;
+    margin-bottom: 0;
+}
+.rollup-table-fit th,
+.rollup-table-fit td {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+    padding: 6px 4px;
+}
 {% endblock %}
 
 {% block content %}
-<!-- 流量查詢工具列 -->
-<div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
+<!-- 流量查詢工具列 (精簡列高版：7日總表與 GeoIP/情資 與日期選擇同一列) -->
+<div class="row mb-1 flex-shrink-0 compact-filter-bar" style="position: relative; z-index: 1050;">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white" style="overflow: visible;">
-            <div class="card-body py-2 px-3 d-flex flex-column gap-2" style="overflow: visible;">
+            <div class="card-body py-1 px-2 d-flex flex-column gap-1" style="overflow: visible;">
                 
-                <!-- 第一列：日期、排序、每頁筆數、自動更新與右側狀態徽章 -->
-                <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 w-100">
-                    <div class="d-flex align-items-center gap-2 flex-wrap">
-                        <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-primary"></i> 條件篩選：</span>
+                <!-- 第一列：日期、排序、每頁筆數、自動更新、7日總表、GeoIP/情資 與右側狀態徽章 -->
+                <div class="d-flex align-items-center justify-content-between flex-wrap gap-1 w-100">
+                    <div class="d-flex align-items-center gap-1 flex-wrap">
+                        <span class="fw-bold text-dark text-nowrap" style="font-size: 14px;"><i class="bi bi-funnel-fill text-primary"></i> 條件篩選：</span>
                         
                         <div class="input-group input-group-sm flex-nowrap" style="width: auto;">
-                            <button class="btn btn-outline-secondary px-2" type="button" onclick="changeTrafficDate(-1)" title="前一日 (快速切換)">
+                            <button class="btn btn-outline-secondary btn-sm px-2" type="button" onclick="changeTrafficDate(-1)" title="前一日 (快速切換)">
                                 <i class="bi bi-chevron-left"></i>
                             </button>
-                            <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold" style="width: 125px; cursor: pointer;" id="traffic-date" onclick="this.showPicker()">
-                            <span class="input-group-text bg-white text-primary fw-bold px-2 font-monospace" id="traffic-weekday" style="font-size: 13px;">(三)</span>
-                            <button class="btn btn-outline-secondary px-2" type="button" onclick="changeTrafficDate(1)" title="後一日 (快速切換)">
+                            <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold" style="width: 120px; cursor: pointer;" id="traffic-date" onclick="this.showPicker()">
+                            <span class="input-group-text bg-white text-primary fw-bold px-1 font-monospace" id="traffic-weekday" style="font-size: 14px;">(三)</span>
+                            <button class="btn btn-outline-secondary btn-sm px-2" type="button" onclick="changeTrafficDate(1)" title="後一日 (快速切換)">
                                 <i class="bi bi-chevron-right"></i>
                             </button>
                         </div>
 
-                        <select class="form-select form-select-sm font-monospace fw-bold text-dark" style="width: 85px;" id="traffic-order" onchange="changeTrafficOrder(this.value)" title="日誌排序方式">
+                        <select class="form-select form-select-sm font-monospace fw-bold text-dark" style="width: 78px;" id="traffic-order" onchange="changeTrafficOrder(this.value)" title="日誌排序方式">
                             <option value="DESC" selected>DESC</option>
                             <option value="ASC">ASC</option>
                         </select>
 
-                        <select class="form-select form-select-sm" style="width: 110px;" id="traffic-per-page" onchange="changeTrafficPerPage(this.value)" title="每頁顯示筆數">
+                        <select class="form-select form-select-sm" style="width: 102px;" id="traffic-per-page" onchange="changeTrafficPerPage(this.value)" title="每頁顯示筆數">
                             <option value="50" selected>每頁 50 筆</option>
                             <option value="100">每頁 100 筆</option>
                             <option value="200">每頁 200 筆</option>
                         </select>
 
                         <div class="input-group input-group-sm flex-nowrap" style="width: auto; position: relative;">
-                            <button class="btn btn-outline-secondary dropdown-toggle fw-bold d-flex align-items-center gap-1 bg-light text-dark py-1 text-nowrap" type="button" id="refreshIntervalDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                            <button class="btn btn-outline-secondary btn-sm dropdown-toggle fw-bold d-flex align-items-center gap-1 bg-light text-dark text-nowrap" type="button" id="refreshIntervalDropdown" data-bs-toggle="dropdown" aria-expanded="false">
                                 <span id="currentIntervalLabel">10 秒</span>
-                                <span id="countdownBadge" class="badge bg-primary text-white font-monospace" style="font-size: 10px;">10s</span>
+                                <span id="countdownBadge" class="badge bg-primary text-white font-monospace" style="font-size: 10px; display: inline-flex; align-items: center; justify-content: center; width: 30px; min-width: 30px; padding-left: 0; padding-right: 0; text-align: center; font-variant-numeric: tabular-nums;">10s</span>
                             </button>
                             <ul class="dropdown-menu dropdown-menu-end shadow border" aria-labelledby="refreshIntervalDropdown" style="z-index: 1060; min-width: 110px;">
                                 <li><a class="dropdown-item" href="javascript:void(0)" id="item-10" onclick="setRefreshInterval(10, '10 秒')">10 秒</a></li>
@@ -128,15 +164,22 @@
                                 <li><hr class="dropdown-divider my-1"></li>
                                 <li><a class="dropdown-item" href="javascript:void(0)" id="item-manual" onclick="setRefreshInterval(0, '手動')">手動</a></li>
                             </ul>
-                            <button class="btn btn-outline-primary px-2 shadow-sm d-flex align-items-center justify-content-center" id="refresh-traffic-btn" onclick="refreshDisplayNow()" title="立即重新顯示最新流量">
-                                <i class="bi bi-arrow-clockwise fs-6" id="refresh-icon"></i>
+                            <button class="btn btn-outline-primary btn-sm px-2 shadow-sm d-flex align-items-center justify-content-center" id="refresh-traffic-btn" onclick="refreshDisplayNow()" title="立即重新顯示最新流量">
+                                <i class="bi bi-arrow-clockwise" id="refresh-icon"></i>
                             </button>
                         </div>
+
+                        <button class="btn btn-outline-success btn-sm px-2 text-nowrap flex-shrink-0 fw-bold" type="button" onclick="quickRunDailyRollup(7)" title="透過綜合查詢欄執行近 7 日跨日與每日預聚合統計表">
+                            <i class="bi bi-calendar-range"></i> 7日總表
+                        </button>
+                        <button class="btn btn-outline-danger btn-sm px-2 text-nowrap flex-shrink-0 fw-bold" type="button" onclick="openGeoIocModal()" title="管理離線 MaxMind GeoLite2 MMDB 資料庫與惡意 IP / C2 威脅情資黑名單">
+                            <i class="bi bi-globe-americas"></i> GeoIP/情資
+                        </button>
                     </div>
 
-                    <div class="d-flex align-items-center gap-2 ms-auto flex-shrink-0">
-                        <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
-                        <span class="badge bg-success-subtle text-success-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" id="syslog-status-badge" style="font-size: 12px;">
+                    <div class="d-flex align-items-center gap-1 ms-auto flex-shrink-0">
+                        <span class="badge bg-warning text-dark" style="font-size: 11px;"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
+                        <span class="badge bg-success-subtle text-success-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" id="syslog-status-badge" style="font-size: 14.5px;">
                             <span class="spinner-grow spinner-grow-sm text-success" style="width: 6px; height: 6px;"></span>
                             <span id="syslog-flush-text">Syslog 514: Traffic 0 筆</span>
                         </span>
@@ -144,10 +187,10 @@
                 </div>
 
                 <!-- 第二列：全寬 PA Monitor 查詢命令列 -->
-                <div class="d-flex align-items-center gap-2 w-100" style="min-width: 0;">
+                <div class="d-flex align-items-center gap-1 w-100" style="min-width: 0;">
                     <div class="input-group input-group-sm flex-grow-1 flex-nowrap" style="min-width: 0;">
                         <span class="input-group-text bg-light text-secondary flex-shrink-0"><i class="bi bi-search"></i></span>
-                        <input type="text" class="form-control font-monospace text-primary fw-bold" style="min-width: 0;" id="traffic-search-filter" placeholder="點擊下方紀錄欄位加入AND條件(支援src/natsrc/dst/natdst/dport/app/action/zone/rule/reason)，IP 輸入CIDR/萬用字元(src:192.168.1.0/24 and dst:163.21.*)，按「執行檢索」查詢" onkeydown="if(event.key==='Enter') executeFreshTrafficSearch()">
+                        <input type="text" class="form-control form-control-sm font-monospace text-primary fw-bold" style="min-width: 0;" id="traffic-search-filter" placeholder="點擊下方紀錄欄位加入AND條件(支援src/natsrc/dst/natdst/dport/app/action/zone/rule/reason)，IP 輸入CIDR/萬用字元(src:192.168.1.0/24 and dst:163.21.*)，按「執行檢索」查詢" onkeydown="if(event.key==='Enter') executeFreshTrafficSearch()">
                     </div>
                     <button class="btn btn-outline-secondary btn-sm px-2 text-nowrap flex-shrink-0" type="button" onclick="resetTrafficFilters()">
                         <i class="bi bi-x-lg"></i> 重置
@@ -155,6 +198,9 @@
                     <button class="btn btn-primary btn-sm px-3 shadow-sm text-nowrap flex-shrink-0" type="button" onclick="executeFreshTrafficSearch()">
                         <i class="bi bi-search me-1"></i>執行檢索
                     </button>
+                    <button class="btn btn-outline-info btn-sm px-2 text-nowrap flex-shrink-0 fw-bold" type="button" onclick="openQuerySyntaxPopup('')" title="檢視支援的查詢欄位與正確語法範例">
+                        <i class="bi bi-question-circle"></i> 語法
+                    </button>
                 </div>
 
             </div>
@@ -162,57 +208,102 @@
     </div>
 </div>
 
-<!-- Message Count 直方圖面板 -->
-<div class="row mb-2 flex-shrink-0" id="histogram-card-row">
+<!-- 整合圖形視覺化面板（下拉切換 Message Count 直方圖 vs Top-N 排行與 Zone-to-Zone 通訊拓撲，保留收合功能） -->
+<div class="row mb-1 flex-shrink-0" id="histogram-card-row">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white">
-            <div class="card-header bg-white py-1 px-3 d-flex justify-content-between align-items-center border-bottom-0">
-                <div class="d-flex align-items-center gap-2">
-                    <span class="small fw-bold text-dark"><i class="bi bi-bar-chart-fill text-primary me-1"></i>Message Count (流量隨時間分佈直方圖)</span>
-                    <button class="btn btn-outline-secondary btn-sm py-0 px-2 d-flex align-items-center gap-1 border-0" id="chart-toggle-btn" onclick="toggleHistogram()" style="font-size: 11px; height: 22px;" title="收合或展開直方圖">
+            <div class="card-header bg-white py-1 px-2 d-flex justify-content-between align-items-center flex-wrap gap-1 border-bottom-0">
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <select class="form-select form-select-sm fw-bold text-dark py-0" id="traffic-chart-view-select" onchange="switchTrafficChartView(this.value)" style="width: auto; min-width: 280px; height: 24px; font-size: 12px;" title="選擇要呈現的視覺化圖形">
+                        <option value="histogram" selected>📊 Message Count (流量隨時間分佈直方圖)</option>
+                        <option value="topn">🔀 Top-N 排行視覺化與 Zone-to-Zone 通訊拓撲</option>
+                    </select>
+                    <button class="btn btn-outline-secondary btn-sm py-0 px-2 d-flex align-items-center gap-1 border-0" id="chart-toggle-btn" onclick="toggleHistogram()" style="font-size: 11px; height: 22px;" title="收合或展開圖形面板">
                         <i class="bi bi-chevron-up" id="chart-toggle-icon"></i>
                         <span id="chart-toggle-text">收合圖表</span>
                     </button>
+                    <span class="badge bg-info-subtle text-info-emphasis border d-none" id="topn-sample-badge" style="font-size: 11px;"></span>
                 </div>
-                <span class="small text-muted font-monospace" id="chart-time-range">時段：00:00 ~ 23:00</span>
+                <div class="d-flex align-items-center gap-2" id="histogram-header-extra">
+                    <span class="small text-muted font-monospace" id="chart-time-range">時段：00:00 ~ 23:00</span>
+                </div>
+                <div class="d-flex align-items-center gap-2 d-none" id="topn-header-extra">
+                    <div class="btn-group btn-group-sm" role="group" aria-label="Sankey Metric">
+                        <button type="button" class="btn btn-outline-primary active py-0 px-2" id="sankey-mode-bytes" onclick="switchTrafficSankeyMode('bytes')" style="font-size: 11px;">依傳輸量</button>
+                        <button type="button" class="btn btn-outline-primary py-0 px-2" id="sankey-mode-flows" onclick="switchTrafficSankeyMode('flows')" style="font-size: 11px;">依連線數</button>
+                    </div>
+                    <span class="small text-muted d-none d-md-inline" style="font-size: 11px;">點擊長條或流向帶可自動加入過濾條件</span>
+                </div>
             </div>
-            <div class="card-body py-1 px-3" id="histogram-card-body" style="position: relative; height: 115px; width: 100%;">
-                <canvas id="messageCountChart"></canvas>
+            <div class="card-body py-1 px-2" id="histogram-card-body">
+                <!-- 視圖 1：Message Count 直方圖 -->
+                <div id="histogram-view-pane" style="position: relative; height: 110px; width: 100%;">
+                    <canvas id="messageCountChart"></canvas>
+                </div>
+                <!-- 視圖 2：Top-N 排行視覺化與 Zone-to-Zone 通訊拓撲 -->
+                <div id="topn-topology-body" class="d-none">
+                    <div class="row g-2">
+                        <div class="col-12 col-lg-3">
+                            <div class="border rounded p-2 h-100 bg-light-subtle">
+                                <div class="small fw-bold text-primary mb-1"><i class="bi bi-cloud-upload-fill me-1"></i>內網上傳 Top 10 主機 (LAN➔WAN)</div>
+                                <div style="position: relative; height: 205px;"><canvas id="topUploadHostsChart"></canvas></div>
+                            </div>
+                        </div>
+                        <div class="col-12 col-lg-3">
+                            <div class="border rounded p-2 h-100 bg-light-subtle">
+                                <div class="small fw-bold text-success mb-1"><i class="bi bi-cloud-download-fill me-1"></i>內網下載 Top 10 主機 (WAN➔LAN)</div>
+                                <div style="position: relative; height: 205px;"><canvas id="topDownloadHostsChart"></canvas></div>
+                            </div>
+                        </div>
+                        <div class="col-12 col-lg-3">
+                            <div class="border rounded p-2 h-100 bg-light-subtle">
+                                <div class="small fw-bold text-dark mb-1"><i class="bi bi-shield-check text-warning me-1"></i>命中率最高安全規則 (Top Hit / Blocked)</div>
+                                <div style="position: relative; height: 205px;"><canvas id="topHitRulesChart"></canvas></div>
+                            </div>
+                        </div>
+                        <div class="col-12 col-lg-3">
+                            <div class="border rounded p-2 h-100 bg-light-subtle d-flex flex-column">
+                                <div class="small fw-bold text-dark mb-1"><i class="bi bi-shuffle text-danger me-1"></i>Zone-to-Zone 流量流向圖 (Sankey)</div>
+                                <div id="traffic-sankey-container" class="flex-grow-1 position-relative" style="min-height: 205px;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 </div>
 
 <!-- 流量概況五大指標卡片 -->
-<div class="row g-2 mb-2 flex-shrink-0">
+<div class="row g-2 mb-1 flex-shrink-0">
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
-            <small class="text-muted">已採樣連線總筆數</small>
-            <h5 class="mb-0 fw-bold font-monospace text-primary" id="metric-total-flows">-- 筆</h5>
+        <div class="card border-0 shadow-sm py-1 px-2 bg-white text-center">
+            <small class="text-muted" style="font-size: 14.5px;">已採樣連線總筆數</small>
+            <h6 class="mb-0 fw-bold font-monospace text-primary" id="metric-total-flows">-- 筆</h6>
         </div>
     </div>
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
-            <small class="text-muted">當日資料庫容量</small>
-            <h5 class="mb-0 fw-bold font-monospace text-info" id="metric-db-size">--</h5>
+        <div class="card border-0 shadow-sm py-1 px-2 bg-white text-center">
+            <small class="text-muted" style="font-size: 14.5px;">當日資料庫容量</small>
+            <h6 class="mb-0 fw-bold font-monospace text-info" id="metric-db-size">--</h6>
         </div>
     </div>
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
-            <small class="text-muted">總傳輸位元組</small>
-            <h5 class="mb-0 fw-bold font-monospace text-success" id="metric-total-bytes">-- MB</h5>
+        <div class="card border-0 shadow-sm py-1 px-2 bg-white text-center">
+            <small class="text-muted" style="font-size: 14.5px;">總傳輸位元組</small>
+            <h6 class="mb-0 fw-bold font-monospace text-success" id="metric-total-bytes">-- MB</h6>
         </div>
     </div>
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
-            <small class="text-muted">Top 1 消耗應用程式</small>
-            <h5 class="mb-0 fw-bold font-monospace text-warning-emphasis" id="metric-top-app">--</h5>
+        <div class="card border-0 shadow-sm py-1 px-2 bg-white text-center">
+            <small class="text-muted" style="font-size: 14.5px;">Top 1 消耗應用程式</small>
+            <h6 class="mb-0 fw-bold font-monospace text-warning-emphasis" id="metric-top-app">--</h6>
         </div>
     </div>
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center clickable-card" id="card-traffic-deny-filter" onclick="toggleTrafficDenyFilter()" title="點擊僅顯示防火牆主動阻擋事件，再按一次復原">
-            <small class="text-muted"><i class="bi bi-funnel-fill text-danger me-1"></i>防火牆主動阻擋事件</small>
-            <h5 class="mb-0 fw-bold font-monospace text-danger" id="metric-deny-flows">-- 筆</h5>
+        <div class="card border-0 shadow-sm py-1 px-2 bg-white text-center clickable-card" id="card-traffic-deny-filter" onclick="toggleTrafficDenyFilter()" title="點擊僅顯示防火牆主動阻擋事件，再按一次復原">
+            <small class="text-muted" style="font-size: 14.5px;"><i class="bi bi-funnel-fill text-danger me-1"></i>防火牆主動阻擋事件</small>
+            <h6 class="mb-0 fw-bold font-monospace text-danger" id="metric-deny-flows">-- 筆</h6>
         </div>
     </div>
 </div>
@@ -222,27 +313,27 @@
     <div class="col-12 h-100">
         <div class="card shadow-sm h-100 d-flex flex-column border-0">
             <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
-                <span class="fw-bold small"><i class="bi bi-list-columns-reverse text-primary me-1"></i>所有連線紀錄明細 (Syslog + 每日獨立 Parquet 列式儲存)</span>
+                <span class="fw-bold small"><i class="bi bi-list-columns-reverse text-primary me-1"></i>所有連線紀錄明細 (Syslog + 每日獨立 Parquet 列式儲存 + 離線 GeoIP/IOC 情資)</span>
                 <span class="badge bg-secondary font-monospace" id="traffic-count-badge">共 0 筆</span>
             </div>
             <div class="card-body p-0 table-scroll-container">
                 <div class="table-responsive h-100">
                     <table class="table table-hover table-striped table-sm table-sticky-header font-monospace traffic-table-fixed" style="font-size: 14.5px;">
                         <colgroup>
-                            <col style="width: 185px;">
-                            <col style="width: 55px;">
-                            <col style="width: 75px;">
-                            <col style="width: 75px;">
-                            <col style="width: 180px;">
-                            <col style="width: 135px;">
-                            <col style="width: 155px;">
-                            <col style="width: 135px;">
-                            <col style="width: 95px;">
-                            <col style="width: 135px;">
-                            <col style="width: 80px;">
-                            <col style="width: 145px;">
-                            <col style="width: 125px;">
-                            <col style="width: 95px;">
+                            <col style="width: 15%;">
+                            <col style="width: 3.5%;">
+                            <col style="width: 5%;">
+                            <col style="width: 5%;">
+                            <col style="width: 12.5%;">
+                            <col style="width: 7.5%;">
+                            <col style="width: 12.5%;">
+                            <col style="width: 7.5%;">
+                            <col style="width: 6%;">
+                            <col style="width: 7.5%;">
+                            <col style="width: 4.5%;">
+                            <col style="width: 4.5%;">
+                            <col style="width: 4.5%;">
+                            <col style="width: 4.5%;">
                         </colgroup>
                         <thead>
                             <tr class="table-light">
@@ -250,15 +341,15 @@
                                 <th>類型</th>
                                 <th>來源區域</th>
                                 <th>目的地區</th>
-                                <th>來源</th>
+                                <th>來源 (國家/ASN/情資)</th>
                                 <th>NAT 來源 IP</th>
-                                <th>目的地</th>
+                                <th>目的地 (國家/ASN/情資)</th>
                                 <th>NAT 目的地 IP</th>
                                 <th>目的連接埠</th>
                                 <th>應用程式</th>
                                 <th>動作</th>
                                 <th>規則</th>
-                                <th>工作階段結束原因</th>
+                                <th>結束原因</th>
                                 <th>位元組</th>
                             </tr>
                         </thead>
@@ -283,6 +374,318 @@
         </div>
     </div>
 </div>
+
+<!-- 🌍 離線 GeoIP (MaxMind MMDB) 與惡意情資 (Threat Intel IOC) 管理視窗 -->
+<div class="modal fade" id="geoIocModal" tabindex="-1" aria-hidden="true" style="z-index: 2060;">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content shadow-lg border-danger">
+            <div class="modal-header bg-dark text-white py-2">
+                <h6 class="modal-title fw-bold mb-0">
+                    <i class="bi bi-globe-americas text-warning me-2"></i>離線 MaxMind GeoLite2 (MMDB) 與惡意 IP / C2 威脅情資 (IOC) 管理中心
+                </h6>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-3">
+                <!-- 狀態摘要列 -->
+                <div class="row g-2 mb-3">
+                    <div class="col-md-4">
+                        <div class="border rounded p-2 bg-light h-100">
+                            <div class="small text-muted fw-bold">MaxMind 國家/城市庫 (MMDB)</div>
+                            <div class="font-monospace fw-bold text-primary mt-1" id="geo-status-country">載入中...</div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="border rounded p-2 bg-light h-100">
+                            <div class="small text-muted fw-bold">MaxMind ASN 自治系統庫 (MMDB)</div>
+                            <div class="font-monospace fw-bold text-success mt-1" id="geo-status-asn">載入中...</div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="border rounded p-2 bg-light h-100">
+                            <div class="small text-muted fw-bold">啟用中惡意情資 IOC 規則數</div>
+                            <div class="font-monospace fw-bold text-danger mt-1" id="geo-status-ioc">載入中...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 🌐 線上自動更新排程器 & 一鍵同步控制面板 -->
+                <div class="border border-primary rounded p-2 mb-3 bg-primary-subtle">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                        <div class="small fw-bold text-primary-emphasis">
+                            <i class="bi bi-cloud-arrow-down-fill text-primary me-1"></i>線上自動更新排程器（Abuse.ch / Spamhaus / Emerging Threats + GeoLite2 MMDB）
+                        </div>
+                        <div class="d-flex align-items-center gap-1 flex-wrap">
+                            <button class="btn btn-primary btn-sm py-0 px-2 fw-bold" type="button" id="btn-sync-all" onclick="triggerGeoIocSyncNow('all')">
+                                <i class="bi bi-arrow-repeat me-1"></i>立即同步全部 (IOC + MMDB)
+                            </button>
+                            <button class="btn btn-outline-danger btn-sm py-0 px-2 fw-bold bg-white" type="button" onclick="triggerGeoIocSyncNow('ioc')">
+                                僅更新 IOC 黑名單
+                            </button>
+                            <button class="btn btn-outline-dark btn-sm py-0 px-2 fw-bold bg-white" type="button" onclick="triggerGeoIocSyncNow('mmdb')">
+                                僅更新 MMDB
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded p-2 border">
+                        <div class="row g-2 align-items-center">
+                            <div class="col-md-3">
+                                <div class="form-check form-switch mb-0">
+                                    <input class="form-check-input" type="checkbox" id="sync-auto-enabled" checked>
+                                    <label class="form-check-label small fw-bold text-dark" for="sync-auto-enabled">啟用每日自動排程</label>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">每日時間</span>
+                                    <select class="form-select font-monospace" id="sync-hour-select">
+                                        <option value="0">00:00</option><option value="1">01:00</option><option value="2">02:00</option>
+                                        <option value="3" selected>03:00 (建議)</option><option value="4">04:00</option><option value="5">05:00</option>
+                                        <option value="6">06:00</option><option value="12">12:00</option><option value="18">18:00</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="col-md-4 d-flex align-items-center gap-3">
+                                <div class="form-check mb-0">
+                                    <input class="form-check-input" type="checkbox" id="sync-opt-ioc" checked>
+                                    <label class="form-check-label small" for="sync-opt-ioc">同步開源 IOC</label>
+                                </div>
+                                <div class="form-check mb-0">
+                                    <input class="form-check-input" type="checkbox" id="sync-opt-mmdb" checked>
+                                    <label class="form-check-label small" for="sync-opt-mmdb">同步 MMDB</label>
+                                </div>
+                            </div>
+                            <div class="col-md-2 text-end">
+                                <button class="btn btn-success btn-sm w-100 fw-bold" type="button" onclick="saveGeoIocSyncConfig()">
+                                    <i class="bi bi-check2-circle me-1"></i>儲存排程
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="row g-2 mt-1">
+                            <div class="col-md-6">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">Country MMDB URL</span>
+                                    <input type="text" class="form-control font-monospace" id="sync-country-url" placeholder="https://.../GeoLite2-Country.mmdb">
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">ASN MMDB URL</span>
+                                    <input type="text" class="form-control font-monospace" id="sync-asn-url" placeholder="https://.../GeoLite2-ASN.mmdb">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-2 pt-1 border-top small font-monospace">
+                            <span>上次同步：<strong id="sync-last-time" class="text-dark">-</strong> ｜ 下次排程：<strong id="sync-next-time" class="text-primary">-</strong></span>
+                            <span id="sync-last-summary" class="text-muted">尚未執行線上同步</span>
+                        </div>
+                        <pre class="bg-dark text-success rounded p-2 mt-2 mb-0 d-none font-monospace" id="sync-live-logs" style="font-size: 11px; max-height: 115px; overflow-y: auto; white-space: pre-wrap;"></pre>
+                    </div>
+                </div>
+
+                <!-- 上傳 MMDB + 即時查詢測試 (含按需線上深度反查) -->
+                <div class="row g-2 mb-3">
+                    <div class="col-md-5">
+                        <div class="border rounded p-2 bg-white h-100">
+                            <div class="small fw-bold text-dark mb-1"><i class="bi bi-database-add text-primary me-1"></i>手動上傳 MaxMind GeoLite2 (.mmdb)</div>
+                            <div class="input-group input-group-sm">
+                                <input type="file" class="form-control" id="mmdb-upload-file" accept=".mmdb">
+                                <button class="btn btn-primary fw-bold" type="button" onclick="uploadMMDBFile()">上傳並重載</button>
+                            </div>
+                            <div class="text-muted mt-1" style="font-size: 11px;">支援 <code>GeoLite2-Country.mmdb</code>、<code>GeoLite2-City.mmdb</code>、<code>GeoLite2-ASN.mmdb</code>。</div>
+                        </div>
+                    </div>
+                    <div class="col-md-7">
+                        <div class="border rounded p-2 bg-white h-100">
+                            <div class="small fw-bold text-dark mb-1"><i class="bi bi-search text-danger me-1"></i>離線 + 按需線上深度 IP 情資測試查詢</div>
+                            <div class="input-group input-group-sm">
+                                <input type="text" class="form-control font-monospace" id="geo-test-ip" placeholder="輸入外部 IP 或 CIDR 網段，如 34.96.0.0/16 或 8.8.8.8" onkeydown="if(event.key==='Enter') testGeoIocLookup()">
+                                <button class="btn btn-outline-danger fw-bold" type="button" onclick="testGeoIocLookup()">離線秒查</button>
+                                <button class="btn btn-outline-primary fw-bold" type="button" onclick="testGeoIocOnlineDeep()" title="向 ip-api.com 發送單筆按需交叉查詢">線上深度反查</button>
+                            </div>
+                            <div class="text-muted mt-1" style="font-size: 11px;">線上深度反查來源：<a href="https://ip-api.com" target="_blank" rel="noopener noreferrer" class="text-decoration-none font-monospace">ip-api.com</a>（僅手動點擊時單筆查詢國家/城市、ISP、ASN 與 Proxy/Hosting 屬性，免費版上限 45 次/分）。</div>
+                            <div class="mt-1 font-monospace small" id="geo-test-result"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 批次匯入惡意 IP / C2 黑名單 -->
+                <div class="border rounded p-2 mb-3 bg-light-subtle">
+                    <div class="small fw-bold text-danger mb-2"><i class="bi bi-shield-fill-exclamation me-1"></i>新增 / 批次匯入惡意 IP 與 C2 黑名單（支援純文字 IP/CIDR 清單或 CSV）</div>
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-3">
+                            <select class="form-select form-select-sm" id="ioc-import-type">
+                                <option value="C2" selected>類型: C2 中繼站</option>
+                                <option value="Botnet">類型: Botnet 殭屍網路</option>
+                                <option value="TorExit">類型: Tor 匿名節點</option>
+                                <option value="Malware">類型: Malware 惡意軟體</option>
+                                <option value="Scanner">類型: Scanner 掃描源</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <select class="form-select form-select-sm" id="ioc-import-severity">
+                                <option value="CRITICAL" selected>等級: CRITICAL</option>
+                                <option value="HIGH">等級: HIGH</option>
+                                <option value="MEDIUM">等級: MEDIUM</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <input type="text" class="form-control form-control-sm" id="ioc-import-name" placeholder="威脅情資描述名稱（如：Abuse.ch Feodo C2 黑名單）">
+                        </div>
+                    </div>
+                    <div class="row g-2">
+                        <div class="col-md-8">
+                            <textarea class="form-control form-control-sm font-monospace" id="ioc-import-text" rows="2" placeholder="每行輸入一筆 IP 或 CIDR 網段，例如：&#10;194.26.135.42&#10;91.240.118.0/24"></textarea>
+                        </div>
+                        <div class="col-md-4 d-flex flex-column justify-content-between gap-1">
+                            <input type="file" class="form-control form-control-sm" id="ioc-import-file" accept=".txt,.csv,.ioc">
+                            <button class="btn btn-danger btn-sm fw-bold w-100" type="button" onclick="importThreatIocs()">
+                                <i class="bi bi-cloud-upload me-1"></i>匯入並立即套用比對
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 既有 IOC 黑名單管理清單 -->
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="small fw-bold text-dark">已登錄威脅情資 IOC 清單（最新 500 筆）</span>
+                    <div class="input-group input-group-sm" style="width: 260px;">
+                        <input type="text" class="form-control font-monospace" id="ioc-search-kw" placeholder="搜尋 IP / 類型 / 描述" onkeydown="if(event.key==='Enter') loadThreatIocList()">
+                        <button class="btn btn-outline-secondary" type="button" onclick="loadThreatIocList()">搜尋</button>
+                    </div>
+                </div>
+                <div class="table-responsive border rounded" style="max-height: 230px;">
+                    <table class="table table-sm table-hover table-striped font-monospace mb-0" style="font-size: 14.0px;">
+                        <thead class="table-light sticky-top">
+                            <tr>
+                                <th>指標 (IP / CIDR)</th>
+                                <th>類型</th>
+                                <th>情資描述</th>
+                                <th>等級</th>
+                                <th>來源</th>
+                                <th>狀態</th>
+                                <th class="text-end">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ioc-list-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer py-2 bg-light">
+                <button type="button" class="btn btn-secondary btn-sm px-3" data-bs-dismiss="modal">關閉</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 跨日預聚合統計總表備援視窗 (當瀏覽器阻擋 Popup 時自動啟用) -->
+<div class="modal fade" id="dailyRollupModal" tabindex="-1" aria-hidden="true" style="z-index: 2055;">
+    <div class="modal-dialog modal-dialog-centered" style="max-width: 96vw; width: 1480px;">
+        <div class="modal-content shadow-lg border-primary">
+            <div class="modal-header bg-primary text-white py-2 flex-wrap gap-2">
+                <h6 class="modal-title fw-bold mb-0 d-flex align-items-center flex-wrap gap-2">
+                    <span><i class="bi bi-table me-1"></i>跨日預聚合統計總表 (Daily Rollup Summary)</span>
+                    <span class="badge bg-light text-primary font-monospace" id="daily-rollup-range-badge">--</span>
+                </h6>
+                <button type="button" class="btn-close btn-close-white ms-auto" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-0" style="max-height: 78vh; overflow-y: auto; overflow-x: hidden;">
+                <div class="alert alert-info rounded-0 mb-0 py-2 text-center" style="font-size: 14.5px;">
+                    <i class="bi bi-info-circle-fill me-1"></i><strong>提示：</strong>點擊下方任一日期，即可自動下鑽至該日的完整明細檢視。
+                </div>
+                <table class="table table-sm table-hover table-striped font-monospace text-center rollup-table-fit">
+                    <colgroup>
+                        <col style="width: 8%;">
+                        <col style="width: 13%;">
+                        <col style="width: 8%;">
+                        <col style="width: 12%;">
+                        <col style="width: 12%;">
+                        <col style="width: 12%;">
+                        <col style="width: 9%;">
+                        <col style="width: 10%;">
+                        <col style="width: 9.5%;">
+                        <col style="width: 6.5%;">
+                    </colgroup>
+                    <thead class="table-light sticky-top" style="z-index: 2;">
+                        <tr>
+                            <th class="py-2">日期</th>
+                            <th class="py-2">連線總筆數</th>
+                            <th class="py-2">總傳輸量</th>
+                            <th class="py-2">內網對外 (LAN➔WAN)</th>
+                            <th class="py-2">外部連入 (WAN➔LAN)</th>
+                            <th class="py-2">不重複來源/目的 IP</th>
+                            <th class="py-2">Top 1 應用</th>
+                            <th class="py-2">Top 1 來源 IP</th>
+                            <th class="py-2">主動阻擋數</th>
+                            <th class="py-2">資料庫容量</th>
+                        </tr>
+                    </thead>
+                    <tbody id="daily-rollup-tbody"></tbody>
+                </table>
+            </div>
+            <div class="modal-footer py-2 bg-light">
+                <button type="button" class="btn btn-secondary btn-sm px-3" data-bs-dismiss="modal">關閉總表</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 查詢語法錯誤與安全攔截 Popup 視窗 -->
+<div class="modal fade" id="querySyntaxErrorModal" tabindex="-1" aria-hidden="true" style="z-index: 2050;">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content shadow-lg border-danger">
+            <div class="modal-header bg-danger text-white py-2">
+                <h6 class="modal-title fw-bold mb-0">
+                    <i class="bi bi-shield-exclamation me-2"></i>查詢條件格式錯誤或安全攔截
+                </h6>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-3">
+                <div class="alert alert-danger border-danger mb-3 py-2" id="syntax-error-box">
+                    <div class="fw-bold mb-1"><i class="bi bi-x-octagon-fill me-1"></i>錯誤原因：</div>
+                    <div class="font-monospace small" id="syntax-error-detail"></div>
+                </div>
+                <div class="mb-2 fw-bold text-dark small">
+                    <i class="bi bi-check2-square text-success me-1"></i>預設支援查詢欄位與正確語法規範（多條件請以 <code>and</code> 連接）：
+                </div>
+                <div class="table-responsive border rounded mb-3">
+                    <table class="table table-sm table-bordered mb-0 font-monospace" style="font-size: 14.5px;">
+                        <thead class="table-light text-nowrap">
+                            <tr>
+                                <th style="width: 15%;">欄位名稱</th>
+                                <th style="width: 35%;">允許資料格式</th>
+                                <th style="width: 50%;">正確輸入範例</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td class="fw-bold text-primary">src / natsrc</td><td>IPv4、CIDR 網段、<code>*</code>/<code>?</code> 萬用字元</td><td><code>src:192.168.1.0/24</code>、<code>natsrc:10.1.*</code></td></tr>
+                            <tr><td class="fw-bold text-primary">dst / natdst</td><td>IPv4、CIDR 網段、<code>*</code>/<code>?</code> 萬用字元</td><td><code>dst:8.8.8.8</code>、<code>natdst:163.21.*</code></td></tr>
+                            <tr><td class="fw-bold text-primary">dport</td><td>1~65535 連接埠或區間</td><td><code>dport:443</code>、<code>dport:8000-9000</code></td></tr>
+                            <tr><td class="fw-bold text-primary">app / zone</td><td>英數字、連字號、底線</td><td><code>app:ssl</code>、<code>zone:WAN</code></td></tr>
+                            <tr><td class="fw-bold text-primary">action</td><td><code>allow</code> / <code>deny</code> / <code>drop</code> / <code>deny_drop</code></td><td><code>action:deny_drop</code></td></tr>
+                            <tr><td class="fw-bold text-primary">rule / reason</td><td>規則名稱或結束原因（含空白請加雙引號）</td><td><code>rule:"Allow Outbound"</code>、<code>reason:tcp-fin</code></td></tr>
+                            <tr><td class="fw-bold text-success">date / days</td><td>單日、跨日區間 <code>..</code> 或回溯天數 (1~90)</td><td><code>date:2026-11-10..2026-11-14</code>、<code>days:7</code></td></tr>
+                            <tr><td class="fw-bold text-success">summary</td><td><code>daily</code>（開啟每日預聚合統計表 Popup）</td><td><code>days:7 and summary:daily</code></td></tr>
+                            <tr><td class="fw-bold text-info">leq / geq</td><td>精簡時間篩選 (支援<code>日</code>、<code>時</code>、<code>分</code>、<code>秒</code>，點擊表格時間自動帶入)</td><td><code>leq '2026-11-14 22' and geq '2026-11-12 08:30'</code></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="small fw-bold text-secondary mb-1">點擊下方任一範例可直接套用至查詢欄：</div>
+                <div class="d-flex flex-wrap gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-primary font-monospace" onclick="applySampleQuery('src:192.168.1.0/24 and dport:443')">src:192.168.1.0/24 and dport:443</button>
+                    <button type="button" class="btn btn-sm btn-outline-success font-monospace" onclick="applySampleQuery('days:7 and summary:daily')">days:7 and summary:daily</button>
+                    <button type="button" class="btn btn-sm btn-outline-danger font-monospace" onclick="applySampleQuery('days:7 and action:deny_drop and summary:daily')">days:7 and action:deny_drop and summary:daily</button>
+                    <button type="button" class="btn btn-sm btn-outline-info font-monospace" onclick="applySampleQuery(&quot;leq '2026-11-14' and geq '2026-11-12'&quot;)">leq '2026-11-14' and geq '2026-11-12'</button>
+                </div>
+            </div>
+            <div class="modal-footer py-2 bg-light">
+                <button type="button" class="btn btn-secondary btn-sm px-3" data-bs-dismiss="modal">關閉並修正</button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -295,7 +698,6 @@
         return `${year}-${month}-${day}`;
     }
 	
-    // 更新星期顯示
     function updateTrafficWeekday(dateVal) {
         if (!dateVal) return;
         const [y, m, d] = dateVal.split('-').map(Number);
@@ -305,7 +707,6 @@
         if (el) el.innerText = weekdays[dt.getDay()];
     }
 
-    // 前一日 / 後一日切換
     function changeTrafficDate(deltaDays) {
         const dateInput = document.getElementById('traffic-date');
         let curVal = dateInput.value || todayStr;
@@ -319,8 +720,19 @@
         dateInput.value = `${newY}-${newM}-${newD}`;
 
         updateTrafficWeekday(dateInput.value);
+        
+        const searchInput = document.getElementById('traffic-search-filter');
+        if (searchInput) {
+            searchInput.value = '';
+            searchInput.classList.remove('border-warning', 'bg-warning-subtle', 'is-invalid', 'border-danger');
+        }
+        appliedFilterStr = '';
+        isDenyFiltered = false;
+        const card = document.getElementById('card-traffic-deny-filter');
+        if (card) card.classList.remove('card-filter-active');
+        
         totalFlowsCount = 0;
-		isSummaryLoaded = false;
+        isSummaryLoaded = false;
 
         const tbody = document.getElementById('traffic-table-body');
         if (tbody) {
@@ -342,32 +754,51 @@
 	
     let trafficAbortController = null;
     let activeTrafficRequestId = 0;
-	let activeSummaryRequestId = 0; 
+    let activeForegroundRequestId = 0;
+    let activeSummaryRequestId = 0;
+    let isForegroundQueryInFlight = false;
 
     let lastSearchedFilterKey = '';
     const historicalSummaryCache = {};
-    let appliedFilterStr = ''; // 🌟 僅儲存已按下「執行檢索」套用的條件
+    let appliedFilterStr = '';
 
-    // 🌟 解析單一查詢命令列（支援 10 種欄位過濾，相容 : 與 = 寫法）
     function parseSearchFilter(filterStr) {
-        let params = {
+        const checked = validateAndParseQueryBar(filterStr);
+        if (checked.valid) {
+            return checked.params;
+        }
+        return {
             src: '', natsrc: '', dst: '', natdst: '',
             dport: '', app: '', action: 'all', zone: 'all',
-            rule: '', reason: ''
+            rule: '', reason: '', date: '', days: '', summary: '',
+            time_leq: '', time_geq: ''
         };
-        if (!filterStr) return params;
-
-        const regex = /\b(src|natsrc|dst|natdst|dport|app|action|zone|rule|reason)\s*[:=]\s*(?:"([^"]+)"|'([^']+)'|([^\s]+))/gi;
-        let match;
-        while ((match = regex.exec(filterStr)) !== null) {
-            const key = match[1].toLowerCase();
-            const val = (match[2] || match[3] || match[4] || '').trim();
-            params[key] = val;
-        }
-        return params;
     }
 
-    // 🌟 將擴充條件打包進 app 參數傳遞給後端（完全相容既有 API 路由）
+    function addTimeFilterToSearchBar(timeVal) {
+        if (!timeVal) return;
+        const searchInput = document.getElementById('traffic-search-filter');
+        let currentFilter = searchInput.value.trim();
+
+        const hasLeq = /(?:\btime_generated\s+)?\bleq(?:\s+|\s*[:=]\s*)(?:'[^']+'|"[^"]+"|[^\s]+)/i.test(currentFilter);
+        const geqRegex = /(?:\btime_generated\s+)?\bgeq(?:\s+|\s*[:=]\s*)(?:'[^']+'|"[^"]+"|[^\s]+)/i;
+        const hasGeq = geqRegex.test(currentFilter);
+
+        if (!hasLeq) {
+            const newCondition = `leq '${timeVal}'`;
+            searchInput.value = currentFilter === '' ? newCondition : `${currentFilter} and ${newCondition}`;
+        } else if (!hasGeq) {
+            const newCondition = `geq '${timeVal}'`;
+            if (currentFilter.includes(newCondition)) return;
+            searchInput.value = `${currentFilter} and ${newCondition}`;
+        } else {
+            const newCondition = `geq '${timeVal}'`;
+            searchInput.value = currentFilter.replace(geqRegex, newCondition);
+        }
+
+        searchInput.classList.add('border-warning', 'bg-warning-subtle');
+    }
+
     function buildPackedAppParam(params) {
         const ext = {};
         if (params.natsrc) ext.natsrc = params.natsrc;
@@ -375,6 +806,11 @@
         if (params.dport) ext.dport = params.dport;
         if (params.rule) ext.rule = params.rule;
         if (params.reason) ext.reason = params.reason;
+        if (params.date) ext.date = params.date;
+        if (params.days) ext.days = params.days;
+        if (params.summary) ext.summary = params.summary;
+        if (params.time_leq) ext.time_leq = params.time_leq;
+        if (params.time_geq) ext.time_geq = params.time_geq;
         
         if (Object.keys(ext).length === 0) {
             return params.app || '';
@@ -382,7 +818,6 @@
         return `${params.app || ''}__EXT__${JSON.stringify(ext)}`;
     }
 
-    // 🌟 點擊表格欄位時，僅組裝條件填入查詢列（必須按下「執行檢索」才真正查詢）
     function addFilterToSearchBar(key, value) {
         if (!value || value === '-' || value === 'all') return;
         const searchInput = document.getElementById('traffic-search-filter');
@@ -400,11 +835,52 @@
             searchInput.value = currentFilter === '' ? newCondition : `${currentFilter} and ${newCondition}`;
         }
 
-        // 提示條件已填入，等待按下「執行檢索」
         searchInput.classList.add('border-warning', 'bg-warning-subtle');
     }
 	
-	function toggleHistogram() {
+    function switchTrafficChartView(viewMode, skipAutoExpand = false, skipInitialFetch = false) {
+        const mode = (viewMode === 'topn') ? 'topn' : 'histogram';
+        localStorage.setItem('traffic_chart_view_mode', mode);
+        const sel = document.getElementById('traffic-chart-view-select');
+        if (sel && sel.value !== mode) sel.value = mode;
+
+        const histPane = document.getElementById('histogram-view-pane');
+        const topnPane = document.getElementById('topn-topology-body');
+        const histExtra = document.getElementById('histogram-header-extra');
+        const topnExtra = document.getElementById('topn-header-extra');
+        const sampleBadge = document.getElementById('topn-sample-badge');
+
+        if (mode === 'topn') {
+            if (histPane) histPane.classList.add('d-none');
+            if (topnPane) topnPane.classList.remove('d-none');
+            if (histExtra) histExtra.classList.add('d-none');
+            if (topnExtra) topnExtra.classList.remove('d-none');
+        } else {
+            if (topnPane) topnPane.classList.add('d-none');
+            if (histPane) histPane.classList.remove('d-none');
+            if (topnExtra) topnExtra.classList.add('d-none');
+            if (histExtra) histExtra.classList.remove('d-none');
+            if (sampleBadge) sampleBadge.classList.add('d-none');
+        }
+
+        const body = document.getElementById('histogram-card-body');
+        if (!skipAutoExpand && body && body.classList.contains('d-none')) {
+            body.classList.remove('d-none');
+            document.getElementById('chart-toggle-icon').className = 'bi bi-chevron-up';
+            document.getElementById('chart-toggle-text').innerText = '收合圖表';
+            localStorage.setItem('traffic_chart_collapsed', 'false');
+        }
+
+        if (skipInitialFetch) return;
+
+        if (mode === 'topn') {
+            requestAnimationFrame(() => refreshTrafficTopNPanel());
+        } else if (messageCountChartInstance) {
+            requestAnimationFrame(() => messageCountChartInstance.resize());
+        }
+    }
+
+    function toggleHistogram() {
         const body = document.getElementById('histogram-card-body');
         const icon = document.getElementById('chart-toggle-icon');
         const text = document.getElementById('chart-toggle-text');
@@ -415,8 +891,11 @@
             icon.className = 'bi bi-chevron-up';
             text.innerText = '收合圖表';
             localStorage.setItem('traffic_chart_collapsed', 'false');
-            if (messageCountChartInstance) {
-                messageCountChartInstance.resize();
+            const curMode = document.getElementById('traffic-chart-view-select')?.value || 'histogram';
+            if (curMode === 'topn') {
+                refreshTrafficTopNPanel();
+            } else if (messageCountChartInstance) {
+                requestAnimationFrame(() => messageCountChartInstance.resize());
             }
         } else {
             body.classList.add('d-none');
@@ -427,6 +906,9 @@
     }
 
     function initHistogramCollapseState() {
+        const savedView = localStorage.getItem('traffic_chart_view_mode') || 'histogram';
+        switchTrafficChartView(savedView, true, true);
+
         const isCollapsed = localStorage.getItem('traffic_chart_collapsed') === 'true';
         if (isCollapsed) {
             document.getElementById('histogram-card-body').classList.add('d-none');
@@ -450,7 +932,7 @@
             if (activeItem) activeItem.classList.add('active');
 
             badge.classList.remove('d-none');
-            badge.innerText = `${remainingSeconds}s`;
+            badge.innerText = `${String(Math.max(0, remainingSeconds)).padStart(2, '0')}s`;
 
             if (countdownTimer) clearInterval(countdownTimer);
             countdownTimer = setInterval(() => {
@@ -459,7 +941,7 @@
                     remainingSeconds = currentIntervalSeconds;
                     triggerSilentRefresh();
                 }
-                badge.innerText = `${remainingSeconds}s`;
+                badge.innerText = `${String(Math.max(0, remainingSeconds)).padStart(2, '0')}s`;
             }, 1000);
         } else {
             labelElem.innerText = '手動';
@@ -476,11 +958,19 @@
         const dateInput = document.getElementById('traffic-date');
         const date = dateInput ? (dateInput.value || todayStr) : todayStr;
         const searchInput = document.getElementById('traffic-search-filter');
+        const rawInputStr = searchInput ? searchInput.value.trim() : '';
 
-        appliedFilterStr = searchInput ? searchInput.value.trim() : '';
-        if (searchInput) {
-            searchInput.classList.remove('border-warning', 'bg-warning-subtle');
+        const check = validateAndParseQueryBar(rawInputStr);
+        if (!check.valid) {
+            if (searchInput) searchInput.classList.add('is-invalid', 'border-danger');
+            openQuerySyntaxPopup(check.error);
+            return;
         }
+        if (searchInput) {
+            searchInput.classList.remove('is-invalid', 'border-danger', 'border-warning', 'bg-warning-subtle');
+        }
+
+        appliedFilterStr = rawInputStr;
 
         const params = parseSearchFilter(appliedFilterStr);
         const packedApp = buildPackedAppParam(params);
@@ -505,7 +995,7 @@
 
         remainingSeconds = currentIntervalSeconds;
         const badge = document.getElementById('countdownBadge');
-        if (currentIntervalSeconds > 0) badge.innerText = `${remainingSeconds}s`;
+        if (currentIntervalSeconds > 0) badge.innerText = `${String(Math.max(0, remainingSeconds)).padStart(2, '0')}s`;
 
         if (currentViewDate === todayStr || !isSummaryLoaded) {
             lastFullSummaryRefreshAt = 0;
@@ -529,7 +1019,10 @@
             return;
         }
 
-        // 🌟 若查詢欄有尚未按下「執行檢索」的條件，暫停定時刷新，避免以舊條件抓出 allow 覆蓋畫面
+        if (isForegroundQueryInFlight) {
+            return;
+        }
+
         const searchInput = document.getElementById('traffic-search-filter');
         const draftFilter = searchInput ? searchInput.value.trim() : '';
         if (draftFilter !== appliedFilterStr) {
@@ -646,14 +1139,14 @@
     function changeTrafficPerPage(val) {
         currentPerPage = parseInt(val, 10) || 50;
         totalFlowsCount = 0;
-		isSummaryLoaded = false;
+        isSummaryLoaded = false;
         queryTrafficLogs(1);
     }
 
     function changeTrafficOrder(val) {
         currentSortOrder = (val === 'ASC') ? 'ASC' : 'DESC';
         totalFlowsCount = 0;
-		isSummaryLoaded = false;
+        isSummaryLoaded = false;
         queryTrafficLogs(1);
     }
 
@@ -662,7 +1155,6 @@
         const dateInput = document.getElementById('traffic-date');
         const date = dateInput ? (dateInput.value || todayStr) : todayStr;
         
-        // 🌟 鎖定本次請求發起當下的過濾條件快照，供第 520 行非同步回應比對
         const requestedFilterStr = appliedFilterStr;
         const params = parseSearchFilter(requestedFilterStr);
         const src = params.src;
@@ -671,13 +1163,24 @@
         const action = params.action || 'all';
         const zone = params.zone || 'all';
 
+        const thisRequestId = ++activeTrafficRequestId;
+        if (!silent) {
+            isForegroundQueryInFlight = true;
+            activeForegroundRequestId = thisRequestId;
+        }
+
         if (trafficAbortController) {
             trafficAbortController.abort();
         }
-        trafficAbortController = new AbortController();
-        const signal = trafficAbortController.signal;
+        const controller = new AbortController();
+        trafficAbortController = controller;
+        const signal = controller.signal;
+        const isMultiDayReq = /\b(?:days|date|summary|leq|geq|time)\b/i.test(requestedFilterStr);
+        const timeoutMs = isMultiDayReq ? 120000 : 30000;
+        const timeoutTimer = setTimeout(() => {
+            controller.abort();
+        }, timeoutMs);
 
-        const thisRequestId = ++activeTrafficRequestId;
         const requestedDate = date;
 
         const tbody = document.getElementById('traffic-table-body');
@@ -709,7 +1212,11 @@
             lastFullSummaryRefreshAt = nowMs;
         }
 		
-        const url = `/api/traffic-query?date=${date}&src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&app=${encodeURIComponent(app)}&action=${action}&zone=${zone}&page=${page}&per_page=${currentPerPage}&order=${currentSortOrder}&total_count=${totalFlowsCount}&only_logs=${isOnlyLogs}&first_load=${isFirstLoad}&_t=${Date.now()}`;
+        if (!silent && page === 1) {
+            try { refreshTrafficTopNPanel(); } catch (e) {}
+        }
+
+        const url = `/api/traffic-query?date=${date}&raw_query=${encodeURIComponent(requestedFilterStr)}&src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&app=${encodeURIComponent(app)}&action=${action}&zone=${zone}&page=${page}&per_page=${currentPerPage}&order=${currentSortOrder}&total_count=${totalFlowsCount}&only_logs=${isOnlyLogs}&first_load=${isFirstLoad}&_t=${Date.now()}`;
 
         fetch(url, { signal })
             .then(res => res.json())
@@ -719,15 +1226,31 @@
                     return;
                 }
 
+                if (data.status === 'syntax_error') {
+                    const searchInput = document.getElementById('traffic-search-filter');
+                    if (searchInput) searchInput.classList.add('is-invalid', 'border-danger');
+                    openQuerySyntaxPopup(data.message || '查詢條件格式錯誤');
+                    if (tbody) {
+                        tbody.innerHTML = '<tr><td colspan="14" class="text-center text-danger py-4">查詢條件語法不符或遭安全攔截，請依彈出視窗提示修正。</td></tr>';
+                    }
+                    return;
+                }
+
                 if (data.status !== 'success') {
-                    const errMsg = data.message || '';
-                    if ((errMsg.includes('Cannot open file') || errMsg.includes('No such file')) && !window._trafficRetryOnce) {
-                        window._trafficRetryOnce = true;
-                        setTimeout(() => queryTrafficLogs(page, silent, callback), 150);
-                        return;
+                    const errMsg = data.message || '查詢發生暫時性異常';
+                    const isTransient = errMsg.includes('整併') || errMsg.includes('No files found') || errMsg.includes('Cannot open file') || errMsg.includes('No such file');
+                    if (isTransient) {
+                        if (silent) return;
+                        if (!window._trafficRetryOnce) {
+                            window._trafficRetryOnce = true;
+                            setTimeout(() => queryTrafficLogs(page, silent, callback), 200);
+                            return;
+                        }
                     }
                     window._trafficRetryOnce = false;
-                    if (tbody) tbody.innerHTML = `<tr><td colspan="14" class="text-center text-danger py-4">查詢失敗：${errMsg}</td></tr>`;
+                    if (!silent && tbody) {
+                        tbody.innerHTML = `<tr><td colspan="14" class="text-center text-danger py-4">查詢失敗：${errMsg}</td></tr>`;
+                    }
                     return;
                 }
                 window._trafficRetryOnce = false;
@@ -735,9 +1258,11 @@
                 const logsList = data.logs || [];
                 const currentPage = data.current_page || 1;
 
+                try { renderDailyRollupPanel(data); } catch (e) {}
+
                 if (logsList.length === 0) {
                     totalFlowsCount = 0;
-					isSummaryLoaded = true;
+                    isSummaryLoaded = true;
                     document.getElementById('metric-total-flows').innerText = '0 筆';
                     document.getElementById('metric-db-size').innerText = data.db_size || '0 B';
                     document.getElementById('metric-total-bytes').innerText = '0 B';
@@ -760,7 +1285,7 @@
 
                 const hasCustomFilter = (src !== '' || dst !== '' || app !== '' || action !== 'all' || zone !== 'all');
 
-                if (isFirstLoad) {
+                if (isFirstLoad && !data.from_db_cache && !data.show_daily_rollup && !data.is_cross_day) {
                     const hasExactMetaTotal = (!hasCustomFilter && data.total_flows > 0);
                     totalFlowsCount = data.total_flows || (logsList.length * 10);
                     const initTotalPages = Math.max(data.total_pages || 1, Math.ceil(totalFlowsCount / currentPerPage));
@@ -791,7 +1316,7 @@
                     }
 
                     renderTrafficPagination(currentPage, initTotalPages);
-                } else if (!isOnlyLogs) {
+                } else if (!isOnlyLogs || (isFirstLoad && (data.from_db_cache || data.show_daily_rollup || data.is_cross_day))) {
                     totalFlowsCount = (data.total_flows !== undefined && data.total_flows !== null) ? data.total_flows : 0;
                     isSummaryLoaded = true;
                     document.getElementById('metric-total-flows').innerText = `${totalFlowsCount.toLocaleString()} 筆`;
@@ -842,17 +1367,24 @@
                     return val;
                 };
 
-                // 跳脫雙引號避免 HTML 屬性錯誤
                 const escAttr = (v) => (v === '-' || v === null || v === undefined) ? '' : String(v).replace(/"/g, '&quot;');
+
+                const buildAsnBadge = (asnType) => {
+                    if (!asnType) return '';
+                    if (asnType.includes('匿名代理')) return `<span class="badge bg-dark text-warning ms-1">${asnType}</span>`;
+                    if (asnType.includes('雲端')) return `<span class="badge bg-info-subtle text-info-emphasis border ms-1">${asnType}</span>`;
+                    return '';
+                };
 
                 logsList.forEach(row => {
                     const tr = document.createElement('tr');
                     const actionStr = (row.action || '').toLowerCase();
-                    
-                    // 🌟 嚴格排除 reset-both / reset-client / reset-server 等，僅 deny 與 drop 才標註紅色底色
                     const isDeny = (actionStr === 'deny' || actionStr === 'drop');
+                    const isMalicious = !!row.is_malicious;
 
-                    if (isDeny) {
+                    if (isMalicious) {
+                        tr.className = 'row-ioc-malicious';
+                    } else if (isDeny) {
                         tr.className = 'row-drop-deny';
                     }
 
@@ -861,7 +1393,12 @@
                         : `<span class="text-primary">${row.action}</span>`;
 
                     const hostDisplay = row.src_hostname ? `<span class="badge bg-light text-dark border ms-1">${row.src_hostname}</span>` : '';
-                    const fullSrcTitle = row.src_hostname ? `${row.source} (${row.src_hostname})` : row.source;
+                    const srcGeoHtml = row.src_geo ? `<span class="badge bg-light text-secondary border ms-1" title="${row.src_geo} (${row.src_asn_type || ''})">${row.src_geo}</span>${buildAsnBadge(row.src_asn_type)}` : '';
+                    const dstGeoHtml = row.dst_geo ? `<span class="badge bg-light text-secondary border ms-1" title="${row.dst_geo} (${row.dst_asn_type || ''})">${row.dst_geo}</span>${buildAsnBadge(row.dst_asn_type)}` : '';
+                    const iocHtml = isMalicious ? `<span class="badge bg-danger text-white ms-1" title="${escAttr(row.ioc_match || '命中惡意情資')}">${row.ioc_match || '☠️ 惡意情資'}</span>` : '';
+
+                    const fullSrcTitle = [row.source, row.src_hostname, row.src_geo, row.src_asn_type].filter(Boolean).join(' | ');
+                    const fullDstTitle = [row.destination, row.dst_geo, row.dst_asn_type, row.ioc_match].filter(Boolean).join(' | ');
                     const fullBytesTitle = `${(row.bytes || 0).toLocaleString()} Bytes`;
 
                     const displaySrc = cleanZeroVal(row.source);
@@ -870,15 +1407,14 @@
                     const displayNatDst = cleanZeroVal(row.nat_dest_ip);
                     const displayPort = cleanZeroVal(row.to_port);
 
-                    // 🌟 使用 data-fkey 與 data-fval 將值安全綁定至 DOM，由上方事件監聽器抓取
                     tr.innerHTML = `
-                        <td class="traffic-col-time text-primary" title="${row.timestamp}">${row.timestamp}</td>
+                        <td class="traffic-col-time text-primary filterable-time-cell" style="cursor:pointer;" title="${row.timestamp}" data-timeval="${row.timestamp}">${row.timestamp}</td>
                         <td title="${row.type || 'end'}">${row.type || 'end'}</td>
                         <td title="${row.from_zone || '-'}" class="filterable-cell" data-fkey="zone" data-fval="${escAttr(row.from_zone)}">${row.from_zone || '-'}</td>
                         <td title="${row.to_zone || '-'}" class="filterable-cell" data-fkey="zone" data-fval="${escAttr(row.to_zone)}">${row.to_zone || '-'}</td>
-                        <td title="${fullSrcTitle}" class="filterable-cell" data-fkey="src" data-fval="${escAttr(displaySrc)}"><strong class="text-primary">${displaySrc}</strong>${hostDisplay}</td>
+                        <td title="${escAttr(fullSrcTitle)}" class="filterable-cell" data-fkey="src" data-fval="${escAttr(displaySrc)}"><strong class="text-primary">${displaySrc}</strong>${hostDisplay}${srcGeoHtml}</td>
                         <td class="text-secondary filterable-cell" title="${displayNatSrc}" data-fkey="natsrc" data-fval="${escAttr(displayNatSrc)}">${displayNatSrc}</td>
-                        <td title="${displayDst}" class="filterable-cell" data-fkey="dst" data-fval="${escAttr(displayDst)}">${displayDst}</td>
+                        <td title="${escAttr(fullDstTitle)}" class="filterable-cell" data-fkey="dst" data-fval="${escAttr(displayDst)}"><strong>${displayDst}</strong>${dstGeoHtml}${iocHtml}</td>
                         <td class="text-secondary filterable-cell" title="${displayNatDst}" data-fkey="natdst" data-fval="${escAttr(displayNatDst)}">${displayNatDst}</td>
                         <td class="fw-bold text-primary filterable-cell" title="${displayPort}" data-fkey="dport" data-fval="${escAttr(displayPort)}">${displayPort}</td>
                         <td title="${row.application || '-'}" class="filterable-cell" data-fkey="app" data-fval="${escAttr(row.application)}"><span class="text-primary">${row.application || '-'}</span></td>
@@ -890,7 +1426,34 @@
                     tbody.appendChild(tr);
                 });
 
-                if (isFirstLoad) {
+                if (isFirstLoad && (data.show_daily_rollup || data.is_cross_day || data.from_db_cache)) {
+                    try { renderMessageCountChart(data.histogram || []); } catch (e) {}
+                    totalFlowsCount = data.total_flows || 0;
+                    isSummaryLoaded = true;
+                    const totalPages = Math.max(data.total_pages || 1, Math.ceil(totalFlowsCount / currentPerPage));
+                    document.getElementById('metric-total-flows').innerText = `${totalFlowsCount.toLocaleString()} 筆`;
+                    document.getElementById('metric-db-size').innerText = data.db_size || '0 B';
+                    document.getElementById('metric-total-bytes').innerText = data.total_bytes || '0 B';
+                    document.getElementById('metric-top-app').innerText = data.top_app || '-';
+                    document.getElementById('metric-deny-flows').innerText = `${(data.deny_flows || 0).toLocaleString()} 筆`;
+                    document.getElementById('traffic-count-badge').innerText = `共 ${totalFlowsCount.toLocaleString()} 筆 (頁次 1 / ${totalPages})`;
+                    const summaryElem = document.getElementById('traffic-pagination-summary');
+                    if (summaryElem) {
+                        const endIdx = Math.min(currentPerPage, totalFlowsCount);
+                        summaryElem.innerText = `顯示第 1 - ${endIdx.toLocaleString()} 筆，共 ${totalFlowsCount.toLocaleString()} 筆 (第 1 / ${totalPages} 頁)`;
+                    }
+                    if (data.from_db_cache && date !== todayStr) {
+                        historicalSummaryCache[currentFilterKey] = {
+                            total_flows: totalFlowsCount,
+                            db_size: data.db_size || '0 B',
+                            total_bytes: data.total_bytes || '0 B',
+                            top_app: data.top_app || '-',
+                            deny_flows: data.deny_flows || 0,
+                            histogram: data.histogram || []
+                        };
+                    }
+                    renderTrafficPagination(1, totalPages);
+                } else if (isFirstLoad) {
                     const summaryReqId = ++activeSummaryRequestId;
                     fetchTrafficSummaryInBackground(date, src, dst, app, action, zone, summaryReqId);
                 } else {
@@ -899,18 +1462,27 @@
                 }
             })
             .catch(err => {
-                if (err.name === 'AbortError') return;
-                if (!silent && tbody) {
+                if (err.name === 'AbortError') {
+                    if (!silent && tbody && thisRequestId === activeForegroundRequestId) {
+                        tbody.innerHTML = `<tr><td colspan="14" class="text-center text-warning py-4">查詢逾時（超過 30 秒），請縮小日期範圍或點擊「重新整理」重試。</td></tr>`;
+                    }
+                    return;
+                }
+                if (!silent && tbody && thisRequestId === activeForegroundRequestId) {
                     tbody.innerHTML = `<tr><td colspan="14" class="text-center text-danger py-4">網路傳輸異常：${err}</td></tr>`;
                 }
             })
             .finally(() => {
+                clearTimeout(timeoutTimer);
+                if (!silent && thisRequestId === activeForegroundRequestId) {
+                    isForegroundQueryInFlight = false;
+                }
                 if (callback) callback();
             });
     }
 	
     function fetchTrafficSummaryInBackground(date, src, dst, app, action, zone, reqId) {
-        const countUrl = `/api/traffic-query?date=${date}&src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&app=${encodeURIComponent(app)}&action=${action}&zone=${zone}&count_only=true&_t=${Date.now()}`;
+        const countUrl = `/api/traffic-query?date=${date}&raw_query=${encodeURIComponent(appliedFilterStr)}&src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&app=${encodeURIComponent(app)}&action=${action}&zone=${zone}&count_only=true&_t=${Date.now()}`;
         
         fetch(countUrl)
             .then(res => res.json())
@@ -921,6 +1493,7 @@
                 }
 
                 if (data.status === 'success') {
+                    try { renderDailyRollupPanel(data); } catch (e) {}
                     totalFlowsCount = data.total_flows || 0;
                     isSummaryLoaded = true;
                     const totalPages = data.total_pages || 1;
@@ -1004,17 +1577,37 @@
 
             dateInput.addEventListener('change', () => {
                 updateTrafficWeekday(dateInput.value);
+                
+                const searchInput = document.getElementById('traffic-search-filter');
+                if (searchInput) {
+                    searchInput.value = '';
+                    searchInput.classList.remove('border-warning', 'bg-warning-subtle', 'is-invalid', 'border-danger');
+                }
+                appliedFilterStr = '';
+                isDenyFiltered = false;
+                const card = document.getElementById('card-traffic-deny-filter');
+                if (card) card.classList.remove('card-filter-active');
+                
                 totalFlowsCount = 0;
-				isSummaryLoaded = false;
+                isSummaryLoaded = false;
                 queryTrafficLogs(1);
             });
         }
 
-        // 🌟 事件委派：點擊表格任一可過濾欄位，自動加入查詢欄
         const trafficTbody = document.getElementById('traffic-table-body');
         if (trafficTbody) {
             trafficTbody.addEventListener('click', (e) => {
                 const cell = e.target.closest('.filterable-cell');
+                const timeCell = e.target.closest('.filterable-time-cell');
+                
+                if (timeCell) {
+                    const tVal = timeCell.getAttribute('data-timeval');
+                    if (tVal) {
+                        addTimeFilterToSearchBar(tVal);
+                    }
+                    return;
+                }
+
                 if (!cell) return;
                 const fkey = cell.getAttribute('data-fkey');
                 const fval = cell.getAttribute('data-fval');
@@ -1023,6 +1616,7 @@
                 }
             });
         }
+
 
         queryTrafficLogs(1);
         refreshSyslogStatus();
@@ -1041,7 +1635,6 @@
 
         if (isDenyFiltered) {
             card.classList.add('card-filter-active');
-            // 🌟 將原有的 action:deny 改為 action:deny_drop
             if (!/\baction\s*:\s*deny_drop\b/i.test(currentFilter)) {
                 searchInput.value = currentFilter ? `${currentFilter} and action:deny_drop` : `action:deny_drop`;
             }
@@ -1055,5 +1648,857 @@
 
         executeFreshTrafficSearch();
     }
+
+function formatRollupBytes(bytes) {
+    const b = Number(bytes) || 0;
+    if (b >= 1024 * 1024 * 1024 * 1024) return (b / (1024 * 1024 * 1024 * 1024)).toFixed(2) + ' TB';
+    if (b >= 1024 * 1024 * 1024) return (b / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    if (b >= 1024 * 1024) return (b / (1024 * 1024)).toFixed(2) + ' MB';
+    if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
+    return b + ' B';
+}
+
+const ALLOWED_QUERY_FIELDS = new Set([
+    'src', 'natsrc', 'dst', 'natdst', 'dport', 'app',
+    'action', 'zone', 'rule', 'reason', 'date', 'days', 'summary',
+    'leq', 'geq', 'time', 'time_generated'
+]);
+const INJECTION_PATTERN = /(--|\/\*|\*\/|;|\x00|\r|\n|`|\$|<|>|\||\bunion\b\s+\bselect\b|\bdrop\b\s+\btable\b|\bdelete\b\s+\bfrom\b|\binsert\b\s+\binto\b|\bupdate\b\s+\w+\s+\bset\b|\battach\b\s+|\bpragma\b\s+|\bread_parquet\b|\bcopy\b\s*\(|\bload_extension\b|\bor\b\s+['"]?\d+['"]?\s*=\s*['"]?\d+['"]?)/i;
+
+function openQuerySyntaxPopup(errMsg) {
+    const box = document.getElementById('syntax-error-box');
+    const detail = document.getElementById('syntax-error-detail');
+    if (errMsg) {
+        box.classList.remove('d-none');
+        detail.textContent = errMsg;
+    } else {
+        box.classList.add('d-none');
+    }
+    const modalEl = document.getElementById('querySyntaxErrorModal');
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+}
+
+function applySampleQuery(q) {
+    const input = document.getElementById('traffic-search-filter');
+    input.value = q;
+    input.classList.remove('is-invalid', 'border-danger');
+    const modalEl = document.getElementById('querySyntaxErrorModal');
+    const inst = bootstrap.Modal.getInstance(modalEl);
+    if (inst) inst.hide();
+    executeFreshTrafficSearch();
+}
+
+function quickRunDailyRollup(days) {
+    const dateInput = document.getElementById('traffic-date');
+    if (dateInput) {
+        dateInput.value = todayStr;
+        updateTrafficWeekday(todayStr);
+    }
+    const input = document.getElementById('traffic-search-filter');
+    input.value = `days:${days} and summary:daily`;
+    input.classList.remove('is-invalid', 'border-danger');
+    executeFreshTrafficSearch();
+}
+
+function validateAndParseQueryBar(rawStr) {
+    const q = (rawStr || '').trim();
+    const result = {
+        valid: true, error: '',
+        params: {
+            src: '', natsrc: '', dst: '', natdst: '', dport: '',
+            app: '', action: 'all', zone: 'all', rule: '', reason: '',
+            date: '', days: '', summary: '', time_leq: '', time_geq: ''
+        }
+    };
+    if (!q) return result;
+
+    if (q.length > 1024 || INJECTION_PATTERN.test(q)) {
+        return { valid: false, error: '偵測到不允許的特殊字元或疑似 SQL/指令注入語法，查詢已被安全防護機制阻擋！' };
+    }
+
+    const tokens = [];
+    let cur = '', quote = '';
+    for (let i = 0; i < q.length; i++) {
+        const ch = q[i];
+        if (quote) {
+            if (ch === quote) quote = '';
+            cur += ch;
+        } else if (ch === '"' || ch === "'") {
+            quote = ch;
+            cur += ch;
+        } else if (ch === ' ' || ch === '\t') {
+            if (cur) { tokens.push(cur); cur = ''; }
+        } else {
+            cur += ch;
+        }
+    }
+    if (quote) return { valid: false, error: '引號未成對閉合，請檢查雙引號或單引號是否完整。' };
+    if (cur) tokens.push(cur);
+
+    let expectCond = true;
+    for (let i = 0; i < tokens.length; i++) {
+        const tok = tokens[i];
+        const up = tok.toUpperCase();
+        if (up === 'AND') {
+            if (expectCond) return { valid: false, error: '邏輯運算子「AND」不可置於開頭或連續出現。' };
+            expectCond = true;
+            continue;
+        }
+        if (up === 'OR') {
+            return { valid: false, error: '綜合查詢欄僅支援「AND」交集組合，不支援「OR」。' };
+        }
+        if (!expectCond) {
+            return { valid: false, error: `條件「${tok}」前方缺少「AND」連接詞（正確範例：src:192.168.1.1 and dport:443）。` };
+        }
+
+        const isFlexTimeValid = (normTS) => (
+            /^\d{4}-\d{2}-\d{2}$/.test(normTS) ||
+            /^\d{4}-\d{2}-\d{2} \d{1,2}$/.test(normTS) ||
+            /^\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}$/.test(normTS) ||
+            /^\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2}$/.test(normTS) ||
+            /^\d{1,2}$/.test(normTS) ||
+            /^\d{1,2}:\d{2}$/.test(normTS) ||
+            /^\d{1,2}:\d{2}:\d{2}$/.test(normTS)
+        );
+        const normalizeFlexTS = (raw) => {
+            let s = (raw || '').trim();
+            if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+                s = s.slice(1, -1).trim();
+            }
+            return s.replace(/\//g, '-').replace(/[T@]/g, ' ').replace(/\s+/g, ' ').trim();
+        };
+
+        if (tok.toLowerCase() === 'leq' || tok.toLowerCase() === 'geq') {
+            const opName = tok.toLowerCase();
+            if (i + 1 >= tokens.length) {
+                return { valid: false, error: `「${opName}」後方缺少日期或時間值！正確範例：${opName} '2026-11-14 22:10'` };
+            }
+            const normTS = normalizeFlexTS(tokens[i + 1]);
+            if (!isFlexTimeValid(normTS)) {
+                return { valid: false, error: `「${opName}」時間格式錯誤（${tokens[i + 1]}），支援：'2026-11-14'、'2026-11-14 22'、'2026-11-14 22:10'、'2026-11-14 22:10:10' 或純時間 '22' / '22:10' / '22:10:10'` };
+            }
+            if (opName === 'leq') {
+                result.params.time_leq = normTS;
+            } else {
+                result.params.time_geq = normTS;
+            }
+            i += 1;
+            expectCond = false;
+            continue;
+        }
+        if (tok.toLowerCase() === 'time_generated') {
+            if (i + 2 >= tokens.length) {
+                return { valid: false, error: '時間語法不完整！建議使用精簡寫法：leq \'2026-11-14 22:10\'' };
+            }
+            const op = tokens[i + 1].toLowerCase();
+            const normTS = normalizeFlexTS(tokens[i + 2]);
+            if (!isFlexTimeValid(normTS)) {
+                return { valid: false, error: `時間格式錯誤（${tokens[i + 2]}），支援：'2026-11-14'、'2026-11-14 22'、'2026-11-14 22:10'、'2026-11-14 22:10:10' 或純時間 '22' / '22:10' / '22:10:10'` };
+            }
+            if (op === 'leq' || op === '<=' || op === 'lt' || op === '<') {
+                result.params.time_leq = normTS;
+            } else if (op === 'geq' || op === '>=' || op === 'gt' || op === '>') {
+                result.params.time_geq = normTS;
+            } else {
+                return { valid: false, error: `時間運算子僅支援 leq 或 geq，目前輸入：${tokens[i + 1]}` };
+            }
+            i += 2;
+            expectCond = false;
+            continue;
+        }
+
+        const sep = tok.search(/[:=]/);
+        if (sep <= 0) {
+            return { valid: false, error: `輸入項目「${tok}」未依照預設查詢欄位格式輸入！請使用「欄位:值」（例如 src:192.168.1.1 或 app:ssl）。` };
+        }
+        const key = tok.slice(0, sep).toLowerCase().trim();
+        let val = tok.slice(sep + 1).trim();
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+            val = val.slice(1, -1).trim();
+        }
+        if (!ALLOWED_QUERY_FIELDS.has(key)) {
+            return { valid: false, error: `不支援的查詢欄位「${key}」！僅允許：src、natsrc、dst、natdst、dport、app、action、zone、rule、reason、date、days、summary、leq、geq。` };
+        }
+        if (!val) {
+            return { valid: false, error: `欄位「${key}」後方不可為空值，請輸入對應查詢條件。` };
+        }
+        if (key === 'leq' || key === 'geq') {
+            const normTS = val.replace(/\//g, '-').replace(/[T@]/g, ' ').replace(/\s+/g, ' ').trim();
+            const okTS =
+                /^\d{4}-\d{2}-\d{2}$/.test(normTS) ||
+                /^\d{4}-\d{2}-\d{2} \d{1,2}$/.test(normTS) ||
+                /^\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}$/.test(normTS) ||
+                /^\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2}$/.test(normTS) ||
+                /^\d{1,2}$/.test(normTS) ||
+                /^\d{1,2}:\d{2}$/.test(normTS) ||
+                /^\d{1,2}:\d{2}:\d{2}$/.test(normTS);
+            if (!okTS) {
+                return { valid: false, error: `欄位「${key}」時間格式錯誤（${val}），正確範例：${key} '2026-11-14 22:10'` };
+            }
+            if (key === 'leq') result.params.time_leq = normTS;
+            else result.params.time_geq = normTS;
+            expectCond = false;
+            continue;
+        }
+        if (key === 'time') {
+            const parts = val.includes('..') ? val.split('..') : (val.includes('~') ? val.split('~') : [val, val]);
+            if (parts.length !== 2 || !parts[0].trim() || !parts[1].trim()) {
+                return { valid: false, error: `欄位「time」格式錯誤（${val}），正確範例：time:22:00..22:30` };
+            }
+            result.params.time_geq = parts[0].trim().replace(/\//g, '-').replace(/[T@]/g, ' ').replace(/\s+/g, ' ');
+            result.params.time_leq = parts[1].trim().replace(/\//g, '-').replace(/[T@]/g, ' ').replace(/\s+/g, ' ');
+            expectCond = false;
+            continue;
+        }
+        if ((key === 'src' || key === 'natsrc' || key === 'dst' || key === 'natdst') && !/^[0-9a-fA-F:.*/?]{1,64}$/.test(val)) {
+            return { valid: false, error: `欄位「${key}」的 IP/CIDR 格式不合法（${val}）。` };
+        }
+        if (key === 'dport' && !/^(\d{1,5})(?:-(\d{1,5}))?$/.test(val)) {
+            return { valid: false, error: `欄位「dport」必須為 1~65535 的連接埠號（如 dport:443 或 dport:8000-9000）。` };
+        }
+        if (key === 'action' && !['allow', 'deny', 'drop', 'deny_drop', 'reset-both', 'reset-client', 'reset-server'].includes(val.toLowerCase())) {
+            return { valid: false, error: `欄位「action」僅接受 allow、deny、drop、deny_drop、reset-both、reset-client 或 reset-server。` };
+        }
+        if (key === 'date' && !/^\d{4}[-/]\d{2}[-/]\d{2}(?:(?:\.\.|~)\d{4}[-/]\d{2}[-/]\d{2})?$/.test(val)) {
+            return { valid: false, error: `欄位「date」日期格式錯誤（${val}），正確範例：date:2026-11-10..2026-11-14。` };
+        }
+        if (key === 'days' && (!/^\d{1,2}$/.test(val) || parseInt(val, 10) < 1 || parseInt(val, 10) > 90)) {
+            return { valid: false, error: `欄位「days」必須為 1~90 的整數天數（如 days:7）。` };
+        }
+        if (key === 'summary' && !['daily', 'rollup'].includes(val.toLowerCase())) {
+            return { valid: false, error: `欄位「summary」目前僅支援 summary:daily。` };
+        }
+
+        result.params[key] = val;
+        expectCond = false;
+    }
+
+    if (expectCond) {
+        return { valid: false, error: '「AND」後方缺少查詢條件，請補上「欄位:值」。' };
+    }
+    return result;
+}
+
+let dailyRollupPopupWin = null;
+
+function renderDailyRollupPanel(data) {
+    if (!data.show_daily_rollup || !data.daily_rollups || data.daily_rollups.length === 0) {
+        return;
+    }
+
+    const rangeLabel = `${data.start_date} ~ ${data.end_date} (共 ${data.daily_rollups.length} 天)`;
+    let rowsHtml = '';
+    let totFlows = 0, totBytes = 0, totLanWan = 0, totWanLan = 0, totDeny = 0;
+
+    data.daily_rollups.forEach(r => {
+        totFlows += (r.total_flows || 0);
+        totBytes += (r.total_bytes || 0);
+        totLanWan += (r.lan_wan_bytes || 0);
+        totWanLan += (r.wan_lan_bytes || 0);
+        totDeny += (r.deny_flows || 0);
+        const appLabel = r.top_app || '-';
+        rowsHtml += `
+            <tr style="cursor:pointer;" onclick="handleDrillDown('${r.date}')" title="點擊切換主視窗至 ${r.date} 單日明細">
+                <td class="fw-bold text-primary">${r.date}</td>
+                <td>${(r.total_flows || 0).toLocaleString()} 筆</td>
+                <td class="fw-bold text-success">${r.total_bytes_fmt || '0 B'}</td>
+                <td>${formatRollupBytes(r.lan_wan_bytes || 0)}</td>
+                <td>${formatRollupBytes(r.wan_lan_bytes || 0)}</td>
+                <td>${(r.unique_src_ips || 0).toLocaleString()} / ${(r.unique_dst_ips || 0).toLocaleString()}</td>
+                <td title="${appLabel}"><span class="badge bg-light text-dark border text-truncate d-inline-block" style="max-width: 100%;">${appLabel}</span></td>
+                <td title="${r.top_src_ip || '-'}">${r.top_src_ip || '-'}</td>
+                <td class="text-danger fw-bold" title="${(r.deny_flows || 0).toLocaleString()}">${(r.deny_flows || 0).toLocaleString()}</td>
+                <td class="text-muted" title="${r.db_size_fmt || '0 B'}">${r.db_size_fmt || '0 B'}</td>
+            </tr>
+        `;
+    });
+
+    const totalAppLabel = data.top_app || '-';
+    rowsHtml += `
+        <tr class="table-primary fw-bold">
+            <td>區間總計</td>
+            <td>${totFlows.toLocaleString()} 筆</td>
+            <td class="text-success">${formatRollupBytes(totBytes)}</td>
+            <td>${formatRollupBytes(totLanWan)}</td>
+            <td>${formatRollupBytes(totWanLan)}</td>
+            <td>-</td>
+            <td title="${totalAppLabel}"><span class="badge bg-light text-dark border text-truncate d-inline-block" style="max-width: 100%;">${totalAppLabel}</span></td>
+            <td>-</td>
+            <td class="text-danger" title="${totDeny.toLocaleString()}">${totDeny.toLocaleString()}</td>
+            <td title="${data.db_size || '-'}">${data.db_size || '-'}</td>
+        </tr>
+    `;
+
+    const popupFeatures = 'width=1500,height=620,left=50,top=100,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes';
+    const pop = window.open('', 'PA_DailyRollupPopup', popupFeatures);
+    if (pop) {
+        dailyRollupPopupWin = pop;
+        pop.document.open();
+        pop.document.write(`<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>跨日預聚合統計總表 - ${rangeLabel}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        html, body { width: 100%; max-width: 100%; margin: 0; background-color: #f4f6f9; font-family: system-ui, -apple-system, sans-serif; overflow-x: hidden; }
+        tr:hover td { background-color: #e8f1ff !important; }
+        .rollup-table-fit { table-layout: fixed; width: 100%; font-size: 13px; margin-bottom: 0; }
+        .rollup-table-fit th, .rollup-table-fit td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; padding: 6px 4px; }
+    </style>
+</head>
+<body class="p-2">
+    <div class="card shadow-sm border-primary w-100">
+        <div class="card-header bg-primary text-white py-2 px-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div class="fw-bold d-flex align-items-center flex-wrap gap-2">
+                <span>📊 跨日預聚合統計總表 (Daily Rollup Summary)</span>
+                <span class="badge bg-light text-primary font-monospace">${rangeLabel}</span>
+            </div>
+            <button type="button" class="btn btn-sm btn-light fw-bold ms-auto" onclick="window.close()">關閉視窗</button>
+        </div>
+        <div class="alert alert-info rounded-0 mb-0 py-1 px-3 small">
+            💡 <strong>操作提示：</strong>點擊下方任一日期列，主視窗將自動下鑽切換至該日的完整流量明細。
+        </div>
+        <div style="width: 100%; overflow-x: hidden;">
+            <table class="table table-sm table-bordered table-striped font-monospace text-center rollup-table-fit">
+                <colgroup>
+                    <col style="width: 8%;">
+                    <col style="width: 13%;">
+                    <col style="width: 8%;">
+                    <col style="width: 12%;">
+                    <col style="width: 12%;">
+                    <col style="width: 12%;">
+                    <col style="width: 9%;">
+                    <col style="width: 10%;">
+                    <col style="width: 9.5%;">
+                    <col style="width: 6.5%;">
+                </colgroup>
+                <thead class="table-light">
+                    <tr>
+                        <th class="py-2">日期</th>
+                        <th class="py-2">連線總筆數</th>
+                        <th class="py-2">總傳輸量</th>
+                        <th class="py-2">內網對外 (LAN➔WAN)</th>
+                        <th class="py-2">外部連入 (WAN➔LAN)</th>
+                        <th class="py-2">不重複來源/目的 IP</th>
+                        <th class="py-2">Top 1 應用</th>
+                        <th class="py-2">Top 1 來源 IP</th>
+                        <th class="py-2">主動阻擋數</th>
+                        <th class="py-2">資料庫容量</th>
+                    </tr>
+                </thead>
+                <tbody>${rowsHtml}</tbody>
+            </table>
+        </div>
+    </div>
+    <script>
+        function handleDrillDown(dStr) {
+            if (window.opener && !window.opener.closed && typeof window.opener.drillDownSingleDate === 'function') {
+                window.opener.drillDownSingleDate(dStr);
+                window.opener.focus();
+            }
+            window.close();
+        }
+    <\/script>
+</body>
+</html>`);
+        pop.document.close();
+        pop.focus();
+        return;
+    }
+
+    const tbody = document.getElementById('daily-rollup-tbody');
+    const badge = document.getElementById('daily-rollup-range-badge');
+    if (tbody && badge) {
+        badge.textContent = rangeLabel;
+        tbody.innerHTML = rowsHtml.replace(/handleDrillDown\(/g, 'drillDownSingleDate(');
+        const modalEl = document.getElementById('dailyRollupModal');
+        if (modalEl) {
+            bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        }
+    }
+}
+
+function drillDownSingleDate(dStr) {
+    const dateInput = document.getElementById('traffic-date');
+    const searchInput = document.getElementById('traffic-search-filter');
+    if (dateInput) {
+        dateInput.value = dStr;
+        updateTrafficWeekday(dStr);
+    }
+    if (searchInput) {
+        searchInput.value = searchInput.value
+            .replace(/(?:and\s+)?\b(?:date|days|summary)\s*[:=]\s*[^\s]+/gi, '')
+            .replace(/(?:and\s+)?(?:\btime_generated\s+)?\b(?:leq|geq)(?:\s+|\s*[:=]\s*)(?:'[^']+'|"[^"]+"|[^\s]+)/gi, '')
+            .replace(/^\s*and\s+/i, '')
+            .trim();
+    }
+    const modalEl = document.getElementById('dailyRollupModal');
+    if (modalEl) {
+        const inst = bootstrap.Modal.getInstance(modalEl);
+        if (inst) inst.hide();
+    }
+    executeFreshTrafficSearch();
+}
+
+// =========================================================
+// 📊 Top-N 排行視覺化與 Zone-to-Zone 通訊拓撲 (Traffic)
+// =========================================================
+let topUploadChartInst = null, topDownloadChartInst = null, topRulesChartInst = null;
+let cachedTrafficTopNData = null, trafficSankeyMode = 'bytes';
+let activeTrafficTopNReqId = 0, trafficTopNAbortCtrl = null;
+
+function toggleTrafficTopNPanel() {
+    switchTrafficChartView('topn');
+}
+
+function switchTrafficSankeyMode(mode) {
+    trafficSankeyMode = mode;
+    document.getElementById('sankey-mode-bytes').classList.toggle('active', mode === 'bytes');
+    document.getElementById('sankey-mode-flows').classList.toggle('active', mode === 'flows');
+    if (cachedTrafficTopNData) {
+        renderZoneSankeySVG('traffic-sankey-container', cachedTrafficTopNData.zone_flows || [], mode, (z) => {
+            addFilterToSearchBar('zone', z);
+            executeFreshTrafficSearch();
+        });
+    }
+}
+
+function drawTrafficTopNChartsFromData(data) {
+    if (!data) return;
+    const cardBody = document.getElementById('histogram-card-body');
+    const body = document.getElementById('topn-topology-body');
+    if (!cardBody || cardBody.classList.contains('d-none') || !body || body.classList.contains('d-none')) return;
+
+    const upCanvas = document.getElementById('topUploadHostsChart');
+    if (upCanvas && upCanvas.parentElement && upCanvas.parentElement.clientWidth === 0) {
+        setTimeout(() => drawTrafficTopNChartsFromData(data), 100);
+        return;
+    }
+
+    const sb = document.getElementById('topn-sample-badge');
+    if (sb) {
+        if (data.is_sampled) { sb.textContent = data.sample_note; sb.classList.remove('d-none'); }
+        else { sb.classList.add('d-none'); }
+    }
+    topUploadChartInst = renderTopHostBarChart('topUploadHostsChart', topUploadChartInst, data.top_upload_hosts || [], '#3b82f6', 'src');
+    topDownloadChartInst = renderTopHostBarChart('topDownloadHostsChart', topDownloadChartInst, data.top_download_hosts || [], '#10b981', 'dst');
+    topRulesChartInst = renderTopRulesBarChart('topHitRulesChart', topRulesChartInst, data.top_rules || []);
+    renderZoneSankeySVG('traffic-sankey-container', data.zone_flows || [], trafficSankeyMode, (z) => {
+        addFilterToSearchBar('zone', z);
+        executeFreshTrafficSearch();
+    });
+}
+
+function refreshTrafficTopNPanel() {
+    const cardBody = document.getElementById('histogram-card-body');
+    const body = document.getElementById('topn-topology-body');
+    if (!cardBody || cardBody.classList.contains('d-none') || !body || body.classList.contains('d-none')) return;
+
+    const reqId = ++activeTrafficTopNReqId;
+    if (trafficTopNAbortCtrl) {
+        try { trafficTopNAbortCtrl.abort(); } catch (e) {}
+    }
+    trafficTopNAbortCtrl = new AbortController();
+
+    const date = (document.getElementById('traffic-date')?.value) || todayStr;
+    const params = parseSearchFilter(appliedFilterStr);
+    const app = buildPackedAppParam(params);
+    const url = `/api/traffic-topn?date=${date}&raw_query=${encodeURIComponent(appliedFilterStr)}&src=${encodeURIComponent(params.src)}&dst=${encodeURIComponent(params.dst)}&app=${encodeURIComponent(app)}&action=${params.action || 'all'}&zone=${params.zone || 'all'}&_t=${Date.now()}`;
+
+    fetch(url, { signal: trafficTopNAbortCtrl.signal }).then(r => r.json()).then(data => {
+        if (reqId !== activeTrafficTopNReqId || data.status !== 'success') return;
+        cachedTrafficTopNData = data;
+        requestAnimationFrame(() => drawTrafficTopNChartsFromData(data));
+    }).catch(() => {});
+}
+
+function renderTopHostBarChart(canvasId, prevChart, items, colorHex, filterKey) {
+    if (prevChart) prevChart.destroy();
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return null;
+    const ctx = canvas.getContext('2d');
+    const labels = items.map(it => it.label.length > 26 ? it.label.slice(0, 25) + '…' : it.label);
+    return new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [{ label: '傳輸量', data: items.map(it => it.bytes), backgroundColor: colorHex, borderRadius: 3 }]
+        },
+        options: {
+            indexAxis: 'y', responsive: true, maintainAspectRatio: false, animation: false,
+            onClick: (_, els) => {
+                if (els.length > 0 && items[els[0].index]) {
+                    addFilterToSearchBar(filterKey, items[els[0].index].ip);
+                    executeFreshTrafficSearch();
+                }
+            },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        title: (c) => items[c[0].dataIndex]?.label || '',
+                        label: (c) => {
+                            const it = items[c.dataIndex];
+                            return `流量: ${it.bytes_fmt} ｜ 連線: ${it.flows.toLocaleString()} 筆 (阻擋: ${it.deny_flows.toLocaleString()})`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: { ticks: { font: { size: 9 }, callback: v => formatRollupBytes(v) }, grid: { color: '#eef2f6' } },
+                y: { ticks: { font: { size: 10 } }, grid: { display: false } }
+            }
+        }
+    });
+}
+
+function renderTopRulesBarChart(canvasId, prevChart, items) {
+    if (prevChart) prevChart.destroy();
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return null;
+    const ctx = canvas.getContext('2d');
+    const labels = items.map(it => it.rule.length > 20 ? it.rule.slice(0, 19) + '…' : it.rule);
+    return new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [
+                { label: 'Allow 放行', data: items.map(it => it.allow_hits), backgroundColor: '#22c55e', borderRadius: 2 },
+                { label: 'Deny/Drop 阻擋', data: items.map(it => it.deny_hits), backgroundColor: '#ef4444', borderRadius: 2 }
+            ]
+        },
+        options: {
+            indexAxis: 'y', responsive: true, maintainAspectRatio: false, animation: false,
+            onClick: (_, els) => {
+                if (els.length > 0 && items[els[0].index]) {
+                    addFilterToSearchBar('rule', items[els[0].index].rule);
+                    executeFreshTrafficSearch();
+                }
+            },
+            plugins: {
+                legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 }, padding: 6 } },
+                tooltip: {
+                    callbacks: {
+                        title: (c) => `規則: ${items[c[0].dataIndex]?.rule || ''}`,
+                        afterBody: (c) => {
+                            const it = items[c[0].dataIndex];
+                            return `總命中: ${it.hits.toLocaleString()} 次 ｜ 流量: ${it.bytes_fmt} ｜ 主要應用: ${it.top_app}`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: { stacked: true, ticks: { font: { size: 9 } }, grid: { color: '#eef2f6' } },
+                y: { stacked: true, ticks: { font: { size: 10 } }, grid: { display: false } }
+            }
+        }
+    });
+}
+
+function renderZoneSankeySVG(containerId, links, mode, onZoneClick) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    if (!links || links.length === 0) {
+        el.innerHTML = '<div class="text-center text-muted small py-5">尚無 Zone-to-Zone 流向資料</div>';
+        return;
+    }
+    const valOf = (l) => mode === 'flows' ? (l.flows || 0) : (l.bytes || 0);
+    const valid = links.filter(l => valOf(l) > 0).slice(0, 12);
+    if (valid.length === 0) {
+        el.innerHTML = '<div class="text-center text-muted small py-5">目前條件無有效流量流向</div>';
+        return;
+    }
+
+    const W = 380, H = 205, nodeW = 14, pad = 10, leftX = 76, rightX = W - 76 - nodeW;
+    const srcTotals = {}, dstTotals = {};
+    valid.forEach(l => {
+        const v = valOf(l);
+        srcTotals[l.from_zone] = (srcTotals[l.from_zone] || 0) + v;
+        dstTotals[l.to_zone] = (dstTotals[l.to_zone] || 0) + v;
+    });
+    const totalSum = Object.values(srcTotals).reduce((a, b) => a + b, 0) || 1;
+    const layoutNodes = (totals) => {
+        const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+        const usableH = H - 20 - pad * Math.max(0, entries.length - 1);
+        let y = 10;
+        const map = {};
+        entries.forEach(([name, val]) => {
+            const h = Math.max(12, (val / totalSum) * usableH);
+            map[name] = { name, val, y, h, offset: 0 };
+            y += h + pad;
+        });
+        return map;
+    };
+    const leftMap = layoutNodes(srcTotals), rightMap = layoutNodes(dstTotals);
+    const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4'];
+
+    let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="205" style="overflow:visible; max-width:100%;">`;
+    valid.forEach((l, idx) => {
+        const s = leftMap[l.from_zone], d = rightMap[l.to_zone], v = valOf(l);
+        const lh = Math.max(2, (v / s.val) * s.h), rh = Math.max(2, (v / d.val) * d.h);
+        const y0 = s.y + s.offset, y1 = d.y + d.offset;
+        s.offset += lh; d.offset += rh;
+        const x0 = leftX + nodeW, x1 = rightX, mx = (x0 + x1) / 2;
+        const fill = (l.deny_flows > 0 && l.deny_flows >= l.flows * 0.5) ? '#ef4444' : colors[idx % colors.length];
+        const tip = `${l.from_zone} ➔ ${l.to_zone}｜流量: ${l.bytes_fmt || '-'}｜連線: ${(l.flows || 0).toLocaleString()} 筆 (阻擋: ${(l.deny_flows || 0).toLocaleString()})`;
+        svg += `<path d="M${x0},${y0} C${mx},${y0} ${mx},${y1} ${x1},${y1} L${x1},${y1 + rh} C${mx},${y1 + rh} ${mx},${y0 + lh} ${x0},${y0 + lh} Z" fill="${fill}" fill-opacity="0.38" stroke="${fill}" stroke-opacity="0.6" stroke-width="0.6" style="cursor:pointer;" onclick="window._sankeyClick && window._sankeyClick('${l.from_zone}')"><title>${tip}</title></path>`;
+    });
+    Object.values(leftMap).forEach((n, i) => {
+        svg += `<rect x="${leftX}" y="${n.y}" width="${nodeW}" height="${n.h}" rx="3" fill="${colors[i % colors.length]}" style="cursor:pointer;" onclick="window._sankeyClick && window._sankeyClick('${n.name}')"><title>${n.name}</title></rect>`;
+        svg += `<text x="${leftX - 5}" y="${n.y + n.h / 2 + 3}" text-anchor="end" font-size="10.5" font-weight="bold" fill="#1e293b">${n.name}</text>`;
+    });
+    Object.values(rightMap).forEach((n, i) => {
+        svg += `<rect x="${rightX}" y="${n.y}" width="${nodeW}" height="${n.h}" rx="3" fill="${colors[(i + 2) % colors.length]}" style="cursor:pointer;" onclick="window._sankeyClick && window._sankeyClick('${n.name}')"><title>${n.name}</title></rect>`;
+        svg += `<text x="${rightX + nodeW + 5}" y="${n.y + n.h / 2 + 3}" text-anchor="start" font-size="10.5" font-weight="bold" fill="#1e293b">${n.name}</text>`;
+    });
+    svg += `</svg>`;
+    window._sankeyClick = onZoneClick;
+    el.innerHTML = svg;
+}
+
+// =========================================================
+// 🌍 離線 MaxMind GeoLite2 (MMDB) 與惡意情資 (IOC) 管理前端邏輯
+// =========================================================
+let geoSyncPollTimer = null;
+
+function openGeoIocModal() {
+    const modalEl = document.getElementById('geoIocModal');
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    refreshGeoIocStatus();
+    refreshGeoIocSyncStatus(true);
+    loadThreatIocList();
+}
+
+function refreshGeoIocSyncStatus(fillInputs = false) {
+    fetch(`/api/geoip-ioc/sync-status?_t=${Date.now()}`).then(r => r.json()).then(res => {
+        if (res.status !== 'success' || !res.data) return;
+        const st = res.data;
+        const cfg = st.config || {};
+        if (fillInputs) {
+            document.getElementById('sync-auto-enabled').checked = !!cfg.auto_enabled;
+            document.getElementById('sync-hour-select').value = String(cfg.sync_hour ?? 3);
+            document.getElementById('sync-opt-ioc').checked = !!cfg.sync_ioc;
+            document.getElementById('sync-opt-mmdb').checked = !!cfg.sync_mmdb;
+            document.getElementById('sync-country-url').value = cfg.country_mmdb_url || '';
+            document.getElementById('sync-asn-url').value = cfg.asn_mmdb_url || '';
+        }
+        document.getElementById('sync-last-time').textContent = st.last_sync_time || '-';
+        document.getElementById('sync-next-time').textContent = st.next_run_time || '-';
+        document.getElementById('sync-last-summary').textContent = st.last_sync_summary || '-';
+
+        const logEl = document.getElementById('sync-live-logs');
+        if (st.logs && st.logs.length > 0) {
+            logEl.classList.remove('d-none');
+            logEl.textContent = st.logs.join('\n');
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        const btnAll = document.getElementById('btn-sync-all');
+        if (st.is_running) {
+            if (btnAll) { btnAll.disabled = true; btnAll.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>同步更新中...'; }
+            if (!geoSyncPollTimer) {
+                geoSyncPollTimer = setInterval(() => refreshGeoIocSyncStatus(false), 1500);
+            }
+        } else {
+            if (btnAll) { btnAll.disabled = false; btnAll.innerHTML = '<i class="bi bi-arrow-repeat me-1"></i>立即同步全部 (IOC + MMDB)'; }
+            if (geoSyncPollTimer) {
+                clearInterval(geoSyncPollTimer);
+                geoSyncPollTimer = null;
+                refreshGeoIocStatus();
+                loadThreatIocList();
+                queryTrafficLogs(currentTrafficPage, true);
+            }
+        }
+    }).catch(() => {});
+}
+
+function saveGeoIocSyncConfig() {
+    const payload = {
+        auto_enabled: document.getElementById('sync-auto-enabled').checked,
+        sync_hour: parseInt(document.getElementById('sync-hour-select').value, 10) || 3,
+        sync_ioc: document.getElementById('sync-opt-ioc').checked,
+        sync_mmdb: document.getElementById('sync-opt-mmdb').checked,
+        country_mmdb_url: document.getElementById('sync-country-url').value.trim(),
+        asn_mmdb_url: document.getElementById('sync-asn-url').value.trim()
+    };
+    fetch('/api/geoip-ioc/sync-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            alert('✅ ' + res.message);
+            refreshGeoIocSyncStatus(false);
+        } else {
+            alert('❌ ' + (res.message || '儲存失敗'));
+        }
+    }).catch(e => alert('儲存異常: ' + e));
+}
+
+function triggerGeoIocSyncNow(mode) {
+    const fd = new URLSearchParams();
+    fd.append('mode', mode || 'all');
+    fetch('/api/geoip-ioc/sync-now', { method: 'POST', body: fd }).then(r => r.json()).then(res => {
+        refreshGeoIocSyncStatus(false);
+    }).catch(e => alert('啟動同步異常: ' + e));
+}
+
+function testGeoIocOnlineDeep() {
+    const ip = (document.getElementById('geo-test-ip')?.value || '').trim();
+    const out = document.getElementById('geo-test-result');
+    if (!ip) return;
+    out.innerHTML = '<span class="text-primary"><span class="spinner-border spinner-border-sm me-1"></span>正在交叉查詢本地庫與線上情資...</span>';
+    fetch(`/api/geoip-ioc/online-lookup?ip=${encodeURIComponent(ip)}`).then(r => r.json()).then(res => {
+        if (res.status !== 'success') { out.innerHTML = `<span class="text-danger">${res.message}</span>`; return; }
+        const d = res.data.local;
+        if (!d.is_valid) {
+            out.innerHTML = `<span class="text-danger">⚠️ 格式錯誤：請輸入有效的 IPv4/IPv6 位址或 CIDR 網段（例如 34.96.0.0/16）</span>`;
+            return;
+        }
+        const cidrBadge = d.is_cidr ? `<span class="badge bg-secondary-subtle text-dark border me-1">網段 ${d.normalized_cidr} ➔ 代表節點 ${d.probe_ip}</span>` : '';
+        const geoTxt = d.is_internal ? '🏢 內網私有位址/網段' : (d.badge_label || '🌐 外部公網 IP');
+        const iocBadge = d.is_malicious ? `<span class="badge bg-danger ms-1">${d.ioc_badge}</span>` : `<span class="badge bg-success-subtle text-success-emphasis border ms-1">IOC 未命中</span>`;
+        let onlineHtml = '';
+        if (res.data.online_enabled && res.data.online) {
+            const on = res.data.online;
+            const flags = [];
+            if (on.proxy) flags.push('<span class="badge bg-dark text-warning ms-1">Proxy/VPN</span>');
+            if (on.hosting) flags.push('<span class="badge bg-info-subtle text-info-emphasis border ms-1">Hosting機房</span>');
+            onlineHtml = `<div class="mt-1 text-primary">🌐 線上交叉驗證 <span class="badge bg-primary-subtle text-primary-emphasis border">來源: ip-api.com</span>：${on.country || ''} ${on.city || ''} ｜ ISP: ${on.isp || '-'} ｜ ${on.as || ''} ${flags.join('')}</div>`;
+        } else if (res.data.online_note) {
+            onlineHtml = `<div class="mt-1 text-muted">${res.data.online_note}</div>`;
+        }
+        out.innerHTML = `<div>📍 本地離線庫：${cidrBadge}${geoTxt}${iocBadge}</div>${onlineHtml}`;
+    }).catch(() => {});
+}
+
+function refreshGeoIocStatus() {
+    fetch(`/api/geoip-ioc/status?_t=${Date.now()}`).then(r => r.json()).then(d => {
+        if (d.status !== 'success') return;
+        document.getElementById('geo-status-country').innerHTML = d.country_mmdb_loaded
+            ? `<span class="text-success">✅ ${d.country_mmdb_file}</span> <small class="text-muted">(${Number(d.country_mmdb_nodes).toLocaleString()} 節點)</small>`
+            : `<span class="text-secondary">內建離線網段庫 (${d.builtin_cidr_count} 條)</span>`;
+        document.getElementById('geo-status-asn').innerHTML = d.asn_mmdb_loaded
+            ? `<span class="text-success">✅ ${d.asn_mmdb_file}</span> <small class="text-muted">(${Number(d.asn_mmdb_nodes).toLocaleString()} 節點)</small>`
+            : `<span class="text-secondary">內建雲端/代理 ASN 識別</span>`;
+        document.getElementById('geo-status-ioc').innerHTML = `<span class="text-danger">${d.ioc_total_active} 條規則</span> <small class="text-muted">(精準 IP: ${d.ioc_exact_count} / 網段: ${d.ioc_cidr_count})</small>`;
+    }).catch(() => {});
+}
+
+function testGeoIocLookup() {
+    const ip = (document.getElementById('geo-test-ip')?.value || '').trim();
+    const out = document.getElementById('geo-test-result');
+    if (!ip) return;
+    out.innerHTML = '<span class="text-muted">查詢中...</span>';
+    fetch(`/api/geoip-ioc/lookup?ip=${encodeURIComponent(ip)}`).then(r => r.json()).then(res => {
+        if (res.status !== 'success') { out.innerHTML = `<span class="text-danger">${res.message}</span>`; return; }
+        const d = res.data;
+        if (!d.is_valid) {
+            out.innerHTML = `<span class="text-danger">⚠️ 格式錯誤：請輸入有效的 IPv4/IPv6 位址或 CIDR 網段（例如 34.96.0.0/16）</span>`;
+            return;
+        }
+        const cidrBadge = d.is_cidr ? `<span class="badge bg-secondary-subtle text-dark border me-1">網段 ${d.normalized_cidr} ➔ 代表節點 ${d.probe_ip}</span>` : '';
+        const geoTxt = d.is_internal ? '🏢 內網私有位址/網段' : (d.badge_label || '🌐 外部公網 IP');
+        const asnBadge = d.asn_type ? `<span class="badge bg-info-subtle text-info-emphasis border ms-1">${d.asn_type}</span>` : '';
+        const iocBadge = d.is_malicious ? `<span class="badge bg-danger ms-1">${d.ioc_badge}</span>` : `<span class="badge bg-success-subtle text-success-emphasis border ms-1">未命中黑名單</span>`;
+        out.innerHTML = `${cidrBadge}${geoTxt}${asnBadge}${iocBadge}`;
+    }).catch(() => {});
+}
+
+function uploadMMDBFile() {
+    const fi = document.getElementById('mmdb-upload-file');
+    if (!fi || !fi.files || fi.files.length === 0) {
+        alert('請先選擇 .mmdb 資料庫檔案！');
+        return;
+    }
+    const fd = new FormData();
+    fd.append('file', fi.files[0]);
+    fetch('/api/geoip-ioc/upload-mmdb', { method: 'POST', body: fd }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            alert('✅ ' + res.message);
+            fi.value = '';
+            refreshGeoIocStatus();
+            queryTrafficLogs(currentTrafficPage, true);
+        } else {
+            alert('❌ ' + (res.message || '上傳失敗'));
+        }
+    }).catch(e => alert('上傳異常: ' + e));
+}
+
+function loadThreatIocList() {
+    const kw = (document.getElementById('ioc-search-kw')?.value || '').trim();
+    const tbody = document.getElementById('ioc-list-tbody');
+    if (!tbody) return;
+    fetch(`/api/geoip-ioc/list?keyword=${encodeURIComponent(kw)}&_t=${Date.now()}`).then(r => r.json()).then(res => {
+        if (res.status !== 'success') return;
+        const items = res.items || [];
+        if (items.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">查無威脅情資 IOC 紀錄</td></tr>';
+            return;
+        }
+        tbody.innerHTML = items.map(it => {
+            const sevCls = it.severity === 'CRITICAL' ? 'bg-danger' : (it.severity === 'HIGH' ? 'bg-warning text-dark' : 'bg-secondary');
+            const stBadge = it.enabled ? '<span class="badge bg-success">啟用</span>' : '<span class="badge bg-secondary">停用</span>';
+            return `<tr>
+                <td class="fw-bold text-danger">${it.indicator}</td>
+                <td><span class="badge bg-light text-dark border">${it.ioc_type}</span></td>
+                <td>${it.threat_name || '-'}</td>
+                <td><span class="badge ${sevCls}">${it.severity}</span></td>
+                <td><small class="text-muted">${it.source || '-'}</small></td>
+                <td>${stBadge}</td>
+                <td class="text-end">
+                    <button class="btn btn-outline-primary btn-sm py-0 px-1" style="font-size:11px;" onclick="toggleThreatIoc(${it.id})">${it.enabled ? '停用' : '啟用'}</button>
+                    <button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:11px;" onclick="deleteThreatIoc(${it.id})">刪除</button>
+                </td>
+            </tr>`;
+        }).join('');
+    }).catch(() => {});
+}
+
+function importThreatIocs() {
+    const fd = new FormData();
+    fd.append('raw_text', document.getElementById('ioc-import-text')?.value || '');
+    fd.append('ioc_type', document.getElementById('ioc-import-type')?.value || 'C2');
+    fd.append('severity', document.getElementById('ioc-import-severity')?.value || 'CRITICAL');
+    fd.append('threat_name', document.getElementById('ioc-import-name')?.value || '');
+    const fi = document.getElementById('ioc-import-file');
+    if (fi && fi.files && fi.files.length > 0) {
+        fd.append('file', fi.files[0]);
+    }
+    fetch('/api/geoip-ioc/import', { method: 'POST', body: fd }).then(r => r.json()).then(res => {
+        if (res.status === 'success') {
+            alert('✅ ' + res.message);
+            document.getElementById('ioc-import-text').value = '';
+            if (fi) fi.value = '';
+            refreshGeoIocStatus();
+            loadThreatIocList();
+            queryTrafficLogs(currentTrafficPage, true);
+        } else {
+            alert('❌ ' + (res.message || '匯入失敗'));
+        }
+    }).catch(e => alert('匯入異常: ' + e));
+}
+
+function toggleThreatIoc(id) {
+    const fd = new URLSearchParams();
+    fd.append('id', id);
+    fetch('/api/geoip-ioc/toggle', { method: 'POST', body: fd }).then(() => {
+        refreshGeoIocStatus();
+        loadThreatIocList();
+        queryTrafficLogs(currentTrafficPage, true);
+    });
+}
+
+function deleteThreatIoc(id) {
+    if (!confirm('確定要刪除此筆惡意情資規則嗎？')) return;
+    const fd = new URLSearchParams();
+    fd.append('id', id);
+    fetch('/api/geoip-ioc/delete', { method: 'POST', body: fd }).then(() => {
+        refreshGeoIocStatus();
+        loadThreatIocList();
+        queryTrafficLogs(currentTrafficPage, true);
+    });
+}
 </script>
 {% endblock %}

@@ -8,8 +8,44 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body { background-color: #f4f6f9; height: 100vh; overflow: hidden; }
-        .health-badge { background-color: #eef2f6; padding: 4px 10px; border-radius: 6px; font-size: 13px; }
+        html, body { background-color: #f4f6f9; height: 100vh; max-width: 100vw; overflow: hidden; }
+        .table-scroll-container { overflow-y: auto; overflow-x: auto; flex-grow: 1; min-height: 0; }
+        .table-scroll-container:has(> .table-responsive) { overflow: hidden !important; }
+        .table-scroll-container > .table-responsive { height: 100%; overflow-y: auto; overflow-x: auto; }
+        .health-badge { background-color: #eef2f6; padding: 2px 7px; border-radius: 5px; font-size: 13px; line-height: 1.25; }
+        /* 統一精簡工具列高度（不影響下方資料表格列高與字級） */
+        .compact-filter-bar .form-control-sm,
+        .compact-filter-bar .form-select-sm,
+        .compact-filter-bar .input-group-text,
+        .compact-filter-bar .btn-sm {
+            padding-top: 1px !important;
+            padding-bottom: 1px !important;
+            min-height: 28px !important;
+            height: 28px !important;
+            font-size: 14px !important;
+            line-height: 1.3 !important;
+        }
+        .compact-filter-bar .btn-sm i {
+            font-size: 14px !important;
+        }
+        /* 固定倒數徽章與週期文字寬度，避免少於 10 秒時左右晃動 */
+        #currentIntervalLabel {
+            display: inline-block;
+            min-width: 40px;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+        #countdownBadge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 30px;
+            min-width: 30px;
+            padding-left: 0;
+            padding-right: 0;
+            text-align: center;
+            font-variant-numeric: tabular-nums;
+        }
         .clickable-badge {
             cursor: pointer;
             transition: all 0.2s ease-in-out;
@@ -39,40 +75,49 @@
 </head>
 <body class="d-flex flex-column">
 
-<div class="container-fluid d-flex flex-column h-100 p-3">
+<div class="container-fluid d-flex flex-column h-100 p-2">
     
     <!-- 1. 設定檔缺失/錯誤 置頂警示橫幅 (預設隱藏) -->
-    <div id="config-alert-banner" class="alert alert-danger shadow-sm mb-2 d-none d-flex justify-content-between align-items-center py-2 px-3">
+    <div id="config-alert-banner" class="alert alert-danger shadow-sm mb-1 d-none d-flex justify-content-between align-items-center py-1 px-2">
         <div class="d-flex align-items-center gap-2">
-            <i class="bi bi-exclamation-octagon-fill fs-5 text-danger"></i>
+            <i class="bi bi-exclamation-octagon-fill text-danger"></i>
             <div>
-                <strong class="d-block" id="config-alert-title">未偵測到有效的連線設定檔 (pa1420key.txt)</strong>
-                <small id="config-alert-msg" class="text-secondary font-monospace"></small>
+                <strong class="small" id="config-alert-title">未偵測到有效的連線設定檔 (pa1420key.txt)</strong>
+                <small id="config-alert-msg" class="text-secondary font-monospace ms-2"></small>
             </div>
         </div>
-        <button class="btn btn-sm btn-outline-danger" onclick="checkConfigStatus(true)">
+        <button class="btn btn-sm btn-outline-danger py-0" onclick="checkConfigStatus(true)">
             <i class="bi bi-arrow-clockwise"></i> 存檔後點此重新偵測
         </button>
     </div>
     
-    <!-- 2. 總 Banner：PA-1420 系統健康即時資訊看板 (圖一) 與 功能導覽列 -->
-    <div class="row mb-2 flex-shrink-0">
+    <!-- 2. 總 Banner：PA-1420 系統健康即時資訊看板 (精簡列高版) 與 功能導覽列 -->
+    <div class="row mb-1 flex-shrink-0" id="global-top-banner">
         <div class="col-12">
             <div class="card shadow-sm border-0 bg-white">
-                <div class="card-body py-2 px-3">
+                <div class="card-body py-1 px-2">
                     
-                    <!-- 上層：主機資訊與功能選擇分頁 -->
-                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 pb-2 mb-2 border-bottom">
-                        <div class="d-flex align-items-center gap-2 flex-wrap">
-                            <span class="fw-bold text-dark fs-6"><i class="bi bi-shield-lock-fill text-primary"></i> <span id="sys-hostname">{{ fw_model }}</span></span>
-                            <span class="health-badge"><i class="bi bi-hdd-network text-secondary me-1"></i>型號: <strong id="sys-model">-</strong></span>
-                            <span class="health-badge"><i class="bi bi-code-slash text-secondary me-1"></i>PAN-OS: <strong id="sys-os">-</strong></span>
-                            <span class="health-badge"><i class="bi bi-clock-history text-secondary me-1"></i>運行時間: <strong id="sys-uptime">-</strong></span>
+                    <!-- 上層：主機資訊、本機作業系統/設備/DuckDB 運行狀態與功能選擇分頁 -->
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-1 pb-1 mb-1 border-bottom">
+                        <div class="d-flex align-items-center gap-1 flex-wrap" style="font-size: 14px;">
+                            <span class="fw-bold text-dark me-1 text-nowrap" style="font-size: 15px;"><i class="bi bi-shield-lock-fill text-primary"></i> <span id="sys-hostname">{{ fw_model }}</span></span>
+                            <span class="health-badge text-nowrap"><i class="bi bi-hdd-network text-secondary me-1"></i>型號: <strong id="sys-model">-</strong></span>
+                            <span class="health-badge text-nowrap"><i class="bi bi-code-slash text-secondary me-1"></i>PAN-OS: <strong id="sys-os">-</strong></span>
+                            <span class="health-badge text-nowrap"><i class="bi bi-clock-history text-secondary me-1"></i>運行時間: <strong id="sys-uptime">-</strong></span>
+                            <span class="health-badge text-nowrap" id="host-os-badge" title="本機伺服器作業系統平台">
+                                <i class="bi {% if host_os_type == 'windows' %}bi-windows text-primary{% else %}bi-terminal-fill text-dark{% endif %} me-1" id="host-os-icon"></i>作業系統: <strong id="host-os-name" class="font-monospace text-dark">{{ host_os|default:"-" }}</strong>
+                            </span>
+                            <span class="health-badge text-nowrap" id="host-hw-badge" title="本機伺服器硬體規格與 DuckDB 自動分配資源上限">
+                                <i class="bi bi-pc-display text-primary me-1"></i>設備: <strong id="host-cpu-ram" class="font-monospace text-dark">{{ host_cpu_ram|default:"-C / -G" }}</strong>
+                            </span>
+                            <span class="health-badge text-nowrap" id="duckdb-runtime-badge" title="DuckDB 運作位置: {{ duckdb_path }}｜背景轉檔 (ETL) 與前端查詢通道即時運行數量">
+                                <i class="bi bi-database-gear text-success me-1"></i><strong id="host-etl-status" class="font-monospace text-secondary">0/1</strong> ETL / <strong id="host-duckdb-status" class="font-monospace text-secondary">0/2</strong> DuckDB運行
+                            </span>
                         </div>
 
                         <!-- 🌟 右上角功能整合下拉選單 (圖示完整保留，自適應動態標題) -->
-                        <div class="dropdown">
-                            <button class="btn btn-outline-secondary dropdown-toggle fw-bold d-flex align-items-center gap-2 bg-light text-dark shadow-sm py-1 px-3 border" type="button" id="navModuleDropdown" data-bs-toggle="dropdown" aria-expanded="false" style="font-size: 14px;">
+                        <div class="dropdown ms-auto">
+                            <button class="btn btn-outline-secondary dropdown-toggle fw-bold d-flex align-items-center gap-1 bg-light text-dark shadow-sm py-0 px-2 border" type="button" id="navModuleDropdown" data-bs-toggle="dropdown" aria-expanded="false" style="font-size: 12.5px; height: 26px;">
                                 {% if active_page == 'dhcp' %}
                                     <i class="bi bi-ethernet text-primary"></i> DHCP 租約管理
                                 {% elif active_page == 'traffic' %}
@@ -163,20 +208,20 @@
                     </div>
 
                     <!-- 下層：雙 CPU、記憶體、SSD 與活躍連線數 (點擊開啟圖表) -->
-                    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
-                        <div class="d-flex align-items-center gap-3 flex-wrap">
+                    <div class="d-flex align-items-center justify-content-between flex-wrap gap-1">
+                        <div class="d-flex align-items-center gap-2 flex-wrap">
                             <!-- 管理平面 CPU (MP) -->
                             <span class="health-badge clickable-badge" title="點擊查看歷史趨勢圖" onclick="openChartModal('mp_cpu', '管理 CPU (MP) 使用率趨勢 (%)', 'rgb(13, 110, 253)')">
                                 <i class="bi bi-gear-wide-connected text-primary me-1"></i>管理 CPU (MP): 
                                 <strong id="sys-mp-cpu" class="font-monospace text-success">0%</strong>
-                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 11px;"></i>
+                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 10px;"></i>
                             </span>
 
                             <!-- 資料平面 CPU (DP) -->
                             <span class="health-badge clickable-badge" title="點擊查看歷史趨勢圖" onclick="openChartModal('dp_cpu', '資料 CPU (DP) 使用率趨勢 (%)', 'rgb(253, 126, 20)')">
                                 <i class="bi bi-lightning-charge-fill text-warning me-1"></i>資料 CPU (DP): 
                                 <strong id="sys-dp-cpu" class="font-monospace text-success">0%</strong>
-                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 11px;"></i>
+                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 10px;"></i>
                             </span>
 
                             <!-- 系統記憶體 (RAM) -->
@@ -184,7 +229,7 @@
                                 <i class="bi bi-memory text-info me-1"></i>記憶體: 
                                 <strong id="sys-mem" class="font-monospace text-success">0%</strong>
                                 <small class="text-muted ms-1" id="sys-mem-desc"></small>
-                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 11px;"></i>
+                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 10px;"></i>
                             </span>
 
                             <!-- SSD 磁碟狀態 -->
@@ -192,19 +237,19 @@
                                 <i class="bi bi-device-ssd text-danger me-1"></i>SSD (日誌區): 
                                 <strong id="sys-disk" class="font-monospace text-success">0%</strong>
                                 <small class="text-muted ms-1" id="sys-disk-desc"></small>
-                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 11px;"></i>
+                                <i class="bi bi-graph-up text-muted ms-1" style="font-size: 10px;"></i>
                             </span>
                         </div>
 
                         <!-- 連線數即時容量 -->
-                        <div class="d-flex align-items-center gap-2 ps-2 border-start clickable-badge rounded pe-2 py-1" title="點擊查看歷史趨勢圖" onclick="openChartModal('active_sessions', '活躍連線數歷史趨勢', 'rgb(25, 135, 84)')">
-                            <span class="small text-muted"><i class="bi bi-bezier2 me-1"></i>連線數:</span>
+                        <div class="d-flex align-items-center gap-2 ps-2 border-start clickable-badge rounded pe-2 py-0" style="font-size: 14px;" title="點擊查看歷史趨勢圖" onclick="openChartModal('active_sessions', '活躍連線數歷史趨勢', 'rgb(25, 135, 84)')">
+                            <span class="text-muted"><i class="bi bi-bezier2 me-1"></i>連線數:</span>
                             <span class="fw-bold font-monospace text-primary" id="sys-sessions">0 / 0</span>
-                            <div class="progress" style="width: 80px; height: 8px;">
+                            <div class="progress" style="width: 72px; height: 6px;">
                                 <div id="session-bar" class="progress-bar bg-success" role="progressbar" style="width: 0%;"></div>
                             </div>
-                            <span class="small font-monospace" id="session-pct">0%</span>
-                            <i class="bi bi-graph-up text-muted ms-1" style="font-size: 11px;"></i>
+                            <span class="font-monospace" id="session-pct">0%</span>
+                            <i class="bi bi-graph-up text-muted ms-1" style="font-size: 10px;"></i>
                         </div>
                     </div>
 
@@ -226,7 +271,7 @@
                 <h6 class="modal-title fw-bold mb-0" id="nasImportModalLabel">
                     <i class="bi bi-hdd-network text-primary me-1"></i>匯入 Synology NAS 歷史日誌
                 </h6>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close" style="font-size: 12px;"></button>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close" style="font-size: 14px;"></button>
             </div>
             <div class="modal-body">
                 
@@ -325,7 +370,7 @@
                     <canvas id="healthChart"></canvas>
                 </div>
             </div>
-            <div class="modal-footer py-1 px-3 d-flex justify-content-between text-muted small bg-light" style="font-size: 12px;">
+            <div class="modal-footer py-1 px-3 d-flex justify-content-between text-muted small bg-light" style="font-size: 14px;">
                 <span><i class="bi bi-info-circle me-1"></i>系統每 1 分鐘自動採樣記錄，圖表顯示最近 3 小時趨勢 (最多 180 筆)。</span>
                 <button type="button" class="btn btn-secondary btn-sm py-0 px-2" style="font-size: 12px; height: 24px;" data-bs-dismiss="modal">關閉</button>
             </div>
@@ -337,8 +382,14 @@
 <script>
     // 全域共用變數與圖表邏輯
     let latestSystemHealthData = null;
-    const chartModalObj = new bootstrap.Modal(document.getElementById('chartModal'));
+    let chartModalObj = null;
     let healthChartInstance = null;
+    window.customInternalSubnets = [];
+
+    document.addEventListener("DOMContentLoaded", () => {
+        const modalEl = document.getElementById("chartModal");
+        if (modalEl) { chartModalObj = new bootstrap.Modal(modalEl); }
+    });
 
     function checkConfigStatus(manual = false) {
         fetch('/api/config-status')
@@ -351,6 +402,9 @@
                     if (manual) alert(`❌ 設定檔檢查失敗：\n${data.message}`);
                 } else {
                     banner.classList.add('d-none');
+                    if (data.internal_subnets) {
+                        window.customInternalSubnets = data.internal_subnets;
+                    }
                     if (manual) {
                         alert('✅ 設定檔驗證成功！正在連線 PA-1420...');
                         refreshSystemHealth();
@@ -397,6 +451,8 @@
                     const bar = document.getElementById('session-bar');
                     bar.style.width = `${Math.min(data.session_usage_pct, 100)}%`;
                     bar.className = data.session_usage_pct > 80 ? 'progress-bar bg-danger' : (data.session_usage_pct > 50 ? 'progress-bar bg-warning' : 'progress-bar bg-success');
+
+                    applyDuckDBRuntimeBadge(data);
                 }
             })
             .catch(err => console.log('系統健康狀態更新失敗', err));
@@ -804,11 +860,81 @@
         }, 800);
     }
 
+    function applyDuckDBRuntimeBadge(data) {
+        if (!data) return;
+        if (data.host_os) {
+            const osEl = document.getElementById('host-os-name');
+            if (osEl) osEl.innerText = data.host_os;
+            const osIcon = document.getElementById('host-os-icon');
+            if (osIcon && data.host_os_type) {
+                osIcon.className = data.host_os_type === 'windows'
+                    ? 'bi bi-windows text-primary me-1'
+                    : 'bi bi-terminal-fill text-dark me-1';
+            }
+        }
+        const cpu = data.host_cpu_cores;
+        const ram = data.host_ram_gb;
+        if (cpu !== undefined && ram !== undefined) {
+            const hwEl = document.getElementById('host-cpu-ram');
+            if (hwEl) hwEl.innerText = `${cpu}C / ${Number(ram).toFixed(1)}G`;
+            const hwBadge = document.getElementById('host-hw-badge');
+            if (hwBadge && data.etl_mem_gb !== undefined) {
+                hwBadge.title = `本機規格: ${cpu} vCPU / ${Number(ram).toFixed(1)} GB RAM｜ETL上限: ${data.etl_mem_gb}GB (${data.etl_threads}執行緒)｜查詢上限: ${data.ui_mem_gb}GB×${data.max_duckdb} (${data.ui_threads}執行緒)`;
+            }
+        }
+
+        const actETL = data.active_etl || 0;
+        const maxETL = data.max_etl || 1;
+        const actUI = data.active_duckdb || 0;
+        const maxUI = data.max_duckdb || 2;
+
+        const etlEl = document.getElementById('host-etl-status');
+        const dbEl = document.getElementById('host-duckdb-status');
+        const rtBadge = document.getElementById('duckdb-runtime-badge');
+
+        if (etlEl) {
+            etlEl.innerText = `${actETL}/${maxETL}`;
+            etlEl.className = `font-monospace ${actETL > 0 ? 'text-warning-emphasis fw-bold' : 'text-secondary'}`;
+        }
+        if (dbEl) {
+            dbEl.innerText = `${actUI}/${maxUI}`;
+            dbEl.className = `font-monospace ${actUI > 0 ? 'text-primary fw-bold' : 'text-secondary'}`;
+        }
+        if (rtBadge) {
+            if (data.duckdb_path) {
+                rtBadge.title = `DuckDB 運作位置: ${data.duckdb_path}｜背景轉檔 (ETL) ${actETL}/${maxETL}、前端查詢 ${actUI}/${maxUI}`;
+            }
+            if (actETL > 0) {
+                rtBadge.style.backgroundColor = '#fff3cd';
+                rtBadge.style.border = '1px solid #ffc107';
+            } else if (actUI > 0) {
+                rtBadge.style.backgroundColor = '#e7f1ff';
+                rtBadge.style.border = '1px solid #86b7fe';
+            } else {
+                rtBadge.style.backgroundColor = '#eef2f6';
+                rtBadge.style.border = '1px solid transparent';
+            }
+        }
+    }
+
+    function refreshDuckDBRuntimeStatus() {
+        fetch(`/api/duckdb-status?_t=${Date.now()}`)
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    applyDuckDBRuntimeBadge(data);
+                }
+            })
+            .catch(() => {});
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
         checkConfigStatus();
         refreshSystemHealth();
+        refreshDuckDBRuntimeStatus();
     });
     setInterval(refreshSystemHealth, 30000);
+    setInterval(refreshDuckDBRuntimeStatus, 3000);
 </script>
 
 {% block scripts %}{% endblock %}

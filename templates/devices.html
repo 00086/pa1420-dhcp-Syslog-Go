@@ -66,9 +66,16 @@
 
 /* 滾動表格容器 (垂直自適應剩餘空間) */
 .table-scroll-container { 
-    overflow-y: scroll; 
+    overflow: hidden; 
     flex-grow: 1; 
+    min-height: 0; 
     background-color: #ffffff;
+
+}
+.table-scroll-container > .table-responsive {
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: auto;
 }
 
 /* 嚴格 9 欄規格表格 */
@@ -211,11 +218,11 @@
     </div>
 </div>
 
-<!-- 搜尋與操作工具列 (強制同一列 flex-nowrap) -->
-<div class="row mb-2 flex-shrink-0">
+<!-- 搜尋與操作工具列 (精簡列高版) -->
+<div class="row mb-1 flex-shrink-0 compact-filter-bar">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white">
-            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2">
+            <div class="card-body py-1 px-2 d-flex align-items-center justify-content-between flex-nowrap gap-1">
                 
                 <!-- 左側：搜尋輸入框與篩選下拉 -->
                 <div class="d-flex align-items-center gap-2 flex-grow-1">

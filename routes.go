@@ -70,8 +70,13 @@ func renderPongo(c *gin.Context, tplName string, ctx pongo2.Context) {
 	if ctx == nil {
 		ctx = pongo2.Context{}
 	}
-	// 🌟 自動為所有網頁樣板注入防火牆真實型號 (如 PA-5250)
+	// 🌟 自動為所有網頁樣板注入防火牆真實型號與本機作業系統/硬體規格
 	ctx["fw_model"] = getFWModelName()
+	hw := getAdaptiveDuckDBProfile()
+	ctx["host_os"] = hw.HostOS
+	ctx["host_os_type"] = hw.HostOSType
+	ctx["host_cpu_ram"] = fmt.Sprintf("%dC / %.1fG", hw.CPUCores, hw.TotalRAMGB)
+	ctx["duckdb_path"] = hw.DuckDBPath
 
 	tpl, err := pongoSet.FromFile(tplName)
 	if err != nil {
@@ -93,6 +98,9 @@ func registerRoutes(r *gin.Engine) {
 	})
 
 	r.GET("/traffic", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		c.Header("Pragma", "no-cache")
+		c.Header("Expires", "0")
 		renderPongo(c, "traffic.html", pongo2.Context{"active_page": "traffic"})
 	})
 	
@@ -126,7 +134,7 @@ func registerRoutes(r *gin.Engine) {
 
 		result, err := QueryAuditLogs(date, status, model, category, keyword, page, perPage)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -162,7 +170,7 @@ func registerRoutes(r *gin.Engine) {
 
 		count, err := TriggerTaskRetry(date, slot, model, category)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -253,6 +261,7 @@ func registerRoutes(r *gin.Engine) {
 			"message":   "設定檔配置正確",
 			"fw_ip":     fwIP,
 			"interface": iface,
+			"internal_subnets": getInternalSubnets(),
 		})
 	})
 
@@ -274,17 +283,25 @@ func registerRoutes(r *gin.Engine) {
 	r.GET("/api/system-health", func(c *gin.Context) {
 		data, err := fetchPAHealthData()
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 		c.JSON(http.StatusOK, data)
+	})
+
+	// 5-2. 本機伺服器硬體規格與 DuckDB ETL / 查詢即時併發狀態 API
+	r.GET("/api/duckdb-status", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		st := getDuckDBRuntimeStatus()
+		st["status"] = "success"
+		c.JSON(http.StatusOK, st)
 	})
 
 	// 6. 硬體歷史折線圖數據 (最末 180 筆)
 	r.GET("/api/health-history", func(c *gin.Context) {
 		db, err := initDB()
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -294,7 +311,7 @@ func registerRoutes(r *gin.Engine) {
 			ORDER BY id DESC LIMIT 180
 		`)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 		defer rows.Close()
@@ -331,7 +348,7 @@ func registerRoutes(r *gin.Engine) {
 
 		db, err := initDB()
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -399,20 +416,20 @@ func registerRoutes(r *gin.Engine) {
 		uploadDate := c.DefaultPostForm("record_date", time.Now().Format("2006-01-02"))
 		f, err := file.Open()
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 		defer f.Close()
 
 		bytesData, err := io.ReadAll(f)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
 		success, duplicate, multiLease, uniqueCount, err := parseAndInsertXML(bytesData, uploadDate)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -431,7 +448,7 @@ func registerRoutes(r *gin.Engine) {
 	r.GET("/api/threat-analytics", func(c *gin.Context) {
 		entries, err := fetchPAThreatLogs(150)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -998,7 +1015,7 @@ func registerRoutes(r *gin.Engine) {
 		})
 	})
 	
-	// 11. 流量日誌檢索與直方圖數據 API
+	// 11. 流量日誌檢索與直方圖數據 API（含嚴格欄位驗證、防注入攔截、跨日查詢與預聚合總表）
 	r.GET("/api/traffic-query", func(c *gin.Context) {
 		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 		c.Header("Pragma", "no-cache")
@@ -1006,6 +1023,7 @@ func registerRoutes(r *gin.Engine) {
 
 		date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
 		date = strings.ReplaceAll(strings.TrimSpace(date), "/", "-")
+		rawQuery := strings.TrimSpace(c.DefaultQuery("raw_query", ""))
 		src := strings.TrimSpace(c.DefaultQuery("src", ""))
 		dst := strings.TrimSpace(c.DefaultQuery("dst", ""))
 		app := strings.TrimSpace(c.DefaultQuery("app", ""))
@@ -1019,44 +1037,101 @@ func registerRoutes(r *gin.Engine) {
 			order = "DESC"
 		}
 		totalCount, _ := strconv.ParseInt(c.DefaultQuery("total_count", "0"), 10, 64)
-
-		// 🌟 接收首屏秒開與背景計數參數
 		firstLoad := c.DefaultQuery("first_load", "false") == "true"
 		countOnly := c.DefaultQuery("count_only", "false") == "true"
 
-		result, err := queryTrafficAnalytics(date, src, dst, app, action, zone, page, perPage, onlyLogs, order, totalCount, firstLoad, countOnly)
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
-			return
-		}
-
-		// 🌟 若僅為背景彙算總數 (count_only)，僅回傳統計數據以節省網路頻寬
-		if countOnly {
+		// 🛡️ 後端嚴格欄位白名單與防注入驗證（阻擋任何繞過前端的非法查詢）
+		vf, valErr := validateTrafficParamsFromHTTP(date, rawQuery, src, dst, app, action, zone)
+		if valErr != nil {
 			c.JSON(http.StatusOK, gin.H{
-				"status":      "success",
-				"total_flows": result.TotalFlows,
-				"total_bytes": result.TotalBytes,
-				"top_app":     result.TopApp,
-				"deny_flows":  result.DenyFlows,
-				"db_size":     result.DbSize,
-				"histogram":   result.Histogram,
-				"total_pages": result.TotalPages,
+				"status":       "syntax_error",
+				"message":      valErr.Error(),
+				"valid_fields": []string{"src", "natsrc", "dst", "natdst", "dport", "app", "action", "zone", "rule", "reason", "date", "days", "summary"},
 			})
 			return
 		}
 
-		// 🌟 正常回傳（包含首屏 50/100/200 筆明細）
+		result, err := queryTrafficAnalyticsWithFilter(vf, page, perPage, onlyLogs, order, totalCount, firstLoad, countOnly)
+		if err != nil {
+			fmt.Printf("[Traffic 查詢異常] %v\n", err)
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
+			return
+		}
+
+		if countOnly {
+			c.JSON(http.StatusOK, gin.H{
+				"status":            "success",
+				"total_flows":       result.TotalFlows,
+				"total_bytes":       result.TotalBytes,
+				"top_app":           result.TopApp,
+				"deny_flows":        result.DenyFlows,
+				"db_size":           result.DbSize,
+				"histogram":         result.Histogram,
+				"total_pages":       result.TotalPages,
+				"start_date":        result.StartDate,
+				"end_date":          result.EndDate,
+				"is_cross_day":      result.IsCrossDay,
+				"show_daily_rollup": result.ShowDailyRollup,
+				"daily_rollups":     result.DailyRollups,
+				"from_db_cache":     result.FromDBCache,
+			})
+			return
+		}
+
 		c.JSON(http.StatusOK, gin.H{
-			"status":       "success",
-			"total_flows":  result.TotalFlows,
-			"total_bytes":  result.TotalBytes,
-			"top_app":      result.TopApp,
-			"deny_flows":   result.DenyFlows,
-			"db_size":      result.DbSize,
-			"histogram":    result.Histogram,
-			"logs":         result.Logs,
-			"current_page": result.CurrentPage,
-			"total_pages":  result.TotalPages,
+			"status":            "success",
+			"total_flows":       result.TotalFlows,
+			"total_bytes":       result.TotalBytes,
+			"top_app":           result.TopApp,
+			"deny_flows":        result.DenyFlows,
+			"db_size":           result.DbSize,
+			"histogram":         result.Histogram,
+			"logs":              result.Logs,
+			"current_page":      result.CurrentPage,
+			"total_pages":       result.TotalPages,
+			"start_date":        result.StartDate,
+			"end_date":          result.EndDate,
+			"is_cross_day":      result.IsCrossDay,
+			"show_daily_rollup": result.ShowDailyRollup,
+			"daily_rollups":     result.DailyRollups,
+			"from_db_cache":     result.FromDBCache,
+		})
+	})
+
+	// 11-2. 🌟 流量 Top-N 排行視覺化與 Zone-to-Zone 通訊拓撲 API (Top Talkers / Top Hit Rules / Sankey)
+	r.GET("/api/traffic-topn", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		c.Header("Pragma", "no-cache")
+		c.Header("Expires", "0")
+
+		date := strings.ReplaceAll(strings.TrimSpace(c.DefaultQuery("date", time.Now().Format("2006-01-02"))), "/", "-")
+		rawQuery := strings.TrimSpace(c.DefaultQuery("raw_query", ""))
+		src := strings.TrimSpace(c.DefaultQuery("src", ""))
+		dst := strings.TrimSpace(c.DefaultQuery("dst", ""))
+		app := strings.TrimSpace(c.DefaultQuery("app", ""))
+		action := strings.TrimSpace(c.DefaultQuery("action", "all"))
+		zone := strings.TrimSpace(c.DefaultQuery("zone", "all"))
+
+		vf, valErr := validateTrafficParamsFromHTTP(date, rawQuery, src, dst, app, action, zone)
+		if valErr != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "syntax_error", "message": valErr.Error()})
+			return
+		}
+
+		res, err := queryTrafficTopNAnalytics(vf)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":             "success",
+			"top_upload_hosts":   res.TopUploadHosts,
+			"top_download_hosts": res.TopDownloadHosts,
+			"top_rules":          res.TopRules,
+			"zone_flows":         res.ZoneFlows,
+			"is_sampled":         res.IsSampled,
+			"sample_note":        res.SampleNote,
 		})
 	})
 	
@@ -1072,13 +1147,13 @@ func registerRoutes(r *gin.Engine) {
 
 		entries, err := fetchPATrafficLogs(count)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
 		success, total, err := saveTrafficLogsToParquet(entries)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -1109,13 +1184,13 @@ func registerRoutes(r *gin.Engine) {
 		// 呼叫過濾器函式 (filter="" 代表無條件抓取當前最新日誌，且時間戳記已自動轉為標準格式)
 		entries, err := fetchPAThreatLogsWithFilter(count, "")
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
 		success, total, err := saveThreatLogsToParquet(entries)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -2200,6 +2275,9 @@ func registerRoutes(r *gin.Engine) {
 		} else if logType == "config" { // 👈 🌟 補上此分支
 			targetDir = configDir
 			prefix = "config_"
+		} else if logType == "audit" {
+			targetDir = filepath.Join(appDir, "audit_logs")
+			prefix = "audit_"
 		} else {
 			targetDir = trafficDir
 			prefix = "traffic_"
@@ -2584,7 +2662,7 @@ func registerRoutes(r *gin.Engine) {
 
 		res, err := querySystemAnalytics(date, subtype, severity, eventID, keyword, page, perPage, onlyLogs)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -2614,13 +2692,13 @@ func registerRoutes(r *gin.Engine) {
 
 		entries, err := fetchPASystemLogsWithFilter(count, "")
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
 		success, total, err := saveSystemLogsToParquet(entries)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -2649,7 +2727,7 @@ func registerRoutes(r *gin.Engine) {
 		}
 		profile, err := queryHostTimeline(ip, date)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "success", "data": profile})
@@ -2678,7 +2756,7 @@ func registerRoutes(r *gin.Engine) {
 
 		res, err := queryConfigAnalytics(date, admin, clientIP, keyword, page, perPage)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -2701,12 +2779,12 @@ func registerRoutes(r *gin.Engine) {
 		if count <= 0 { count = 2500 }
 		entries, err := fetchPAConfigLogsWithFilter(count, "")
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 		success, total, err := saveConfigLogsToParquet(entries)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{
@@ -2733,7 +2811,7 @@ func registerRoutes(r *gin.Engine) {
 
 		res, err := queryThreatAnalytics(date, src, dst, severity, action, threatName, page, perPage, onlyLogs)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -2749,6 +2827,33 @@ func registerRoutes(r *gin.Engine) {
 			"logs":            res.Logs,
 			"current_page":    res.CurrentPage,
 			"total_pages":     res.TotalPages,
+		})
+	})
+
+	// 🌟 威脅 Top-N 排行視覺化與 Zone-to-Zone 攻擊流向拓撲 API
+	r.GET("/api/threat-topn", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		c.Header("Pragma", "no-cache")
+		c.Header("Expires", "0")
+
+		date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
+		src := strings.TrimSpace(c.DefaultQuery("src", ""))
+		dst := strings.TrimSpace(c.DefaultQuery("dst", ""))
+		severity := strings.TrimSpace(c.DefaultQuery("severity", "all"))
+		action := strings.TrimSpace(c.DefaultQuery("action", "all"))
+		threatName := strings.TrimSpace(c.DefaultQuery("threat_name", ""))
+
+		res, err := queryThreatTopNAnalytics(date, src, dst, severity, action, threatName)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":             "success",
+			"top_internal_hosts": res.TopInternalHosts,
+			"top_threat_rules":   res.TopThreatRules,
+			"zone_flows":         res.ZoneFlows,
 		})
 	})
 	
@@ -2890,15 +2995,18 @@ func registerRoutes(r *gin.Engine) {
 			return 0.0
 		}
 
-		// 🌟 3. 三向卡片統計
+		// 🌟 3. 三向卡片統計 (相容 LAN/WAN 與 inside/outside 區域命名)
 		threeWaySQL := fmt.Sprintf(`
 			SELECT 
-				CAST(round(COALESCE(SUM(CASE WHEN from_zone = 'LAN' AND to_zone = 'WAN' THEN bytes END), 0)/1048576.0, 2) AS DOUBLE) AS lan_wan_mb,
-				CAST(round(COALESCE(SUM(CASE WHEN from_zone = 'WAN' AND to_zone = 'LAN' THEN bytes END), 0)/1048576.0, 2) AS DOUBLE) AS wan_lan_mb,
-				CAST(round(COALESCE(SUM(CASE WHEN from_zone = 'LAN' AND to_zone = 'LAN' THEN bytes END), 0)/1048576.0, 2) AS DOUBLE) AS lan_lan_mb
+				CAST(round(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes END), 0)/1048576.0, 2) AS DOUBLE) AS lan_wan_mb,
+				CAST(round(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes END), 0)/1048576.0, 2) AS DOUBLE) AS wan_lan_mb,
+				CAST(round(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes END), 0)/1048576.0, 2) AS DOUBLE) AS lan_lan_mb
 			FROM read_parquet('%s')
 			WHERE %s
-		`, pattern, baseWhereClause)
+		`, sqlIsInternalZoneExpr("from_zone"), sqlIsExternalZoneExpr("to_zone"),
+			sqlIsExternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone"),
+			sqlIsInternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone"),
+			pattern, baseWhereClause)
 
 		var sumLanWan, sumWanLan, sumLanLan float64
 		if threeWayRes, err := runDuckDBQuery(threeWaySQL); err == nil && len(threeWayRes) > 0 {
@@ -2910,11 +3018,11 @@ func registerRoutes(r *gin.Engine) {
 		// 🌟 4. 表格過濾條件 (Zone)
 		tableConds := append([]string{}, baseConds...)
 		if req.Zone == "download" {
-			tableConds = append(tableConds, "from_zone = 'LAN' AND to_zone = 'WAN'")
+			tableConds = append(tableConds, fmt.Sprintf("%s AND %s", sqlIsInternalZoneExpr("from_zone"), sqlIsExternalZoneExpr("to_zone")))
 		} else if req.Zone == "upload" {
-			tableConds = append(tableConds, "from_zone = 'WAN' AND to_zone = 'LAN'")
+			tableConds = append(tableConds, fmt.Sprintf("%s AND %s", sqlIsExternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone")))
 		} else if req.Zone == "internal" {
-			tableConds = append(tableConds, "from_zone = 'LAN' AND to_zone = 'LAN'")
+			tableConds = append(tableConds, fmt.Sprintf("%s AND %s", sqlIsInternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone")))
 		}
 		tableWhereClause := strings.Join(tableConds, " AND ")
 
@@ -2949,7 +3057,7 @@ func registerRoutes(r *gin.Engine) {
 
 		logsRes, err := runDuckDBQuery(searchSQL)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
 			return
 		}
 
@@ -3051,11 +3159,11 @@ func registerRoutes(r *gin.Engine) {
 		}
 
 		if req.Zone == "download" {
-			conds = append(conds, "from_zone = 'LAN' AND to_zone = 'WAN'")
+			conds = append(conds, fmt.Sprintf("%s AND %s", sqlIsInternalZoneExpr("from_zone"), sqlIsExternalZoneExpr("to_zone")))
 		} else if req.Zone == "upload" {
-			conds = append(conds, "from_zone = 'WAN' AND to_zone = 'LAN'")
+			conds = append(conds, fmt.Sprintf("%s AND %s", sqlIsExternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone")))
 		} else if req.Zone == "internal" {
-			conds = append(conds, "from_zone = 'LAN' AND to_zone = 'LAN'")
+			conds = append(conds, fmt.Sprintf("%s AND %s", sqlIsInternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone")))
 		}
 
 		if req.SrcIP != "" { conds = append(conds, fmt.Sprintf("source ILIKE '%%%s%%'", strings.ReplaceAll(req.SrcIP, "'", "''"))) }
@@ -3304,9 +3412,9 @@ func registerRoutes(r *gin.Engine) {
 		orgDesc := ""
 		isInternal := false
 
-		// 🌟 1. 標準私有 IP 判定 (RFC 1918)
+		// 🌟 1. 標準私有 IP 與 pa1420key.txt 自訂內網網段判定
 		parsedIP := net.ParseIP(targetIP)
-		if parsedIP != nil && parsedIP.IsPrivate() {
+		if parsedIP != nil && isPrivateOrLocalIP(parsedIP) {
 			isInternal = true
 		}
 
@@ -3418,15 +3526,230 @@ func registerRoutes(r *gin.Engine) {
 			}
 		}
 
+		intel := LookupGeoIPAndIOC(targetIP)
+		if !isInternal && intel.BadgeLabel != "" {
+			if orgDesc == "" || orgDesc == "網際網路外部公網主機" {
+				orgDesc = intel.BadgeLabel
+			} else if intel.ASN != "" {
+				orgDesc = fmt.Sprintf("%s · %s", intel.BadgeLabel, orgDesc)
+			}
+		}
+
 		c.JSON(http.StatusOK, gin.H{
-			"success":     true,
-			"ip":          targetIP,
-			"hostname":    hostname,
-			"mac_address": mac,
-			"mac_source":  macSource,
-			"org_desc":    orgDesc,
-			"is_internal": isInternal,
+			"success":      true,
+			"ip":           targetIP,
+			"hostname":     hostname,
+			"mac_address":  mac,
+			"mac_source":   macSource,
+			"org_desc":     orgDesc,
+			"is_internal":  isInternal,
+			"geo_info":     intel.BadgeLabel,
+			"country_code": intel.CountryCode,
+			"country_name": intel.CountryName,
+			"city_name":    intel.CityName,
+			"asn":          intel.ASN,
+			"org":          intel.Org,
+			"asn_type":     intel.ASNType,
+			"is_malicious": intel.IsMalicious,
+			"ioc_badge":    intel.IOCBadge,
 		})
+	})
+
+	// ==========================================
+	// 🌍 離線 MaxMind GeoLite2 (MMDB) 與惡意情資 (IOC) 管理 API
+	// ==========================================
+	r.GET("/api/geoip-ioc/status", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		st := GetGeoIPAndIOCStatus()
+		st["status"] = "success"
+		c.JSON(http.StatusOK, st)
+	})
+
+	r.GET("/api/geoip-ioc/lookup", func(c *gin.Context) {
+		ip := strings.TrimSpace(c.Query("ip"))
+		if ip == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "請輸入欲查詢的 IP 位址"})
+			return
+		}
+		res := LookupGeoIPAndIOC(ip)
+		c.JSON(http.StatusOK, gin.H{"status": "success", "data": res})
+	})
+
+	r.GET("/api/geoip-ioc/list", func(c *gin.Context) {
+		kw := strings.TrimSpace(c.Query("keyword"))
+		items, err := ListThreatIntelIOCs(kw)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "success", "items": items})
+	})
+
+	r.POST("/api/geoip-ioc/import", func(c *gin.Context) {
+		var rawText, iocType, threatName, severity, source string
+		if strings.Contains(c.GetHeader("Content-Type"), "multipart/form-data") {
+			rawText = c.PostForm("raw_text")
+			iocType = c.DefaultPostForm("ioc_type", "C2")
+			threatName = c.PostForm("threat_name")
+			severity = c.DefaultPostForm("severity", "CRITICAL")
+			source = c.DefaultPostForm("source", "IOC 檔案匯入")
+			if file, err := c.FormFile("file"); err == nil && file != nil {
+				if f, openErr := file.Open(); openErr == nil {
+					b, _ := io.ReadAll(f)
+					f.Close()
+					rawText += "\n" + string(b)
+					if source == "IOC 檔案匯入" {
+						source = file.Filename
+					}
+				}
+			}
+		} else {
+			var req struct {
+				RawText    string `json:"raw_text"`
+				IOCType    string `json:"ioc_type"`
+				ThreatName string `json:"threat_name"`
+				Severity   string `json:"severity"`
+				Source     string `json:"source"`
+			}
+			_ = c.ShouldBindJSON(&req)
+			rawText = req.RawText
+			iocType = req.IOCType
+			threatName = req.ThreatName
+			severity = req.Severity
+			source = req.Source
+		}
+
+		if strings.TrimSpace(rawText) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "請輸入或上傳至少一筆 IP 或 CIDR 情資"})
+			return
+		}
+
+		imported, skipped, err := BulkImportThreatIntelIOCs(rawText, iocType, threatName, severity, source)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":   "success",
+			"imported": imported,
+			"skipped":  skipped,
+			"message":  fmt.Sprintf("成功匯入 %d 筆惡意情資 IOC（略過無效格式 %d 筆），已即時套用至全系統比對！", imported, skipped),
+		})
+	})
+
+	r.POST("/api/geoip-ioc/toggle", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.PostForm("id"))
+		if id <= 0 {
+			var req struct {
+				ID int `json:"id"`
+			}
+			_ = c.ShouldBindJSON(&req)
+			id = req.ID
+		}
+		db, err := initDB()
+		if err != nil || id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "無效的 IOC ID"})
+			return
+		}
+		_, _ = db.Exec("UPDATE threat_intel_iocs SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END, updated_at = ? WHERE id = ?",
+			time.Now().Format("2006-01-02 15:04:05"), id)
+		InitGeoIPAndThreatIntel()
+		c.JSON(http.StatusOK, gin.H{"status": "success"})
+	})
+
+	r.POST("/api/geoip-ioc/delete", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.PostForm("id"))
+		if id <= 0 {
+			var req struct {
+				ID int `json:"id"`
+			}
+			_ = c.ShouldBindJSON(&req)
+			id = req.ID
+		}
+		db, err := initDB()
+		if err != nil || id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "無效的 IOC ID"})
+			return
+		}
+		_, _ = db.Exec("DELETE FROM threat_intel_iocs WHERE id = ?", id)
+		InitGeoIPAndThreatIntel()
+		c.JSON(http.StatusOK, gin.H{"status": "success"})
+	})
+
+	r.POST("/api/geoip-ioc/upload-mmdb", func(c *gin.Context) {
+		file, err := c.FormFile("file")
+		if err != nil || file == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "請選擇 MaxMind GeoLite2 (.mmdb) 檔案"})
+			return
+		}
+		f, err := file.Open()
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
+			return
+		}
+		defer f.Close()
+
+		if err := SaveUploadedMMDBFile(file.Filename, f); err != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "success",
+			"message": fmt.Sprintf("已成功載入並熱重載離線 MMDB 資料庫：%s", file.Filename),
+			"data":    GetGeoIPAndIOCStatus(),
+		})
+	})
+
+	// 🌟 線上自動更新排程器 API (狀態 / 設定 / 立即同步 / 線上深度反查)
+	r.GET("/api/geoip-ioc/sync-status", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		st := GetGeoIntelSyncStatus()
+		c.JSON(http.StatusOK, gin.H{"status": "success", "data": st})
+	})
+
+	r.POST("/api/geoip-ioc/sync-config", func(c *gin.Context) {
+		var req GeoIntelSyncConfig
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "設定格式錯誤: " + err.Error()})
+			return
+		}
+		if err := SaveGeoIntelSyncConfig(req); err != nil {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "message": sanitizeErrorMessage(err)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "success",
+			"message": "線上自動更新排程設定已儲存！",
+			"data":    GetGeoIntelSyncStatus(),
+		})
+	})
+
+	r.POST("/api/geoip-ioc/sync-now", func(c *gin.Context) {
+		mode := strings.TrimSpace(c.DefaultPostForm("mode", c.DefaultQuery("mode", "all")))
+		started := TriggerGeoIPAndIOCSyncNow(mode)
+		if !started {
+			c.JSON(http.StatusOK, gin.H{
+				"status":  "running",
+				"message": "線上同步任務正在執行中，請稍候...",
+				"data":    GetGeoIntelSyncStatus(),
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "success",
+			"message": "已啟動線上更新作業，完成後將自動熱重載至全系統！",
+			"data":    GetGeoIntelSyncStatus(),
+		})
+	})
+
+	r.GET("/api/geoip-ioc/online-lookup", func(c *gin.Context) {
+		ip := strings.TrimSpace(c.Query("ip"))
+		if ip == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "請輸入欲查詢的 IP 位址"})
+			return
+		}
+		res := LookupOnlineGeoIPDeep(ip)
+		c.JSON(http.StatusOK, gin.H{"status": "success", "data": res})
 	})
 	
 	// 🌟 全網設備 IP / MAC / Hostname 整合資產清冊匯出 API (支援 CSV 匯出)
@@ -3879,6 +4202,11 @@ func registerRoutes(r *gin.Engine) {
 	r.POST("/api/cold-to-hot", func(c *gin.Context) {
 		targetDate := strings.TrimSpace(c.DefaultPostForm("date", c.Query("date")))
 		targetDate = strings.ReplaceAll(targetDate, "/", "-")
+		defer func(d string) {
+			if d != "" {
+				invalidateDailyMetricsCache(d)
+			}
+		}(targetDate)
 		if targetDate == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "請指定日期 (YYYY-MM-DD)"})
 			return
@@ -4048,8 +4376,9 @@ func registerRoutes(r *gin.Engine) {
 			sidExpr := pickVarchar("''", "Session ID", "column22", "session_id")
 
 			tmpFile := fmt.Sprintf("%s.%d.tmp", outHotFile, time.Now().UnixNano())
+			hw := getAdaptiveDuckDBProfile()
 			sql := fmt.Sprintf(`
-				SET max_memory = '32GB'; SET threads = 12; SET preserve_insertion_order = false; SET temp_directory = '%s';
+				SET max_memory = '` + strconv.Itoa(hw.ETLMemGB) + `GB'; SET threads = ` + strconv.Itoa(hw.ETLThreads) + `; SET preserve_insertion_order = false; SET temp_directory = '%s';
 				COPY (
 					SELECT * EXCLUDE (rn) FROM (
 						SELECT *, ROW_NUMBER() OVER (

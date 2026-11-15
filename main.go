@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -48,7 +50,7 @@ func main() {
 		for _, l := range strings.Split(string(content), "\n") {
 			trimmed := strings.TrimSpace(l)
 			// 僅過濾明確帶說明的註解 (如 "# " 或 "# 第")，杜絕誤殺開頭帶 # 的真實密碼
-			if trimmed != "" && !strings.HasPrefix(trimmed, "# ") && !strings.HasPrefix(trimmed, "# 第") {
+			if trimmed != "" && !isPAConfigCommentLine(trimmed) && !strings.HasPrefix(strings.ToUpper(trimmed), "INTERNAL_SUBNETS=") {
 				lines = append(lines, trimmed)
 			}
 		}
@@ -83,6 +85,9 @@ func main() {
 		if tErr == nil && tCleaned > 0 {
 			fmt.Printf("[威脅資料整理] 🛡️ 啟動整併成功！已清理 %d 個碎片，保留 %d 筆紀錄。\n", tCleaned, tRetained)
 		}
+
+		// 🌟 啟動時立即將所有歷史與當日稽核碎片歸位至 audit_logs/YYYY-MM-DD/ 並整併為每日單一主檔
+		ConsolidateAuditLogs()
 	}()
 	
 	go func() {
@@ -135,10 +140,58 @@ func main() {
 	go startSyslogReceiver(514)
 	startSyslogBatchFlusher()
 
-	// 7. Web 伺服器 (支援優雅退出)
+	// 7. Web 伺服器 (HTTPS TLS 1.2+ 主服務 + HTTP 自動升級導向 + 優雅退出)
 	r := gin.Default()
 	_ = r.SetTrustedProxies(nil)
+	r.Use(securityHeadersMiddleware())
 	registerRoutes(r)
+
+	httpsPort := strings.TrimSpace(os.Getenv("PA_HTTPS_PORT"))
+	if httpsPort == "" {
+		httpsPort = "5443"
+	}
+	httpPort := strings.TrimSpace(os.Getenv("PA_HTTP_PORT"))
+	if httpPort == "" {
+		httpPort = "5006"
+	}
+
+	certPath := filepath.Join(appDir, "certs", "server.crt")
+	keyPath := filepath.Join(appDir, "certs", "server.key")
+	if envCert := strings.TrimSpace(os.Getenv("PA_TLS_CERT")); envCert != "" {
+		certPath = envCert
+	}
+	if envKey := strings.TrimSpace(os.Getenv("PA_TLS_KEY")); envKey != "" {
+		keyPath = envKey
+	}
+
+	if err := ensureServerTLSCertificates(certPath, keyPath); err != nil {
+		log.Fatalf("❌ 初始化 TLS 憑證失敗：%v\n", err)
+	}
+	tlsCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		log.Fatalf("❌ 載入 TLS 憑證失敗：%v\n", err)
+	}
+
+	httpsSrv := &http.Server{
+		Addr:      ":" + httpsPort,
+		Handler:   r,
+		TLSConfig: buildStrictTLSConfig(tlsCert),
+	}
+
+	// HTTP 5006 自動轉址至 HTTPS 5443
+	redirectMux := http.NewServeMux()
+	redirectMux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		host := req.Host
+		if h, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+			host = h
+		}
+		target := fmt.Sprintf("https://%s:%s%s", host, httpsPort, req.URL.RequestURI())
+		http.Redirect(w, req, target, http.StatusTemporaryRedirect)
+	})
+	httpRedirectSrv := &http.Server{
+		Addr:    ":" + httpPort,
+		Handler: redirectMux,
+	}
 
 	fwTitle := getFWModelName()
 	if fwTitle == "" {
@@ -149,18 +202,19 @@ func main() {
 	fmt.Printf("🚀 %s 智能監控聯防系統 (Go 原生高效版本) 已啟動！\n", fwTitle)
 	fmt.Println("📡 Syslog 監聽服務：UDP 514 (即時串流接收)")
 	fmt.Println("📁 內建 FTP 接收端：TCP 21 (日誌高速傾印)")
-	fmt.Println("👉 服務監聽埠號：http://127.0.0.1:5006")
+	fmt.Printf("🔒 HTTPS 安全加密服務：https://127.0.0.1:%s (強制 TLS 1.2 / TLS 1.3)\n", httpsPort)
+	fmt.Printf("↪️  HTTP 自動導向埠號：http://127.0.0.1:%s ➔ 自動升級至 HTTPS\n", httpPort)
 	fmt.Println("=========================================================")
 
-	// 🌟 核心升級：以 http.Server 包裝並放入背景協程，主線程監聽系統信號
-	srv := &http.Server{
-		Addr:    ":5006",
-		Handler: r,
-	}
+	go func() {
+		if err := httpsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTPS 伺服器啟動異常：%v\n", err)
+		}
+	}()
 
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("伺服器啟動異常：%v\n", err)
+		if err := httpRedirectSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("⚠️ HTTP 轉址服務啟動異常 (埠號 %s): %v\n", httpPort, err)
 		}
 	}()
 
@@ -178,9 +232,10 @@ func main() {
 	// 2. 平穩關閉 Web 伺服器 (給予 5 秒超時安全退出)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		fmt.Printf("⚠️ 關閉 Web 伺服器逾時或異常: %v\n", err)
+	if err := httpsSrv.Shutdown(ctx); err != nil {
+		fmt.Printf("⚠️ 關閉 HTTPS 伺服器逾時或異常: %v\n", err)
 	}
+	_ = httpRedirectSrv.Shutdown(ctx)
 
 	// 3. 檢查當前是否有進行中的切片任務，確保連線平穩釋放
 	taskMetaLock.Lock()
@@ -191,6 +246,20 @@ func main() {
 		fmt.Printf("⏳ 正在等待進行中的任務 [%s] 完成收尾與釋放連線...\n", runningTask)
 		time.Sleep(2 * time.Second)
 	}
+
+	// 4. 等待進行中的 DuckDB 查詢收尾 (最多 3 秒) 並清理暫存目錄
+	for i := 0; i < 30; i++ {
+		uiBusy := 0
+		if duckdbUISem != nil {
+			uiBusy = len(duckdbUISem)
+		}
+		if len(duckdbETLSem) == 0 && uiBusy == 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	ConsolidateAuditLogs()
+	_ = cleanupStaleDuckDBTempDirs(0)
 
 	fmt.Println("👋 系統已安全平穩退出！下次啟動時將自動進行切片對賬與補齊作業。")
 }

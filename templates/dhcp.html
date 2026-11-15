@@ -18,7 +18,7 @@
     position: sticky; top: 0; background-color: #f8f9fa; z-index: 2;
     box-shadow: 0 2px 2px -1px rgba(0,0,0,0.1); white-space: nowrap;
 }
-.table-scroll-container { overflow-y: scroll; flex-grow: 1; }
+.table-scroll-container { overflow-y: auto; flex-grow: 1; min-height: 0; }
 .table-fixed { table-layout: fixed; width: 100%; margin-bottom: 0; }
 .table-fixed th, .table-fixed td { vertical-align: middle; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
 
@@ -39,8 +39,8 @@
 {% endblock %}
 
 {% block content %}
-<!-- 操作列 (上傳區塊與排程監控) -->
-<div class="row mb-3 flex-shrink-0">
+<!-- 操作列 (上傳區塊與排程監控，精簡間距版) -->
+<div class="row mb-1 flex-shrink-0 compact-filter-bar">
     <div class="col-md-5">
         <div class="card shadow-sm h-100 upload-card d-flex flex-column justify-content-between">
             <div class="d-flex align-items-center gap-2 mb-2">

@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -31,17 +32,22 @@ type AuditLogRecord struct {
 }
 
 var (
-	auditLock        sync.Mutex
-	retryTrackerLock sync.RWMutex
-	retryCounts      = make(map[string]int)  // key: "date_slot" -> 重試次數
-	retryActive      = make(map[string]bool) // key: "date_slot" -> 是否正在佇列中重試
-	retryCancelled   = make(map[string]bool) // key: "date_slot" -> 管理員是否已手動停止重試
+	auditLock             sync.Mutex
+	auditConsolidateMutex sync.Mutex
+	retryTrackerLock      sync.RWMutex
+	retryCounts           = make(map[string]int)  // key: "date_slot" -> 重試次數
+	retryActive           = make(map[string]bool) // key: "date_slot" -> 是否正在佇列中重試
+	retryCancelled        = make(map[string]bool) // key: "date_slot" -> 管理員是否已手動停止重試
 )
 
-// 🌟 核心記錄入口：毫秒級寫入獨立不可變 Parquet 區塊
+// 🌟 取得稽核日誌根目錄
+func getAuditBaseDir() string {
+	return filepath.Join(appDir, "audit_logs")
+}
+
+// 🌟 核心記錄入口：依日期歸入 audit_logs/YYYY-MM-DD/ 子目錄，達 25 個碎片自動背景整併
 func RecordAuditLog(rec AuditLogRecord) {
 	auditLock.Lock()
-	defer auditLock.Unlock()
 
 	if rec.Timestamp == "" {
 		rec.Timestamp = time.Now().Format("2006-01-02 15:04:05")
@@ -49,12 +55,26 @@ func RecordAuditLog(rec AuditLogRecord) {
 	if rec.TargetDate == "" && len(rec.Timestamp) >= 10 {
 		rec.TargetDate = rec.Timestamp[:10]
 	}
+	rec.TargetDate = strings.ReplaceAll(strings.TrimSpace(rec.TargetDate), "/", "-")
+	if rec.TargetDate == "" {
+		rec.TargetDate = time.Now().Format("2006-01-02")
+	}
 
-	auditDir := filepath.Join(appDir, "audit_logs")
-	_ = os.MkdirAll(auditDir, 0755)
+	dayDir := filepath.Join(getAuditBaseDir(), rec.TargetDate)
+	_ = os.MkdirAll(dayDir, 0755)
 
-	chunkPath := filepath.Join(auditDir, fmt.Sprintf("audit_%s_chunk_%d.parquet", rec.TargetDate, time.Now().UnixNano()))
+	chunkPath := filepath.Join(dayDir, fmt.Sprintf("audit_%s_chunk_%d.parquet", rec.TargetDate, time.Now().UnixNano()))
 	_ = parquet.WriteFile(chunkPath, []AuditLogRecord{rec})
+
+	// 檢查該日碎片數量，若累積 >= 25 個即在背景自動微整併，防止單日產生數百個小檔
+	chunks, _ := filepath.Glob(filepath.Join(dayDir, fmt.Sprintf("audit_%s_chunk_*.parquet", rec.TargetDate)))
+	needCompact := len(chunks) >= 25
+	targetDate := rec.TargetDate
+	auditLock.Unlock()
+
+	if needCompact {
+		go ConsolidateAuditLogsForDate(targetDate)
+	}
 }
 
 // 🌟 手動觸發重試：加入 FIFO 佇列排隊執行並記錄次數
@@ -137,8 +157,46 @@ type AuditQueryResult struct {
 	Logs        []map[string]interface{} `json:"logs"`
 }
 
-// 🌟 DuckDB 向量化多條件檢索引擎 (支援計算累計重試次數與重試狀態)
+// 🌟 蒐集指定日期的所有有效稽核 Parquet 檔案 (同時相容 YYYY-MM-DD 子目錄與舊版根目錄扁平檔)
+func collectValidAuditFilesForDate(cleanDate string) []string {
+	auditBase := getAuditBaseDir()
+	dayDir := filepath.Join(auditBase, cleanDate)
+
+	subFiles, _ := filepath.Glob(filepath.Join(dayDir, fmt.Sprintf("audit_%s*.parquet", cleanDate)))
+	rootFiles, _ := filepath.Glob(filepath.Join(auditBase, fmt.Sprintf("audit_%s*.parquet", cleanDate)))
+	candidates := append(subFiles, rootFiles...)
+
+	var validPaths []string
+	for _, f := range candidates {
+		if strings.HasSuffix(f, ".tmp") {
+			continue
+		}
+		if fi, err := os.Stat(f); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			validPaths = append(validPaths, filepath.ToSlash(f))
+		}
+	}
+	return validPaths
+}
+
+// 🌟 DuckDB 向量化多條件檢索引擎 (含背景整併自動重讀容錯)
 func QueryAuditLogs(date, status, model, category, keyword string, page, perPage int) (AuditQueryResult, error) {
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		res, err := queryAuditLogsOnce(date, status, model, category, keyword, page, perPage)
+		if err == nil {
+			return res, nil
+		}
+		lastErr = err
+		if isTransientParquetCompactionError(err) && attempt < 3 {
+			time.Sleep(time.Duration(60*(attempt+1)) * time.Millisecond)
+			continue
+		}
+		break
+	}
+	return AuditQueryResult{CurrentPage: page, TotalPages: 1, Logs: []map[string]interface{}{}}, lastErr
+}
+
+func queryAuditLogsOnce(date, status, model, category, keyword string, page, perPage int) (AuditQueryResult, error) {
 	res := AuditQueryResult{CurrentPage: page, TotalPages: 1}
 	if perPage <= 0 {
 		perPage = 50
@@ -148,25 +206,38 @@ func QueryAuditLogs(date, status, model, category, keyword string, page, perPage
 	}
 
 	cleanDate := strings.ReplaceAll(strings.TrimSpace(date), "/", "-")
-	pattern := filepath.ToSlash(filepath.Join(appDir, "audit_logs", fmt.Sprintf("audit_%s*.parquet", cleanDate)))
+	if cleanDate == "" {
+		cleanDate = time.Now().Format("2006-01-02")
+	}
 
-	matches, _ := filepath.Glob(filepath.Join(appDir, "audit_logs", fmt.Sprintf("audit_%s*.parquet", cleanDate)))
-	if len(matches) == 0 {
+	validPaths := collectValidAuditFilesForDate(cleanDate)
+	if len(validPaths) == 0 {
 		res.Logs = []map[string]interface{}{}
 		return res, nil
+	}
+
+	var sourceExpr string
+	if len(validPaths) == 1 {
+		sourceExpr = fmt.Sprintf("'%s'", validPaths[0])
+	} else {
+		quoted := make([]string, len(validPaths))
+		for i, p := range validPaths {
+			quoted[i] = fmt.Sprintf("'%s'", p)
+		}
+		sourceExpr = fmt.Sprintf("[%s]", strings.Join(quoted, ", "))
 	}
 
 	var conds []string
 	conds = append(conds, "1=1")
 
 	if status != "" && status != "all" {
-		conds = append(conds, fmt.Sprintf("status = '%s'", strings.ToUpper(status)))
+		conds = append(conds, fmt.Sprintf("status = '%s'", strings.ToUpper(strings.ReplaceAll(status, "'", "''"))))
 	}
 	if model != "" && model != "all" {
-		conds = append(conds, fmt.Sprintf("fw_model = '%s'", model))
+		conds = append(conds, fmt.Sprintf("fw_model = '%s'", strings.ReplaceAll(model, "'", "''")))
 	}
 	if category != "" && category != "all" {
-		conds = append(conds, fmt.Sprintf("category = '%s'", category))
+		conds = append(conds, fmt.Sprintf("category = '%s'", strings.ReplaceAll(category, "'", "''")))
 	}
 	if keyword != "" {
 		kw := strings.ReplaceAll(keyword, "'", "''")
@@ -181,11 +252,15 @@ func QueryAuditLogs(date, status, model, category, keyword string, page, perPage
 			COUNT(CASE WHEN status = 'FAILED' THEN 1 END) AS failed_cnt,
 			COALESCE(SUM(record_count), 0) AS total_rows,
 			round(COALESCE(SUM(file_size_mb), 0), 2) AS total_mb
-		FROM read_parquet('%s', union_by_name=true)
+		FROM read_parquet(%s, union_by_name=true)
 		WHERE %s
-	`, pattern, whereClause)
+	`, sourceExpr, whereClause)
 
-	if statRows, err := runDuckDBQuery(statsSQL); err == nil && len(statRows) > 0 {
+	statRows, err := runDuckDBQuery(statsSQL)
+	if err != nil {
+		return res, err
+	}
+	if len(statRows) > 0 {
 		res.TotalEvents = parseDuckDBNumber(statRows[0]["total_events"])
 		res.SuccessCnt = parseDuckDBNumber(statRows[0]["success_cnt"])
 		res.FailedCnt = parseDuckDBNumber(statRows[0]["failed_cnt"])
@@ -215,11 +290,11 @@ func QueryAuditLogs(date, status, model, category, keyword string, page, perPage
 			status, record_count, file_size_mb, duration_sec, output_file,
 			details, error_reason, operator,
 			CAST(COUNT(*) OVER (PARTITION BY target_date, target_slot, category) - 1 AS BIGINT) AS hist_retries
-		FROM read_parquet('%s', union_by_name=true)
+		FROM read_parquet(%s, union_by_name=true)
 		WHERE %s
 		ORDER BY timestamp DESC
 		LIMIT %d OFFSET %d
-	`, pattern, whereClause, perPage, offset)
+	`, sourceExpr, whereClause, perPage, offset)
 
 	logs, err := runDuckDBQuery(listSQL)
 	if err != nil {
@@ -257,57 +332,149 @@ func QueryAuditLogs(date, status, model, category, keyword string, page, perPage
 	return res, nil
 }
 
-// 🌟 每日全量整併：將當日所有 audit chunk 碎片整合為一個單一的 Parquet 主檔
-func ConsolidateAuditLogs() {
-	auditDir := filepath.Join(appDir, "audit_logs")
-	
-	matches, err := filepath.Glob(filepath.Join(auditDir, "audit_*_chunk_*.parquet"))
-	if err != nil || len(matches) == 0 {
-		return
+// 🌟 將 audit_logs 根目錄下的舊版扁平檔自動搬移歸位至 audit_logs/YYYY-MM-DD/ 子目錄
+func migrateFlatAuditFilesToDailyDirs() int {
+	auditBase := getAuditBaseDir()
+	entries, err := os.ReadDir(auditBase)
+	if err != nil {
+		return 0
 	}
 
-	dateMap := make(map[string][]string)
-	for _, m := range matches {
-		base := filepath.Base(m)
-		parts := strings.Split(base, "_")
-		if len(parts) >= 2 {
-			dateStr := parts[1]
-			dateMap[dateStr] = append(dateMap[dateStr], m)
-		}
-	}
+	dateRe := regexp.MustCompile(`(\d{4}-\d{2}-\d{2})`)
+	moved := 0
 
-	duckdbExe := getDuckDBExePath()
-	if _, err := os.Stat(duckdbExe); os.IsNotExist(err) {
-		return
-	}
-
-	for dateStr, frags := range dateMap {
-		if len(frags) == 0 {
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".parquet") {
 			continue
 		}
-		
-		targetFile := filepath.Join(auditDir, fmt.Sprintf("audit_%s.parquet", dateStr))
-		tmpFile := targetFile + ".tmp"
-		
-		pattern := filepath.ToSlash(filepath.Join(auditDir, fmt.Sprintf("audit_%s*.parquet", dateStr)))
-		tmpSlash := filepath.ToSlash(tmpFile)
+		srcPath := filepath.Join(auditBase, e.Name())
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			_ = os.Remove(srcPath)
+			continue
+		}
+		if m := dateRe.FindStringSubmatch(e.Name()); len(m) > 1 {
+			dateStr := m[1]
+			dayDir := filepath.Join(auditBase, dateStr)
+			_ = os.MkdirAll(dayDir, 0755)
 
-		sqlCmd := fmt.Sprintf(
-			"SET max_memory='4GB'; SET preserve_insertion_order=false; " +
-			"COPY (SELECT * FROM read_parquet('%s', union_by_name=true) ORDER BY timestamp DESC) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);",
-			pattern, tmpSlash,
-		)
+			dstPath := filepath.Join(dayDir, e.Name())
+			if _, err := os.Stat(dstPath); err == nil {
+				// 若子目錄已存在同名主檔，先改名為碎片檔供整併融合，避免覆蓋遺失資料
+				dstPath = filepath.Join(dayDir, fmt.Sprintf("audit_%s_chunk_migrated_%d.parquet", dateStr, time.Now().UnixNano()))
+			}
+			if err := os.Rename(srcPath, dstPath); err == nil {
+				moved++
+			}
+		}
+	}
+	return moved
+}
 
-		if _, err := runDuckDBQuery(sqlCmd); err == nil {
-			_ = os.Remove(targetFile)
-			_ = os.Rename(tmpFile, targetFile)
-			
-			for _, f := range frags {
+// 🌟 針對單一日期目錄執行稽核日誌去重整併 -> audit_logs/YYYY-MM-DD/audit_YYYY-MM-DD.parquet
+func ConsolidateAuditLogsForDate(dateStr string) {
+	auditConsolidateMutex.Lock()
+	defer auditConsolidateMutex.Unlock()
+
+	_ = migrateFlatAuditFilesToDailyDirs()
+	consolidateAuditDateUnlocked(dateStr)
+}
+
+func consolidateAuditDateUnlocked(dateStr string) {
+	dateStr = strings.ReplaceAll(strings.TrimSpace(dateStr), "/", "-")
+	if dateStr == "" {
+		return
+	}
+
+	dayDir := filepath.Join(getAuditBaseDir(), dateStr)
+	entries, err := os.ReadDir(dayDir)
+	if err != nil {
+		return
+	}
+
+	targetFile := filepath.Join(dayDir, fmt.Sprintf("audit_%s.parquet", dateStr))
+	var validFiles []string
+	var chunkFiles []string
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".parquet") {
+			continue
+		}
+		fullPath := filepath.Join(dayDir, e.Name())
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			_ = os.Remove(fullPath)
+			continue
+		}
+		if fi, statErr := os.Stat(fullPath); statErr == nil && fi.Size() > 0 {
+			validFiles = append(validFiles, filepath.ToSlash(fullPath))
+			if fullPath != targetFile {
+				chunkFiles = append(chunkFiles, fullPath)
+			}
+		}
+	}
+
+	// 若目錄裡只剩下唯一的單一主檔 audit_YYYY-MM-DD.parquet，無需重做
+	if len(chunkFiles) == 0 {
+		return
+	}
+
+	quoted := make([]string, len(validFiles))
+	for i, p := range validFiles {
+		quoted[i] = fmt.Sprintf("'%s'", p)
+	}
+	sourceListExpr := fmt.Sprintf("[%s]", strings.Join(quoted, ", "))
+
+	tmpFile := filepath.Join(dayDir, fmt.Sprintf("audit_%s_consolidating_%d.parquet.tmp", dateStr, time.Now().UnixNano()))
+	tmpSlash := filepath.ToSlash(tmpFile)
+
+	// 透過 ROW_NUMBER 去重並依時間倒序壓縮為單一 ZSTD 主檔
+	sqlCmd := fmt.Sprintf(
+		"COPY (SELECT * EXCLUDE (rn) FROM ("+
+			"  SELECT *, ROW_NUMBER() OVER ("+
+			"    PARTITION BY timestamp, fw_model, log_type, category, target_date, target_slot, status, output_file, details "+
+			"    ORDER BY timestamp DESC"+
+			"  ) AS rn "+
+			"  FROM read_parquet(%s, union_by_name=true)"+
+			") WHERE rn = 1 ORDER BY timestamp DESC) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);",
+		sourceListExpr, tmpSlash,
+	)
+
+	if _, err := runDuckDBQuery(sqlCmd); err == nil {
+		_ = os.Remove(targetFile)
+		if err := os.Rename(tmpFile, targetFile); err == nil {
+			for _, f := range chunkFiles {
 				_ = os.Remove(f)
 			}
-			fmt.Printf("📦 [稽核日誌整併] %s 日期已成功整併 %d 個碎片！\n", dateStr, len(frags))
+			fmt.Printf("📦 [稽核日誌整併] %s 已歸檔至 audit_logs/%s/，成功合併 %d 個碎片為單一主檔！\n",
+				dateStr, dateStr, len(chunkFiles))
 		} else {
 			_ = os.Remove(tmpFile)
+		}
+	} else {
+		_ = os.Remove(tmpFile)
+	}
+}
+
+// 🌟 全量整併所有日期的稽核日誌 (含舊版扁平檔自動遷移至 YYYY-MM-DD 子目錄)
+func ConsolidateAuditLogs() {
+	auditConsolidateMutex.Lock()
+	defer auditConsolidateMutex.Unlock()
+
+	auditBase := getAuditBaseDir()
+	_ = os.MkdirAll(auditBase, 0755)
+
+	if moved := migrateFlatAuditFilesToDailyDirs(); moved > 0 {
+		fmt.Printf("📂 [稽核目錄整理] 已將 %d 個舊版扁平稽核檔歸位至 YYYY-MM-DD 日期子目錄\n", moved)
+	}
+
+	entries, err := os.ReadDir(auditBase)
+	if err != nil {
+		return
+	}
+
+	dateRe := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	for _, e := range entries {
+		if e.IsDir() && dateRe.MatchString(e.Name()) {
+			consolidateAuditDateUnlocked(e.Name())
 		}
 	}
 }

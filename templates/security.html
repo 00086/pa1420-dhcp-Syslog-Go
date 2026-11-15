@@ -55,8 +55,8 @@
 {% block content %}
 <div class="flow-sec-container">
     
-    <!-- 頂部標題與控制列 -->
-    <div class="d-flex justify-content-between align-items-center mb-2 flex-shrink-0">
+    <!-- 頂部標題與控制列 (精簡列高版) -->
+    <div class="d-flex justify-content-between align-items-center mb-1 flex-shrink-0 compact-filter-bar">
         <h5 class="m-0 text-danger fw-bold">
             <i class="bi bi-shield-slash-fill me-2"></i>Palo Alto 流量資安預警與重大威脅防禦中心
         </h5>
@@ -162,7 +162,7 @@
             </div>
             <div class="modal-body p-0">
                 <div class="table-responsive" style="max-height: 50vh; overflow-y: auto;">
-                    <table class="table table-sm table-hover table-striped mb-0 align-middle text-center" style="font-size: 0.9rem;">
+                    <table class="table table-sm table-hover table-striped mb-0 align-middle text-center" style="font-size: 0.95rem;">
                         <thead class="table-light" style="position: sticky; top: 0; z-index: 5;">
                             <tr>
                                 <th style="width: 10%;">序號</th>
@@ -294,10 +294,40 @@ function toggleIpMask() {
     renderAlertsTable(currentRecords);
 }
 
+function _ipToLong(ip) {
+    return ip.split('.').reduce((ipInt, octet) => (ipInt << 8) + parseInt(octet, 10), 0) >>> 0;
+}
+
+function _isInternal(ipStr) {
+    if (!ipStr) return false;
+    const parts = ipStr.split('.');
+    if (parts.length !== 4) return false;
+    const p0 = parseInt(parts[0], 10);
+    const p1 = parseInt(parts[1], 10);
+    if (p0 === 10) return true;
+    if (p0 === 192 && p1 === 168) return true;
+    if (p0 === 172 && p1 >= 16 && p1 <= 31) return true;
+    
+    // Check custom subnets
+    if (window.customInternalSubnets && window.customInternalSubnets.length > 0) {
+        const ipLong = _ipToLong(ipStr);
+        for (const cidr of window.customInternalSubnets) {
+            const [subnet, mask] = cidr.split('/');
+            const maskBits = mask ? parseInt(mask, 10) : 32;
+            const subnetLong = _ipToLong(subnet);
+            const maskLong = maskBits === 0 ? 0 : (~0 << (32 - maskBits)) >>> 0;
+            if ((ipLong & maskLong) === (subnetLong & maskLong)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 function maskIpText(text) {
     if (!isIpMasked || !text) return text;
     return text.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, match => {
-        if (match.startsWith("192.168.") || match.startsWith("10.") || match.startsWith("172.") || match.startsWith("192.50.")) {
+        if (_isInternal(match)) {
             const p = match.split('.');
             return `${p[0]}.*.*.${p[3]}`;
         }
@@ -307,7 +337,7 @@ function maskIpText(text) {
 
 function isExternal(ip) {
     if (!ip || ip.includes('WAN') || ip.includes('Botnet') || ip.includes('LAN')) return false;
-    return !(ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.") || ip.startsWith("192.50."));
+    return !_isInternal(ip);
 }
 
 function fetchAlerts() {

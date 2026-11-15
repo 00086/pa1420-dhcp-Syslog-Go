@@ -57,8 +57,8 @@
 {% block content %}
 <div class="flow-search-container">
     
-    <!-- 頂部功能按鈕與標題 -->
-    <div class="d-flex justify-content-between align-items-center mb-2 flex-shrink-0">
+    <!-- 頂部功能按鈕與標題 (精簡列高版) -->
+    <div class="d-flex justify-content-between align-items-center mb-1 flex-shrink-0 compact-filter-bar">
         <h5 class="text-primary fw-bold mb-0">
             <i class="bi bi-search me-2"></i>{{ fw_model }} 邊界與跨區通訊軌跡檢索
         </h5>
@@ -114,7 +114,7 @@
                         <i class="bi bi-chevron-left"></i>
                     </button>
                     <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold text-center px-1" style="width: 130px; min-width: 130px; cursor: pointer;" id="searchDate" onclick="this.showPicker()">
-                    <span class="input-group-text bg-white text-primary fw-bold px-2 font-monospace" id="search-weekday" style="font-size: 13px;">(六)</span>
+                    <span class="input-group-text bg-white text-primary fw-bold px-2 font-monospace" id="search-weekday" style="font-size: 14.5px;">(六)</span>
                     <button class="btn btn-outline-secondary px-2" type="button" onclick="changeSearchDate(1)" title="後一日 (快速切換)">
                         <i class="bi bi-chevron-right"></i>
                     </button>
@@ -429,11 +429,41 @@ function toggleHideInternalIp() {
     renderTableBody(currentDisplayData);
 }
 
+function _ipToLong(ip) {
+    return ip.split('.').reduce((ipInt, octet) => (ipInt << 8) + parseInt(octet, 10), 0) >>> 0;
+}
+
+function _isInternal(ipStr) {
+    if (!ipStr) return false;
+    const parts = ipStr.split('.');
+    if (parts.length !== 4) return false;
+    const p0 = parseInt(parts[0], 10);
+    const p1 = parseInt(parts[1], 10);
+    if (p0 === 10) return true;
+    if (p0 === 192 && p1 === 168) return true;
+    if (p0 === 172 && p1 >= 16 && p1 <= 31) return true;
+    
+    // Check custom subnets
+    if (window.customInternalSubnets && window.customInternalSubnets.length > 0) {
+        const ipLong = _ipToLong(ipStr);
+        for (const cidr of window.customInternalSubnets) {
+            const [subnet, mask] = cidr.split('/');
+            const maskBits = mask ? parseInt(mask, 10) : 32;
+            const subnetLong = _ipToLong(subnet);
+            const maskLong = maskBits === 0 ? 0 : (~0 << (32 - maskBits)) >>> 0;
+            if ((ipLong & maskLong) === (subnetLong & maskLong)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 function maskIp(ip) {
     if (!isHideInternalIp || !ip) return ip;
-    if (ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.") || ip.startsWith("192.50.")) {
+    if (_isInternal(ip)) {
         const parts = ip.split('.');
-        if (parts.length === 4) return `${parts[0]}.${parts[1]}.*.*`;
+        return `${parts[0]}.${parts[1]}.*.*`;
     }
     return ip;
 }

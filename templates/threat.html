@@ -11,8 +11,15 @@
     white-space: nowrap; 
 }
 .table-scroll-container { 
-    overflow-y: scroll; 
+    overflow: hidden; 
     flex-grow: 1; 
+    min-height: 0; 
+
+}
+.table-scroll-container > .table-responsive {
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: auto;
 }
 
 /* 固定欄寬、文字截斷 (...) 與微調字級邊距 (1:1 依照 traffic 設計) */
@@ -28,8 +35,8 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    padding-top: 3px;
-    padding-bottom: 3px;
+    padding-top: 1px;
+    padding-bottom: 1px;
     padding-left: 6px;
     padding-right: 6px;
     line-height: 1.35;
@@ -89,28 +96,28 @@
 <!--
 <div class="d-flex align-items-center gap-2 mb-1 flex-shrink-0" style="min-height: 26px;">
     <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-shield-shaded text-danger me-1"></i>PA-1420 資安威脅分析 (Threat Engine)</span>
-    <span class="text-muted text-nowrap" style="font-size: 11.5px;">整合 Palo Alto 次世代防火牆防護日誌與內部 DHCP 主機關聯比對</span>
+    <span class="text-muted text-nowrap" style="font-size: 14.5px;">整合 Palo Alto 次世代防火牆防護日誌與內部 DHCP 主機關聯比對</span>
 </div>
 -->
 
-<!-- 威脅查詢工具列 (強制同一列不折行 flex-nowrap) -->
-<div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
+<!-- 威脅查詢工具列 (精簡列高版) -->
+<div class="row mb-1 flex-shrink-0 compact-filter-bar" style="position: relative; z-index: 1050;">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white" style="overflow: visible;">
-    <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2" style="overflow: visible;">
+            <div class="card-body py-1 px-2 d-flex align-items-center justify-content-between flex-nowrap gap-1" style="overflow: visible;">
                 
                 <!-- 條件篩選輸入組 (左側強制一列) -->
                 <div class="d-flex align-items-center gap-1 flex-nowrap flex-shrink-0">
-                    <span class="fw-bold text-dark small text-nowrap"><i class="bi bi-funnel-fill text-danger"></i> 條件篩選：</span>
+                    <span class="fw-bold text-dark text-nowrap" style="font-size: 14px;"><i class="bi bi-funnel-fill text-danger"></i> 條件篩選：</span>
                     
                     <!-- 日期選擇器、星期顯示與前後日快捷按鈕群組 -->
                     <div class="input-group input-group-sm flex-nowrap" style="width: auto;">
-                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeThreatDate(-1)" title="前一日 (快速切換)">
+                        <button class="btn btn-outline-secondary btn-sm px-2" type="button" onclick="changeThreatDate(-1)" title="前一日 (快速切換)">
                             <i class="bi bi-chevron-left"></i>
                         </button>
-                        <input type="date" class="form-control form-control-sm font-monospace text-danger fw-bold" style="width: 125px; cursor: pointer;" id="threat-date" onclick="this.showPicker()">
-                        <span class="input-group-text bg-white text-danger fw-bold px-2 font-monospace" id="threat-weekday" style="font-size: 13px;">(六)</span>
-                        <button class="btn btn-outline-secondary px-2" type="button" onclick="changeThreatDate(1)" title="後一日 (快速切換)">
+                        <input type="date" class="form-control form-control-sm font-monospace text-danger fw-bold" style="width: 120px; cursor: pointer;" id="threat-date" onclick="this.showPicker()">
+                        <span class="input-group-text bg-white text-danger fw-bold px-1 font-monospace" id="threat-weekday" style="font-size: 14px;">(六)</span>
+                        <button class="btn btn-outline-secondary btn-sm px-2" type="button" onclick="changeThreatDate(1)" title="後一日 (快速切換)">
                             <i class="bi bi-chevron-right"></i>
                         </button>
                     </div>
@@ -141,9 +148,9 @@
 
                     <!-- 重新顯示時間下拉群組 -->
                     <div class="input-group input-group-sm ms-1" style="width: auto; position: relative;">
-                        <button class="btn btn-outline-secondary dropdown-toggle fw-bold d-flex align-items-center gap-1 bg-light text-dark py-1" type="button" id="refreshIntervalDropdown" data-bs-toggle="dropdown" aria-expanded="false" title="設定重新顯示週期">
+                        <button class="btn btn-outline-secondary btn-sm dropdown-toggle fw-bold d-flex align-items-center gap-1 bg-light text-dark" type="button" id="refreshIntervalDropdown" data-bs-toggle="dropdown" aria-expanded="false" title="設定重新顯示週期">
                             <span id="currentIntervalLabel">30 秒</span>
-                            <span id="countdownBadge" class="badge bg-danger text-white font-monospace" style="font-size: 10px;">30s</span>
+                            <span id="countdownBadge" class="badge bg-danger text-white font-monospace" style="font-size: 10px; display: inline-flex; align-items: center; justify-content: center; width: 30px; min-width: 30px; padding-left: 0; padding-right: 0; text-align: center; font-variant-numeric: tabular-nums;">30s</span>
                         </button>
                         <ul class="dropdown-menu dropdown-menu-end shadow border" aria-labelledby="refreshIntervalDropdown" style="z-index: 1060; min-width: 110px;">
                             <li><a class="dropdown-item" href="javascript:void(0)" id="item-10" onclick="setRefreshInterval(10, '10 秒')">10 秒</a></li>
@@ -152,16 +159,16 @@
                             <li><hr class="dropdown-divider my-1"></li>
                             <li><a class="dropdown-item" href="javascript:void(0)" id="item-manual" onclick="setRefreshInterval(0, '手動')">手動</a></li>
                         </ul>
-                        <button class="btn btn-outline-danger px-2 shadow-sm d-flex align-items-center justify-content-center" id="refresh-threat-btn" onclick="refreshDisplayNow()" title="立即重新顯示最新威脅">
-                            <i class="bi bi-arrow-clockwise fs-6" id="refresh-icon"></i>
+                        <button class="btn btn-outline-danger btn-sm px-2 shadow-sm d-flex align-items-center justify-content-center" id="refresh-threat-btn" onclick="refreshDisplayNow()" title="立即重新顯示最新威脅">
+                            <i class="bi bi-arrow-clockwise" id="refresh-icon"></i>
                         </button>
                     </div>
                 </div>
 
                 <!-- 右側狀態徽章 -->
-                <div class="d-flex align-items-center gap-2 ms-auto flex-shrink-0">
-                    <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
-                    <span class="badge bg-danger-subtle text-danger-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" style="font-size: 12px;">
+                <div class="d-flex align-items-center gap-1 ms-auto flex-shrink-0">
+                    <span class="badge bg-warning text-dark" style="font-size: 11px;"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
+                    <span class="badge bg-danger-subtle text-danger-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" style="font-size: 14.5px;">
                         <span class="spinner-grow spinner-grow-sm text-danger" style="width: 6px; height: 6px;"></span>
                         <span id="threat-syslog-badge">Syslog 514: Threat 0 筆</span>
                     </span>
@@ -172,57 +179,85 @@
     </div>
 </div>
 
-<!-- 威脅事件直方圖面板 (支援開合收折) -->
-<div class="row mb-2 flex-shrink-0" id="histogram-card-row">
+<!-- 整合圖形視覺化面板（下拉切換 24 小時直方圖 vs 威脅 Top-N 排行與攻擊拓撲，保留收合功能） -->
+<div class="row mb-1 flex-shrink-0" id="histogram-card-row">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white">
-            <div class="card-header bg-white py-1 px-3 d-flex justify-content-between align-items-center border-bottom-0">
+            <div class="card-header bg-white py-1 px-2 d-flex justify-content-between align-items-center flex-wrap gap-1 border-bottom-0">
                 <div class="d-flex align-items-center gap-2">
-                    <span class="small fw-bold text-dark"><i class="bi bi-bar-chart-fill text-danger me-1"></i>威脅事件 24 小時時間分佈直方圖</span>
-                    <button class="btn btn-outline-secondary btn-sm py-0 px-2 d-flex align-items-center gap-1 border-0" id="chart-toggle-btn" onclick="toggleHistogram()" style="font-size: 11px; height: 22px;" title="收合或展開直方圖">
+                    <select class="form-select form-select-sm fw-bold text-dark py-0" id="threat-chart-view-select" onchange="switchThreatChartView(this.value)" style="width: auto; min-width: 285px; height: 24px; font-size: 12px;" title="選擇要呈現的視覺化圖形">
+                        <option value="histogram" selected>📊 威脅事件 24 小時時間分佈直方圖</option>
+                        <option value="topn">🔀 威脅 Top-N 排行視覺化與 Zone-to-Zone 攻擊拓撲</option>
+                    </select>
+                    <button class="btn btn-outline-secondary btn-sm py-0 px-2 d-flex align-items-center gap-1 border-0" id="chart-toggle-btn" onclick="toggleHistogram()" style="font-size: 11px; height: 22px;" title="收合或展開圖形面板">
                         <i class="bi bi-chevron-up" id="chart-toggle-icon"></i>
                         <span id="chart-toggle-text">收合圖表</span>
                     </button>
                 </div>
                 <span class="small text-muted font-monospace" id="chart-time-range">時段：00:00 ~ 23:00</span>
+                <span class="small text-muted d-none" id="threat-topn-hint" style="font-size: 11px;">自動關聯 DHCP 與設備清冊名稱｜點擊長條可一鍵過濾</span>
             </div>
-            <div class="card-body py-1 px-3" id="histogram-card-body" style="position: relative; height: 115px; width: 100%;">
-                <canvas id="threatHistogramChart"></canvas>
+            <div class="card-body py-1 px-2" id="histogram-card-body">
+                <div id="threat-histogram-pane" style="position: relative; height: 110px; width: 100%;">
+                    <canvas id="threatHistogramChart"></canvas>
+                </div>
+                <div id="threat-topn-body" class="d-none">
+                    <div class="row g-2">
+                        <div class="col-12 col-lg-4">
+                            <div class="border rounded p-2 h-100 bg-light-subtle">
+                                <div class="small fw-bold text-danger mb-1"><i class="bi bi-pc-display-horizontal me-1"></i>內網受駭/異常主機 Top 10 (DHCP/清冊關聯)</div>
+                                <div style="position: relative; height: 205px;"><canvas id="threatTopHostsChart"></canvas></div>
+                            </div>
+                        </div>
+                        <div class="col-12 col-lg-4">
+                            <div class="border rounded p-2 h-100 bg-light-subtle">
+                                <div class="small fw-bold text-dark mb-1"><i class="bi bi-shield-x text-danger me-1"></i>Top 10 阻擋/觸發威脅特徵 (Blocked vs Alert)</div>
+                                <div style="position: relative; height: 205px;"><canvas id="threatTopRulesChart"></canvas></div>
+                            </div>
+                        </div>
+                        <div class="col-12 col-lg-4">
+                            <div class="border rounded p-2 h-100 bg-light-subtle d-flex flex-column">
+                                <div class="small fw-bold text-dark mb-1"><i class="bi bi-shuffle text-danger me-1"></i>Zone-to-Zone 威脅攻擊流向拓撲 (Sankey)</div>
+                                <div id="threat-sankey-container" class="flex-grow-1 position-relative" style="min-height: 205px;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 </div>
 
 <!-- 威脅概況五大指標卡片 -->
-<div class="row g-2 mb-2 flex-shrink-0">
+<div class="row g-2 mb-1 flex-shrink-0">
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
-            <small class="text-muted">已擷取威脅總數</small>
-            <h5 class="mb-0 fw-bold font-monospace text-primary" id="metric-total-threats">-- 筆</h5>
+        <div class="card border-0 shadow-sm py-1 px-2 bg-white text-center">
+            <small class="text-muted" style="font-size: 14.5px;">已擷取威脅總數</small>
+            <h6 class="mb-0 fw-bold font-monospace text-primary" id="metric-total-threats">-- 筆</h6>
         </div>
     </div>
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
-            <small class="text-muted">當日資料庫容量</small>
-            <h5 class="mb-0 fw-bold font-monospace text-info" id="metric-db-size">--</h5>
+        <div class="card border-0 shadow-sm py-1 px-2 bg-white text-center">
+            <small class="text-muted" style="font-size: 14.5px;">當日資料庫容量</small>
+            <h6 class="mb-0 fw-bold font-monospace text-info" id="metric-db-size">--</h6>
         </div>
     </div>
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center clickable-card" id="card-threat-crit-filter" onclick="toggleThreatCritFilter()" title="點擊僅顯示高危險/重大威脅，再按一次復原">
-			<small class="text-muted"><i class="bi bi-funnel-fill text-danger me-1"></i>高危險/重大威脅 (High/Crit)</small>
-			<h5 class="mb-0 fw-bold font-monospace text-danger" id="metric-critical-high">-- 筆</h5>
+        <div class="card border-0 shadow-sm py-1 px-2 bg-white text-center clickable-card" id="card-threat-crit-filter" onclick="toggleThreatCritFilter()" title="點擊僅顯示高危險/重大威脅，再按一次復原">
+			<small class="text-muted" style="font-size: 14.5px;"><i class="bi bi-funnel-fill text-danger me-1"></i>高危險/重大威脅 (High/Crit)</small>
+			<h6 class="mb-0 fw-bold font-monospace text-danger" id="metric-critical-high">-- 筆</h6>
 		</div>
     </div>
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
-            <small class="text-muted">最常觸發受駭端設備</small>
-            <h5 class="mb-0 fw-bold font-monospace text-dark text-truncate px-1" id="metric-top-victim" title="--">--</h5>
+        <div class="card border-0 shadow-sm py-1 px-2 bg-white text-center">
+            <small class="text-muted" style="font-size: 14.5px;">最常觸發受駭端設備</small>
+            <h6 class="mb-0 fw-bold font-monospace text-dark text-truncate px-1" id="metric-top-victim" title="--">--</h6>
         </div>
     </div>
     <div class="col">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
-            <small class="text-muted">Top 1 威脅名稱</small>
-            <h5 class="mb-0 fw-bold font-monospace text-secondary text-truncate px-1" id="metric-top-threat" title="--">--</h5>
+        <div class="card border-0 shadow-sm py-1 px-2 bg-white text-center">
+            <small class="text-muted" style="font-size: 14.5px;">Top 1 威脅名稱</small>
+            <h6 class="mb-0 fw-bold font-monospace text-secondary text-truncate px-1" id="metric-top-threat" title="--">--</h6>
         </div>
     </div>
 </div>
@@ -237,9 +272,9 @@
             </div>
             <div class="card-body p-0 table-scroll-container">
                 <div class="table-responsive h-100">
-                    <table class="table table-hover table-striped table-sm table-sticky-header font-monospace threat-table-fixed" style="font-size: 14.5px;">
+                    <table class="table table-hover table-striped table-sm table-sticky-header font-monospace threat-table-fixed" style="font-size: 16.5px;">
                         <colgroup>
-                            <col style="width: 175px;"> <!-- 1. 接收時間 -->
+                            <col style="width: 180px;"> <!-- 1. 接收時間 -->
                             <col style="width: 90px;">  <!-- 2. 類型 -->
                             <col style="width: 230px;"> <!-- 3. 威脅 ID/名稱 -->
                             <col style="width: 75px;">  <!-- 4. 來源區 -->
@@ -337,6 +372,46 @@
 
     document.getElementById('threat-date').value = todayStr;
 
+    function switchThreatChartView(viewMode, skipAutoExpand = false, skipInitialFetch = false) {
+        const mode = (viewMode === 'topn') ? 'topn' : 'histogram';
+        localStorage.setItem('threat_chart_view_mode', mode);
+        const sel = document.getElementById('threat-chart-view-select');
+        if (sel && sel.value !== mode) sel.value = mode;
+
+        const histPane = document.getElementById('threat-histogram-pane');
+        const topnPane = document.getElementById('threat-topn-body');
+        const timeRange = document.getElementById('chart-time-range');
+        const topnHint = document.getElementById('threat-topn-hint');
+
+        if (mode === 'topn') {
+            if (histPane) histPane.classList.add('d-none');
+            if (topnPane) topnPane.classList.remove('d-none');
+            if (timeRange) timeRange.classList.add('d-none');
+            if (topnHint) topnHint.classList.remove('d-none');
+        } else {
+            if (topnPane) topnPane.classList.add('d-none');
+            if (histPane) histPane.classList.remove('d-none');
+            if (topnHint) topnHint.classList.add('d-none');
+            if (timeRange) timeRange.classList.remove('d-none');
+        }
+
+        const body = document.getElementById('histogram-card-body');
+        if (!skipAutoExpand && body && body.classList.contains('d-none')) {
+            body.classList.remove('d-none');
+            document.getElementById('chart-toggle-icon').className = 'bi bi-chevron-up';
+            document.getElementById('chart-toggle-text').innerText = '收合圖表';
+            localStorage.setItem('threat_chart_collapsed', 'false');
+        }
+
+        if (skipInitialFetch) return;
+
+        if (mode === 'topn') {
+            requestAnimationFrame(() => refreshThreatTopNPanel());
+        } else if (threatHistogramChartInstance) {
+            requestAnimationFrame(() => threatHistogramChartInstance.resize());
+        }
+    }
+
     function toggleHistogram() {
         const body = document.getElementById('histogram-card-body');
         const icon = document.getElementById('chart-toggle-icon');
@@ -348,8 +423,11 @@
             icon.className = 'bi bi-chevron-up';
             text.innerText = '收合圖表';
             localStorage.setItem('threat_chart_collapsed', 'false');
-            if (threatHistogramChartInstance) {
-                threatHistogramChartInstance.resize();
+            const curMode = document.getElementById('threat-chart-view-select')?.value || 'histogram';
+            if (curMode === 'topn') {
+                refreshThreatTopNPanel();
+            } else if (threatHistogramChartInstance) {
+                requestAnimationFrame(() => threatHistogramChartInstance.resize());
             }
         } else {
             body.classList.add('d-none');
@@ -360,6 +438,9 @@
     }
 
     function initHistogramCollapseState() {
+        const savedView = localStorage.getItem('threat_chart_view_mode') || 'histogram';
+        switchThreatChartView(savedView, true, true);
+
         const isCollapsed = localStorage.getItem('threat_chart_collapsed') === 'true';
         if (isCollapsed) {
             document.getElementById('histogram-card-body').classList.add('d-none');
@@ -383,7 +464,7 @@
             if (activeItem) activeItem.classList.add('active');
 
             badge.classList.remove('d-none');
-            badge.innerText = `${remainingSeconds}s`;
+            badge.innerText = `${String(Math.max(0, remainingSeconds)).padStart(2, '0')}s`;
 
             if (countdownTimer) clearInterval(countdownTimer);
             countdownTimer = setInterval(() => {
@@ -392,7 +473,7 @@
                     remainingSeconds = currentIntervalSeconds;
                     triggerSilentRefresh();
                 }
-                badge.innerText = `${remainingSeconds}s`;
+                badge.innerText = `${String(Math.max(0, remainingSeconds)).padStart(2, '0')}s`;
             }, 1000);
         } else {
             labelElem.innerText = '手動';
@@ -411,7 +492,7 @@
 
         remainingSeconds = currentIntervalSeconds;
         const badge = document.getElementById('countdownBadge');
-        if (currentIntervalSeconds > 0) badge.innerText = `${remainingSeconds}s`;
+        if (currentIntervalSeconds > 0) badge.innerText = `${String(Math.max(0, remainingSeconds)).padStart(2, '0')}s`;
 
         queryThreatLogs(currentThreatPage, true, () => {
             setTimeout(() => icon.classList.remove('spin-anim'), 400);
@@ -528,6 +609,10 @@
         const tbody = document.getElementById('threat-table-body');
         if (!silent) {
             tbody.innerHTML = '<tr><td colspan="13" class="text-center py-4 text-danger"><div class="spinner-border spinner-border-sm me-2"></div>正在透過 DuckDB 引擎極速載入...</td></tr>';
+        }
+
+        if (!silent && page === 1) {
+            try { refreshThreatTopNPanel(); } catch (e) {}
         }
 
         const url = `/api/threat-query?date=${date}&src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&threat_name=${encodeURIComponent(threatName)}&severity=${severity}&action=${action}&page=${page}&per_page=50&_t=${Date.now()}`;
@@ -673,6 +758,7 @@
             queryThreatLogs(1);
         });
 
+
         queryThreatLogs(1);
         refreshSyslogStatus();
         setInterval(refreshSyslogStatus, 3000);
@@ -718,5 +804,179 @@
         queryThreatLogs(1);
     }
 	
+
+// =========================================================
+// 📊 威脅 Top-N 排行視覺化與 Zone-to-Zone 攻擊流向拓撲
+// =========================================================
+let threatTopHostsChartInst = null, threatTopRulesChartInst = null;
+
+function toggleThreatTopNPanel() {
+    switchThreatChartView('topn');
+}
+
+function refreshThreatTopNPanel() {
+    const cardBody = document.getElementById('histogram-card-body');
+    const body = document.getElementById('threat-topn-body');
+    if (!cardBody || cardBody.classList.contains('d-none') || !body || body.classList.contains('d-none')) return;
+    const date = document.getElementById('threat-date').value || todayStr;
+    const src = document.getElementById('threat-src').value.trim();
+    const dst = document.getElementById('threat-dst').value.trim();
+    const threatName = document.getElementById('threat-name').value.trim();
+    const severity = document.getElementById('threat-severity').value;
+    const action = document.getElementById('threat-action').value;
+
+    const url = `/api/threat-topn?date=${date}&src=${encodeURIComponent(src)}&dst=${encodeURIComponent(dst)}&threat_name=${encodeURIComponent(threatName)}&severity=${severity}&action=${action}&_t=${Date.now()}`;
+    fetch(url).then(r => r.json()).then(data => {
+        if (data.status !== 'success') return;
+        renderThreatTopHostsChart(data.top_internal_hosts || []);
+        renderThreatTopRulesChart(data.top_threat_rules || []);
+        renderThreatZoneSankey('threat-sankey-container', data.zone_flows || []);
+    }).catch(() => {});
+}
+
+function renderThreatTopHostsChart(items) {
+    if (threatTopHostsChartInst) threatTopHostsChartInst.destroy();
+    const canvas = document.getElementById('threatTopHostsChart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const labels = items.map(it => {
+        const tag = it.role ? ` [${it.role}]` : '';
+        const full = it.label + tag;
+        return full.length > 28 ? full.slice(0, 27) + '…' : full;
+    });
+    threatTopHostsChartInst = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [
+                { label: 'Crit/High 重大高危', data: items.map(it => it.crit_high || 0), backgroundColor: '#dc2626', borderRadius: 2 },
+                { label: 'Med/Low/Info 其他', data: items.map(it => Math.max(0, (it.flows || 0) - (it.crit_high || 0))), backgroundColor: '#f97316', borderRadius: 2 }
+            ]
+        },
+        options: {
+            indexAxis: 'y', responsive: true, maintainAspectRatio: false, animation: false,
+            onClick: (_, els) => {
+                if (els.length > 0 && items[els[0].index]) {
+                    const it = items[els[0].index];
+                    if (it.role === '目的受駭') document.getElementById('threat-dst').value = it.ip;
+                    else document.getElementById('threat-src').value = it.ip;
+                    queryThreatLogs(1);
+                }
+            },
+            plugins: {
+                legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 }, padding: 6 } },
+                tooltip: {
+                    callbacks: {
+                        title: (c) => `${items[c[0].dataIndex]?.label || ''} (${items[c[0].dataIndex]?.role || ''})`,
+                        afterBody: (c) => {
+                            const it = items[c[0].dataIndex];
+                            return `總事件: ${it.flows.toLocaleString()} 次 ｜ 已阻擋: ${it.deny_flows.toLocaleString()} 次`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: { stacked: true, ticks: { font: { size: 9 } }, grid: { color: '#eef2f6' } },
+                y: { stacked: true, ticks: { font: { size: 10 } }, grid: { display: false } }
+            }
+        }
+    });
+}
+
+function renderThreatTopRulesChart(items) {
+    if (threatTopRulesChartInst) threatTopRulesChartInst.destroy();
+    const canvas = document.getElementById('threatTopRulesChart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const labels = items.map(it => it.rule.length > 24 ? it.rule.slice(0, 23) + '…' : it.rule);
+    threatTopRulesChartInst = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [
+                { label: 'Blocked/Drop 已阻擋', data: items.map(it => it.deny_hits || 0), backgroundColor: '#ef4444', borderRadius: 2 },
+                { label: 'Alert 告警', data: items.map(it => it.allow_hits || 0), backgroundColor: '#eab308', borderRadius: 2 }
+            ]
+        },
+        options: {
+            indexAxis: 'y', responsive: true, maintainAspectRatio: false, animation: false,
+            onClick: (_, els) => {
+                if (els.length > 0 && items[els[0].index]) {
+                    document.getElementById('threat-name').value = items[els[0].index].rule;
+                    queryThreatLogs(1);
+                }
+            },
+            plugins: {
+                legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 }, padding: 6 } },
+                tooltip: {
+                    callbacks: {
+                        title: (c) => `威脅特徵: ${items[c[0].dataIndex]?.rule || ''}`,
+                        afterBody: (c) => {
+                            const it = items[c[0].dataIndex];
+                            return `類型: ${it.subtype} ｜ 等級: ${it.severity} ｜ 總次數: ${it.hits.toLocaleString()}`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: { stacked: true, ticks: { font: { size: 9 } }, grid: { color: '#eef2f6' } },
+                y: { stacked: true, ticks: { font: { size: 10 } }, grid: { display: false } }
+            }
+        }
+    });
+}
+
+function renderThreatZoneSankey(containerId, links) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    if (!links || links.length === 0) {
+        el.innerHTML = '<div class="text-center text-muted small py-5">尚無 Zone-to-Zone 攻擊流向資料</div>';
+        return;
+    }
+    const valid = links.filter(l => (l.flows || 0) > 0).slice(0, 12);
+    const W = 420, H = 205, nodeW = 14, pad = 10, leftX = 78, rightX = W - 78 - nodeW;
+    const srcTotals = {}, dstTotals = {};
+    valid.forEach(l => {
+        srcTotals[l.from_zone] = (srcTotals[l.from_zone] || 0) + l.flows;
+        dstTotals[l.to_zone] = (dstTotals[l.to_zone] || 0) + l.flows;
+    });
+    const totalSum = Object.values(srcTotals).reduce((a, b) => a + b, 0) || 1;
+    const layoutNodes = (totals) => {
+        const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+        const usableH = H - 20 - pad * Math.max(0, entries.length - 1);
+        let y = 10;
+        const map = {};
+        entries.forEach(([name, val]) => {
+            const h = Math.max(12, (val / totalSum) * usableH);
+            map[name] = { name, val, y, h, offset: 0 };
+            y += h + pad;
+        });
+        return map;
+    };
+    const leftMap = layoutNodes(srcTotals), rightMap = layoutNodes(dstTotals);
+    const colors = ['#dc2626', '#f97316', '#8b5cf6', '#3b82f6', '#ec4899', '#06b6d4'];
+
+    let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="205" style="overflow:visible; max-width:100%;">`;
+    valid.forEach((l, idx) => {
+        const s = leftMap[l.from_zone], d = rightMap[l.to_zone], v = l.flows;
+        const lh = Math.max(2, (v / s.val) * s.h), rh = Math.max(2, (v / d.val) * d.h);
+        const y0 = s.y + s.offset, y1 = d.y + d.offset;
+        s.offset += lh; d.offset += rh;
+        const x0 = leftX + nodeW, x1 = rightX, mx = (x0 + x1) / 2;
+        const fill = (l.crit_high > 0) ? '#dc2626' : colors[idx % colors.length];
+        const tip = `${l.from_zone} ➔ ${l.to_zone}｜威脅次數: ${l.flows.toLocaleString()} (已阻擋: ${(l.deny_flows || 0).toLocaleString()} / 重大高危: ${(l.crit_high || 0).toLocaleString()})`;
+        svg += `<path d="M${x0},${y0} C${mx},${y0} ${mx},${y1} ${x1},${y1} L${x1},${y1 + rh} C${mx},${y1 + rh} ${mx},${y0 + lh} ${x0},${y0 + lh} Z" fill="${fill}" fill-opacity="0.4" stroke="${fill}" stroke-opacity="0.65" stroke-width="0.6"><title>${tip}</title></path>`;
+    });
+    Object.values(leftMap).forEach((n, i) => {
+        svg += `<rect x="${leftX}" y="${n.y}" width="${nodeW}" height="${n.h}" rx="3" fill="${colors[i % colors.length]}"></rect>`;
+        svg += `<text x="${leftX - 5}" y="${n.y + n.h / 2 + 3}" text-anchor="end" font-size="10.5" font-weight="bold" fill="#1e293b">${n.name}</text>`;
+    });
+    Object.values(rightMap).forEach((n, i) => {
+        svg += `<rect x="${rightX}" y="${n.y}" width="${nodeW}" height="${n.h}" rx="3" fill="${colors[(i + 2) % colors.length]}"></rect>`;
+        svg += `<text x="${rightX + nodeW + 5}" y="${n.y + n.h / 2 + 3}" text-anchor="start" font-size="10.5" font-weight="bold" fill="#1e293b">${n.name}</text>`;
+    });
+    svg += `</svg>`;
+    el.innerHTML = svg;
+}
 </script>
 {% endblock %}

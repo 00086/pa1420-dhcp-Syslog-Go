@@ -60,11 +60,11 @@
 {% endblock %}
 
 {% block content %}
-<!-- 查詢控制列 -->
-<div class="row mb-2 flex-shrink-0">
+<!-- 查詢控制列 (精簡列高版) -->
+<div class="row mb-1 flex-shrink-0 compact-filter-bar">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white">
-            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-wrap gap-2">
+            <div class="card-body py-1 px-2 d-flex align-items-center justify-content-between flex-wrap gap-1">
                 <div class="d-flex align-items-center gap-2 flex-wrap">
                     <span class="fw-bold text-dark"><i class="bi bi-crosshair text-danger me-1"></i>鑑識目標：</span>
                     
@@ -72,7 +72,7 @@
                         <input type="text" class="form-control form-control-sm font-monospace fw-bold text-primary" placeholder="輸入 IP (如 192.168.1.1)" style="width: 200px;" id="investigate-ip" onkeydown="if(event.key==='Enter') startInvestigation()">
                     </div>
 
-                    <!-- 日期選擇器與星期標籤 (1:1 對齊 traffic.html) -->
+                    <!-- 日期選擇器與星期標籤 -->
                     <div class="input-group input-group-sm flex-nowrap" style="width: auto;">
                         <button class="btn btn-outline-secondary px-2" type="button" onclick="changeTimelineDate(-1)" title="前一日"><i class="bi bi-chevron-left"></i></button>
                         <input type="date" class="form-control form-control-sm font-monospace text-primary fw-bold" style="width: 125px; cursor: pointer;" id="timeline-date" onclick="this.showPicker()">
@@ -86,9 +86,10 @@
                 </div>
 
                 <!-- 分類快速過濾按鈕群 -->
-                <div class="d-flex align-items-center gap-1" id="filter-pills-group">
+                <div class="d-flex align-items-center gap-1 flex-wrap" id="filter-pills-group">
                     <span class="badge bg-dark filter-pill active py-2 px-3" onclick="filterTimeline('all', this)">全部 All</span>
-                    <span class="badge bg-danger filter-pill py-2 px-2" onclick="filterTimeline('threat', this)"><i class="bi bi-shield-slash-fill me-1"></i>威脅</span>
+                    <span class="badge bg-danger filter-pill py-2 px-2" onclick="filterTimeline('ioc', this)"><i class="bi bi-radioactive me-1"></i>命中情資 IOC</span>
+                    <span class="badge bg-danger-subtle text-danger-emphasis border border-danger filter-pill py-2 px-2" onclick="filterTimeline('threat', this)"><i class="bi bi-shield-slash-fill me-1"></i>威脅</span>
                     <span class="badge bg-info text-dark filter-pill py-2 px-2" onclick="filterTimeline('traffic', this)"><i class="bi bi-arrow-left-right me-1"></i>連線/阻擋</span>
                     <span class="badge filter-pill py-2 px-2" style="background-color: #8b5cf6; color: white;" onclick="filterTimeline('system', this)"><i class="bi bi-router-fill me-1"></i>系統/DHCP</span>
                     <span class="badge bg-success filter-pill py-2 px-2" onclick="filterTimeline('config', this)"><i class="bi bi-gear-fill me-1"></i>組態變更</span>
@@ -98,46 +99,53 @@
     </div>
 </div>
 
-<!-- 主機畫像指標卡片 -->
+<!-- 主機畫像指標卡片 (整合 GeoIP 國家/ASN 與惡意情資 IOC 命中統計) -->
 <div class="row g-2 mb-2 flex-shrink-0" id="profile-cards">
     <div class="col-md-3">
-        <div class="card border-0 shadow-sm p-2 bg-white">
-            <small class="text-muted"><i class="bi bi-laptop me-1"></i>主機名稱 (Hostname)</small>
-            <h5 class="mb-0 fw-bold font-monospace text-primary text-truncate" id="profile-hostname">--</h5>
+        <div class="card border-0 shadow-sm p-2 bg-white h-100">
+            <small class="text-muted"><i class="bi bi-laptop me-1"></i>主機名稱 / GeoIP 歸屬</small>
+            <h6 class="mb-0 fw-bold font-monospace text-primary text-truncate" id="profile-hostname">--</h6>
+            <small class="text-secondary font-monospace text-truncate mt-1" id="profile-geo-info">--</small>
         </div>
     </div>
-    <div class="col-md-3">
-        <div class="card border-0 shadow-sm p-2 bg-white">
+    <div class="col-md-2">
+        <div class="card border-0 shadow-sm p-2 bg-white h-100">
             <small class="text-muted"><i class="bi bi-upc-scan me-1"></i>實體位址 (MAC)</small>
-            <h5 class="mb-0 fw-bold font-monospace text-secondary text-truncate" id="profile-mac">--</h5>
+            <h6 class="mb-0 fw-bold font-monospace text-secondary text-truncate mt-1" id="profile-mac">--</h6>
         </div>
     </div>
     <div class="col-md-2">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center h-100">
             <small class="text-muted">全日關聯事件</small>
-            <h5 class="mb-0 fw-bold font-monospace text-dark" id="profile-total">0 筆</h5>
+            <h5 class="mb-0 fw-bold font-monospace text-dark mt-1" id="profile-total">0 筆</h5>
         </div>
     </div>
     <div class="col-md-2">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center h-100">
             <small class="text-muted">資安威脅觸發</small>
-            <h5 class="mb-0 fw-bold font-monospace text-danger" id="profile-threats">0 次</h5>
+            <h5 class="mb-0 fw-bold font-monospace text-danger mt-1" id="profile-threats">0 次</h5>
+        </div>
+    </div>
+    <div class="col-md-1">
+        <div class="card border-0 shadow-sm p-2 bg-white text-center h-100">
+            <small class="text-muted">主動阻擋</small>
+            <h5 class="mb-0 fw-bold font-monospace text-warning mt-1" id="profile-blocks">0 次</h5>
         </div>
     </div>
     <div class="col-md-2">
-        <div class="card border-0 shadow-sm p-2 bg-white text-center">
-            <small class="text-muted">防火牆主動阻擋</small>
-            <h5 class="mb-0 fw-bold font-monospace text-warning" id="profile-blocks">0 次</h5>
+        <div class="card border-0 shadow-sm p-2 bg-white text-center h-100" id="profile-ioc-card">
+            <small class="text-muted"><i class="bi bi-radioactive text-danger me-1"></i>惡意情資 IOC 命中</small>
+            <h5 class="mb-0 fw-bold font-monospace text-danger mt-1" id="profile-ioc-hits">0 次</h5>
         </div>
     </div>
 </div>
 
-<!-- 時序軸主卡片 (對齊 traffic.html 架構) -->
+<!-- 時序軸主卡片 -->
 <div class="row flex-grow-1 overflow-hidden">
     <div class="col-12 h-100">
         <div class="card shadow-sm h-100 d-flex flex-column border-0 bg-white">
             <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center flex-shrink-0">
-                <span class="fw-bold small"><i class="bi bi-clock-history text-primary me-1"></i>主機全景鑑識生命週期時序軸 (依秒數時間倒序呈現)</span>
+                <span class="fw-bold small"><i class="bi bi-clock-history text-primary me-1"></i>主機全景鑑識生命週期時序軸 (依秒數時間倒序呈現 · 自動標註外部 GeoIP/ASN 與 IOC 情資)</span>
                 <span class="badge bg-secondary font-monospace" id="timeline-count-badge">共 0 筆</span>
             </div>
             
@@ -214,7 +222,6 @@
             return;
         }
 
-        // 若日期欄位為空，自動設定為今日
         if (!date) {
             date = getLocalDateString();
             dateInput.value = date;
@@ -222,7 +229,7 @@
         }
 
         const box = document.getElementById('timeline-box');
-        box.innerHTML = '<div class="text-center py-5 text-primary"><div class="spinner-border mb-3"></div><div class="fw-bold">正在透過 DuckDB 引擎併發檢索四大湖倉...</div></div>';
+        box.innerHTML = '<div class="text-center py-5 text-primary"><div class="spinner-border mb-3"></div><div class="fw-bold">正在透過 DuckDB 引擎併發檢索四大湖倉並比對離線 GeoIP/IOC 情資...</div></div>';
 
         fetch(`/api/host-timeline?ip=${encodeURIComponent(ip)}&date=${date}&_t=${Date.now()}`)
             .then(res => res.json())
@@ -234,10 +241,27 @@
 
                 const d = res.data;
                 document.getElementById('profile-hostname').innerText = d.hostname || '-';
+                const geoEl = document.getElementById('profile-geo-info');
+                if (geoEl) {
+                    let geoHtml = d.geo_info || '-';
+                    if (d.asn_type) geoHtml += ` [${d.asn_type}]`;
+                    if (d.is_malicious && d.ioc_match) {
+                        geoHtml += ` <span class="badge bg-danger ms-1">${d.ioc_match}</span>`;
+                    }
+                    geoEl.innerHTML = geoHtml;
+                }
                 document.getElementById('profile-mac').innerText = d.mac || '-';
                 document.getElementById('profile-total').innerText = `${d.total_events} 筆`;
                 document.getElementById('profile-threats').innerText = `${d.threat_count} 次`;
                 document.getElementById('profile-blocks').innerText = `${d.block_count} 次`;
+
+                const iocHits = d.ioc_hit_count || 0;
+                document.getElementById('profile-ioc-hits').innerText = `${iocHits} 次`;
+                const iocCard = document.getElementById('profile-ioc-card');
+                if (iocCard) {
+                    iocCard.classList.toggle('bg-danger-subtle', iocHits > 0);
+                    iocCard.classList.toggle('bg-white', iocHits === 0);
+                }
 
                 globalEvents = d.events || [];
                 currentTimelinePage = 1;
@@ -276,6 +300,7 @@
 
         const filtered = globalEvents.filter(e => {
             if (currentFilter === 'all') return true;
+            if (currentFilter === 'ioc') return !!e.is_malicious;
             return e.category === currentFilter;
         });
 
@@ -296,18 +321,32 @@
 
         let html = '<div class="timeline-container">';
         pageItems.forEach(e => {
-            const borderClass = e.level === 'danger' ? 'border-danger border-2' : (e.level === 'warning' ? 'border-warning' : 'border-light');
-            const titleColor = e.level === 'danger' ? 'text-danger' : (e.level === 'warning' ? 'text-warning-emphasis' : (e.category === 'config' ? 'text-success' : 'text-primary'));
+            const isMal = !!e.is_malicious;
+            const cardBgClass = isMal ? 'bg-danger-subtle border-danger border-2' : 'bg-white';
+            const borderClass = isMal ? '' : (e.level === 'danger' ? 'border-danger border-2' : (e.level === 'warning' ? 'border-warning' : 'border-light'));
+            const titleColor = (isMal || e.level === 'danger') ? 'text-danger' : (e.level === 'warning' ? 'text-warning-emphasis' : (e.category === 'config' ? 'text-success' : 'text-primary'));
+
+            let geoBadges = '';
+            if (e.peer_geo) {
+                geoBadges += `<span class="badge bg-light text-dark border ms-2 font-monospace">${e.peer_geo}</span>`;
+            }
+            if (e.peer_asn_type) {
+                const asnCls = e.peer_asn_type.includes('匿名代理') ? 'bg-dark text-warning' : 'bg-info-subtle text-info-emphasis border';
+                geoBadges += `<span class="badge ${asnCls} ms-1 font-monospace">${e.peer_asn_type}</span>`;
+            }
+            if (isMal && e.ioc_match) {
+                geoBadges += `<span class="badge bg-danger text-white ms-1 font-monospace">${e.ioc_match}</span>`;
+            }
 
             html += `
                 <div class="timeline-item">
                     <div class="timeline-icon-box icon-${e.category}">
                         <i class="bi ${e.icon}"></i>
                     </div>
-                    <div class="card shadow-sm ${borderClass} bg-white">
+                    <div class="card shadow-sm ${borderClass} ${cardBgClass}">
                         <div class="card-body py-2 px-3">
-                            <div class="d-flex justify-content-between align-items-center mb-1">
-                                <h6 class="mb-0 fw-bold ${titleColor}">${e.title}</h6>
+                            <div class="d-flex justify-content-between align-items-center flex-wrap gap-1 mb-1">
+                                <h6 class="mb-0 fw-bold ${titleColor}">${e.title}${geoBadges}</h6>
                                 <span class="badge bg-light text-dark font-monospace border">${e.timestamp}</span>
                             </div>
                             <p class="mb-0 text-secondary font-monospace small">${e.description}</p>
@@ -343,7 +382,6 @@
         ul.innerHTML += `<li class="page-item ${current === total ? 'disabled' : ''}"><a class="page-link" href="#" onclick="gotoTimelinePage(${total}); return false;"><i class="bi bi-chevron-double-right"></i></a></li>`;
     }
 
-    // 🌟 在 DOMContentLoaded 內部百分之百確保日期載入
     document.addEventListener('DOMContentLoaded', () => {
         const dateInput = document.getElementById('timeline-date');
         const defaultDate = getLocalDateString();
@@ -366,4 +404,3 @@
     });
 </script>
 {% endblock %}
-

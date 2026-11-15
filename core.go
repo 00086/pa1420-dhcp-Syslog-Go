@@ -42,15 +42,25 @@ type TimelineEvent struct {
 	Icon        string `json:"icon"`         // 前端對應的 Bootstrap Icon
 	Title       string `json:"title"`        // 事件標題 (如 "DHCP 租約配發", "觸發高危威脅")
 	Description string `json:"description"`  // 詳細內容
+	PeerIP      string `json:"peer_ip,omitempty"`
+	PeerGeo     string `json:"peer_geo,omitempty"`
+	PeerASNType string `json:"peer_asn_type,omitempty"`
+	IsMalicious bool   `json:"is_malicious,omitempty"`
+	IOCMatch    string `json:"ioc_match,omitempty"`
 }
 
 type Host360Profile struct {
 	IP          string          `json:"ip"`
 	Hostname    string          `json:"hostname"`
 	MAC         string          `json:"mac"`
+	GeoInfo     string          `json:"geo_info"`
+	ASNType     string          `json:"asn_type"`
+	IsMalicious bool            `json:"is_malicious"`
+	IOCMatch    string          `json:"ioc_match"`
 	TotalEvents int             `json:"total_events"`
 	ThreatCount int             `json:"threat_count"`
 	BlockCount  int             `json:"block_count"`
+	IOCHitCount int             `json:"ioc_hit_count"`
 	Events      []TimelineEvent `json:"events"`
 }
 
@@ -385,6 +395,19 @@ type SystemHealthData struct {
 	DiskUsagePct    int             `json:"disk_usage_pct"`
 	DiskDesc        string          `json:"disk_desc"`
 	DiskPartitions  []PartitionInfo `json:"disk_partitions"`
+	HostOS          string          `json:"host_os"`
+	HostOSType      string          `json:"host_os_type"`
+	DuckDBPath      string          `json:"duckdb_path"`
+	HostCPUCores    int             `json:"host_cpu_cores"`
+	HostRAMGB       float64         `json:"host_ram_gb"`
+	ActiveETL       int             `json:"active_etl"`
+	MaxETL          int             `json:"max_etl"`
+	ActiveDuckDB    int             `json:"active_duckdb"`
+	MaxDuckDB       int             `json:"max_duckdb"`
+	ETLMemGB        int             `json:"etl_mem_gb"`
+	ETLThreads      int             `json:"etl_threads"`
+	UIMemGB         int             `json:"ui_mem_gb"`
+	UIThreads       int             `json:"ui_threads"`
 }
 
 type DHCPEntry struct {
@@ -529,8 +552,12 @@ type TrafficLogItem struct {
 	ToZone           string `json:"to_zone"`
 	Source           string `json:"source"`
 	SrcHostname      string `json:"src_hostname"`
+	SrcGeo           string `json:"src_geo,omitempty"`
+	SrcASNType       string `json:"src_asn_type,omitempty"`
 	NatSourceIP      string `json:"nat_source_ip"`
 	Destination      string `json:"destination"`
+	DstGeo           string `json:"dst_geo,omitempty"`
+	DstASNType       string `json:"dst_asn_type,omitempty"`
 	NatDestIP        string `json:"nat_dest_ip"`
 	ToPort           int    `json:"to_port"`
 	Application      string `json:"application"`
@@ -539,18 +566,26 @@ type TrafficLogItem struct {
 	SessionEndReason string `json:"session_end_reason"`
 	Bytes            int64  `json:"bytes"`
 	BytesFormatted   string `json:"bytes_formatted"`
+	IsMalicious      bool   `json:"is_malicious"`
+	IOCMatch         string `json:"ioc_match,omitempty"`
 }
 
 type TrafficAnalyticsResult struct {
-	TotalFlows  int               `json:"total_flows"`
-	TotalBytes  string            `json:"total_bytes"`
-	TopApp      string            `json:"top_app"`
-	DenyFlows   int               `json:"deny_flows"`
-	DbSize      string            `json:"db_size"`  // 👈 新增：當日 Parquet 檔案總大小
-	Histogram   []HistogramBucket `json:"histogram"`
-	Logs        []TrafficLogItem  `json:"logs"`
-	CurrentPage int               `json:"current_page"`
-	TotalPages  int               `json:"total_pages"`
+	TotalFlows      int                     `json:"total_flows"`
+	TotalBytes      string                  `json:"total_bytes"`
+	TopApp          string                  `json:"top_app"`
+	DenyFlows       int                     `json:"deny_flows"`
+	DbSize          string                  `json:"db_size"`
+	Histogram       []HistogramBucket       `json:"histogram"`
+	Logs            []TrafficLogItem        `json:"logs"`
+	CurrentPage     int                     `json:"current_page"`
+	TotalPages      int                     `json:"total_pages"`
+	StartDate       string                  `json:"start_date"`
+	EndDate         string                  `json:"end_date"`
+	IsCrossDay      bool                    `json:"is_cross_day"`
+	ShowDailyRollup bool                    `json:"show_daily_rollup"`
+	DailyRollups    []DailyRollupSummaryRow `json:"daily_rollups"`
+	FromDBCache     bool                    `json:"from_db_cache"`
 }
 
 var rawTrafficChunkCounter int64
@@ -763,6 +798,25 @@ func initCore() {
 	}()
 	*/
 
+	// 🌟 啟動時立即偵測硬體 CPU / RAM 並計算 DuckDB 自適應資源配置
+	_ = getAdaptiveDuckDBProfile()
+
+	// 🌟 初始化離線 MaxMind GeoLite2 (MMDB) 與惡意 IP / C2 威脅情資黑名單引擎，並啟動每日線上自動更新排程
+	InitGeoIPAndThreatIntel()
+	StartGeoIPAndIOCAutoUpdater()
+
+	// 🌟 啟動時立即清空前次重啟或異常中斷遺留的 duckdb_temp/job_* 孤兒資料夾，並每小時定期巡檢清理
+	if cleaned := cleanupStaleDuckDBTempDirs(0); cleaned > 0 {
+		fmt.Printf("🧹 [暫存清理] 已清除 %d 個歷史殘留的 DuckDB 暫存目錄\n", cleaned)
+	}
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			_ = cleanupStaleDuckDBTempDirs(2 * time.Hour)
+		}
+	}()
+
 	// 啟動冷資料每小時自動維護整合排程
 	startHourlyRawConsolidator()
 	
@@ -796,13 +850,18 @@ func initCore() {
 			}
 		}
 
-		for d := range pendingDates {
-			fmt.Printf("[啟動修復] 🔍 偵測到歷史殘留碎片日期 %s，自動補跑去重整併...\n", d)
-			_ = consolidateDailyTraffic(d)
+		// 同時檢查是否有已完成 24 小時熱主檔卻仍殘留 _syslog.parquet 的日期
+		if syslogArchives, err := filepath.Glob(filepath.Join(trafficDir, "*", "traffic_*_syslog.parquet")); err == nil {
+			for _, sa := range syslogArchives {
+				dPart := filepath.Base(filepath.Dir(sa))
+				if len(dPart) == 10 {
+					pendingDates[dPart] = true
+				}
+			}
 		}
 
 		for d := range pendingDates {
-			fmt.Printf("[啟動修復] 🔍 偵測到歷史殘留碎片日期 %s，自動補跑全量去重整併...\n", d)
+			fmt.Printf("[啟動修復] 🔍 偵測到歷史殘留碎片或待清理歸檔日期 %s，自動執行整併清理...\n", d)
 			_ = consolidateDailyTraffic(d)
 		}
 	}()
@@ -828,6 +887,37 @@ func initCore() {
 			}
 		}
 	}
+
+	// 🌟 開機背景巡檢：檢查所有非當日歷史日期在 SQLite 的所有統計欄位是否齊全，若有缺漏自動依序補齊
+	go func() {
+		time.Sleep(15 * time.Second)
+		todayStr := time.Now().Format("2006-01-02")
+		dateSet := make(map[string]bool)
+		if entries, err := os.ReadDir(trafficDir); err == nil {
+			for _, e := range entries {
+				name := e.Name()
+				if e.IsDir() && isValidDateStr(name) && name < todayStr {
+					dateSet[name] = true
+				} else if !e.IsDir() && strings.HasPrefix(name, "traffic_") && strings.HasSuffix(name, ".parquet") && len(name) >= 18 {
+					d := name[8:18]
+					if isValidDateStr(d) && d < todayStr {
+						dateSet[d] = true
+					}
+				}
+			}
+		}
+		var histDates []string
+		for d := range dateSet {
+			histDates = append(histDates, d)
+		}
+		sort.Slice(histDates, func(i, j int) bool { return histDates[i] > histDates[j] })
+		for _, d := range histDates {
+			if row, _, ok := getCachedDailyMetricsFromSQLite(d); !ok || !isDailyRollupRowComplete(row) {
+				fmt.Printf("🔄 [開機資料庫巡檢] 發現非當日 %s 欄位不齊全，自動補算並寫入資料庫...\n", d)
+				_, _ = computeAndSaveDailySummary(d)
+			}
+		}
+	}()
 }
 
 func showWindowsAlert(title, message string) {
@@ -837,7 +927,7 @@ func showWindowsAlert(title, message string) {
 
 func ensurePAConfigTemplate() {
 	if _, err := os.Stat(paConfigFile); os.IsNotExist(err) {
-		sample := "# 第 1 行：PA-1420 防火牆 IP\n192.168.1.1\n# 第 2 行：監控介面 (例如 ethernet1/1 或 all)\nall\n# 第 3 行：PA-1420 XML API Key\nYOUR_API_KEY_HERE\n"
+		sample := "# 第 1 行：PA-1420 防火牆 IP\n192.168.1.1\n# 第 2 行：監控介面 (例如 ethernet1/1 或 all)\nall\n# 第 3 行：PA-1420 XML API Key\nYOUR_API_KEY_HERE\n# 選填：自訂內網網段 (支援空白分隔多組 CIDR)\n# INTERNAL_SUBNETS=192.50.0.0/16 10.99.1.0/24\n"
 		_ = os.WriteFile(paConfigFile, []byte(sample), 0644)
 		fmt.Printf("[提示] 已自動在同級目錄建立設定檔範本：%s\n", paConfigFile)
 		showWindowsAlert(
@@ -845,6 +935,14 @@ func ensurePAConfigTemplate() {
 			fmt.Sprintf("【系統提醒】未偵測到 PA-1420 設定檔案！\n\n系統已自動於以下路徑建立範本檔：\n%s\n\n請以文字編輯器開啟並填入真實的防火牆 IP、介面與 API Key，儲存後即可正常連線。", paConfigFile),
 		)
 	}
+}
+
+func isPAConfigCommentLine(trimmed string) bool {
+	return trimmed == "#" ||
+		strings.HasPrefix(trimmed, "# ") ||
+		strings.HasPrefix(trimmed, "#\t") ||
+		strings.HasPrefix(trimmed, "# 第") ||
+		strings.HasPrefix(trimmed, "# 選填")
 }
 
 func getPAConfig() (string, string, string, string, error) {
@@ -860,7 +958,7 @@ func getPAConfig() (string, string, string, string, error) {
 	var lines []string
 	for _, l := range strings.Split(string(content), "\n") {
 		trimmed := strings.TrimSpace(l)
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+		if trimmed != "" && !isPAConfigCommentLine(trimmed) && !strings.HasPrefix(strings.ToUpper(trimmed), "INTERNAL_SUBNETS=") {
 			lines = append(lines, trimmed)
 		}
 	}
@@ -885,6 +983,41 @@ func getPAConfig() (string, string, string, string, error) {
 	}
 
 	return fwIP, iface, apiKey, cmd, nil
+}
+
+// getInternalSubnets 讀取 pa1420key.txt 中的 INTERNAL_SUBNETS= 自訂內網網段（以空白分隔多組 CIDR/IP），並同步更新後端比對規則
+func getInternalSubnets() []string {
+	cfgPath := paConfigFile
+	if cfgPath == "" {
+		cfgPath = "pa1420key.txt"
+	}
+	subs := make([]string, 0)
+	if content, err := os.ReadFile(cfgPath); err == nil {
+		for _, l := range strings.Split(string(content), "\n") {
+			trimmed := strings.TrimSpace(l)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if len(trimmed) >= 17 && strings.EqualFold(trimmed[:17], "INTERNAL_SUBNETS=") {
+				val := strings.TrimSpace(trimmed[17:])
+				for _, field := range strings.Fields(val) {
+					token := strings.TrimSpace(field)
+					if token == "" {
+						continue
+					}
+					cidr := token
+					if !strings.Contains(cidr, "/") {
+						cidr += "/32"
+					}
+					if _, _, pErr := net.ParseCIDR(cidr); pErr == nil {
+						subs = append(subs, token)
+					}
+				}
+			}
+		}
+	}
+	reloadCustomInternalCIDRs(subs)
+	return subs
 }
 
 func runPACommand(cmdXML string) ([]byte, error) {
@@ -933,10 +1066,13 @@ func initDB() (*sql.DB, error) {
 	}
 
 	dbPath := filepath.Join(appDir, "dhcp_records.db")
-	db, err := sql.Open("sqlite", dbPath)
+	dsn := "file:" + filepath.ToSlash(dbPath) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
 
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS dhcp_leases (
@@ -967,6 +1103,7 @@ func initDB() (*sql.DB, error) {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		);`,
+
 		
 		`CREATE TABLE IF NOT EXISTS flow_security_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1012,7 +1149,6 @@ func initDB() (*sql.DB, error) {
 
 	rows, err := db.Query("PRAGMA table_info(system_health_log);")
 	if err == nil {
-		defer rows.Close()
 		hasDisk := false
 		for rows.Next() {
 			var cid int
@@ -1025,13 +1161,295 @@ func initDB() (*sql.DB, error) {
 				break
 			}
 		}
+		rows.Close()
 		if !hasDisk {
 			_, _ = db.Exec("ALTER TABLE system_health_log ADD COLUMN disk_usage_pct REAL DEFAULT 0.0;")
 		}
 	}
 
+	if err := ensureTrafficDailyMetricsTable(db); err != nil {
+		fmt.Printf("[資料庫升級警告] ensureTrafficDailyMetricsTable: %v\n", err)
+	}
+
 	dbConn = db
 	return dbConn, nil
+}
+
+// ensureTrafficDailyMetricsTable 無痛建立與自動升級每日流量 5 卡片及預聚合指標快取表（新增欄位自動 ALTER TABLE，絕不遺失既有資料）
+func ensureTrafficDailyMetricsTable(db *sql.DB) error {
+	if db == nil {
+		return errors.New("db is nil")
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS traffic_daily_metrics_cache (
+			record_date TEXT PRIMARY KEY
+		);
+	`); err != nil {
+		return err
+	}
+
+	requiredCols := []struct {
+		name string
+		spec string
+	}{
+		{"total_flows", "INTEGER DEFAULT 0"},
+		{"db_size_bytes", "INTEGER DEFAULT 0"},
+		{"db_size_fmt", "TEXT DEFAULT '0 B'"},
+		{"total_bytes", "INTEGER DEFAULT 0"},
+		{"total_bytes_fmt", "TEXT DEFAULT '0 B'"},
+		{"top_app", "TEXT DEFAULT '-'"},
+		{"deny_flows", "INTEGER DEFAULT 0"},
+		{"allow_flows", "INTEGER DEFAULT 0"},
+		{"lan_wan_bytes", "INTEGER DEFAULT 0"},
+		{"wan_lan_bytes", "INTEGER DEFAULT 0"},
+		{"lan_lan_bytes", "INTEGER DEFAULT 0"},
+		{"unique_src_ips", "INTEGER DEFAULT 0"},
+		{"unique_dst_ips", "INTEGER DEFAULT 0"},
+		{"top_src_ip", "TEXT DEFAULT '-'"},
+		{"top_dst_ip", "TEXT DEFAULT '-'"},
+		{"hourly_hist_json", "TEXT DEFAULT ''"},
+		{"rollup_complete", "INTEGER DEFAULT 0"},
+		{"schema_version", "INTEGER DEFAULT 2"},
+		{"updated_at", "TEXT DEFAULT ''"},
+	}
+
+	existing := make(map[string]bool)
+	rows, err := db.Query("PRAGMA table_info(traffic_daily_metrics_cache);")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err == nil {
+			existing[strings.ToLower(strings.TrimSpace(name))] = true
+		}
+	}
+	rows.Close()
+
+	for _, col := range requiredCols {
+		if !existing[strings.ToLower(col.name)] {
+			alterSQL := fmt.Sprintf("ALTER TABLE traffic_daily_metrics_cache ADD COLUMN %s %s;", col.name, col.spec)
+			if _, err := db.Exec(alterSQL); err != nil {
+				return fmt.Errorf("自動升級 traffic_daily_metrics_cache 欄位 %s 失敗: %w", col.name, err)
+			}
+			fmt.Printf("🔄 [資料庫無痛升級] traffic_daily_metrics_cache 已自動新增欄位: %s\n", col.name)
+		}
+	}
+	return nil
+}
+
+// isDailyRollupRowComplete 嚴格檢查資料庫中該日是否已具備「5大卡片 + 跨日預聚合總表所有欄位」
+func isDailyRollupRowComplete(row *DailyRollupSummaryRow) bool {
+	if row == nil || row.TotalFlows <= 0 {
+		return false
+	}
+	// 1. 檢查 5 大卡片基礎欄位
+	if row.TotalBytes <= 0 && row.DenyFlows <= 0 {
+		return false
+	}
+	if row.TopApp == "" || row.TopApp == "-" {
+		return false
+	}
+	// 2. 檢查跨日總表所有視窗欄位 (不重複來源/目的 IP、Top 1 來源/目的 IP、放行/阻擋筆數、內外網雙向流量)
+	if row.UniqueSrcIPs <= 0 || row.UniqueDstIPs <= 0 {
+		return false
+	}
+	if row.TopSrcIP == "" || row.TopSrcIP == "-" || row.TopDstIP == "" || row.TopDstIP == "-" {
+		return false
+	}
+	if row.AllowFlows <= 0 && row.DenyFlows <= 0 {
+		return false
+	}
+	// 若總傳輸量 > 0，但內網對外/外部連入/內網互連皆為 0 且尚未標記完整聚合 (RollupComplete != 1)，判定為欄位不全需自動補齊
+	if row.TotalBytes > 0 && row.LanWanBytes == 0 && row.WanLanBytes == 0 && row.LanLanBytes == 0 && row.RollupComplete != 1 {
+		return false
+	}
+	return true
+}
+
+// getCachedDailyMetricsFromSQLite 從 SQLite 讀取指定歷史日期已固定的 5 大卡片與預聚合指標
+func getCachedDailyMetricsFromSQLite(dateStr string) (*DailyRollupSummaryRow, []HistogramBucket, bool) {
+	db, err := initDB()
+	if err != nil || db == nil {
+		return nil, nil, false
+	}
+	var row DailyRollupSummaryRow
+	var histJSON string
+	row.Date = dateStr
+	err = db.QueryRow(`
+		SELECT
+			COALESCE(CAST(total_flows AS INTEGER), 0),
+			COALESCE(CAST(db_size_bytes AS INTEGER), 0),
+			COALESCE(NULLIF(db_size_fmt, ''), '0 B'),
+			COALESCE(CAST(total_bytes AS INTEGER), 0),
+			COALESCE(NULLIF(total_bytes_fmt, ''), '0 B'),
+			COALESCE(NULLIF(top_app, ''), '-'),
+			COALESCE(CAST(deny_flows AS INTEGER), 0),
+			COALESCE(CAST(allow_flows AS INTEGER), 0),
+			COALESCE(CAST(lan_wan_bytes AS INTEGER), 0),
+			COALESCE(CAST(wan_lan_bytes AS INTEGER), 0),
+			COALESCE(CAST(lan_lan_bytes AS INTEGER), 0),
+			COALESCE(CAST(unique_src_ips AS INTEGER), 0),
+			COALESCE(CAST(unique_dst_ips AS INTEGER), 0),
+			COALESCE(NULLIF(top_src_ip, ''), '-'),
+			COALESCE(NULLIF(top_dst_ip, ''), '-'),
+			COALESCE(CAST(rollup_complete AS INTEGER), 0),
+			COALESCE(hourly_hist_json, ''),
+			COALESCE(updated_at, '')
+		FROM traffic_daily_metrics_cache
+		WHERE record_date = ?
+	`, dateStr).Scan(
+		&row.TotalFlows,
+		&row.DbSizeBytes,
+		&row.DbSizeFormatted,
+		&row.TotalBytes,
+		&row.TotalBytesFormatted,
+		&row.TopApp,
+		&row.DenyFlows,
+		&row.AllowFlows,
+		&row.LanWanBytes,
+		&row.WanLanBytes,
+		&row.LanLanBytes,
+		&row.UniqueSrcIPs,
+		&row.UniqueDstIPs,
+		&row.TopSrcIP,
+		&row.TopDstIP,
+		&row.RollupComplete,
+		&histJSON,
+		&row.UpdatedAt,
+	)
+	if err != nil || row.TotalFlows <= 0 || (row.TotalBytes <= 0 && row.DenyFlows <= 0 && (row.TopApp == "" || row.TopApp == "-")) {
+		return nil, nil, false
+	}
+	if row.TotalBytesFormatted == "0 B" && row.TotalBytes > 0 {
+		row.TotalBytesFormatted = formatHumanBytes(row.TotalBytes)
+	}
+	var hist []HistogramBucket
+	if histJSON != "" {
+		_ = json.Unmarshal([]byte(histJSON), &hist)
+	}
+	return &row, hist, true
+}
+
+// saveDailyMetricsToSQLite 將歷史單日統計結果持久化寫入 SQLite（保留既有更完整的跨日欄位不被歸零覆蓋）
+func saveDailyMetricsToSQLite(row DailyRollupSummaryRow, hist []HistogramBucket) {
+	if row.Date == "" || row.TotalFlows <= 0 {
+		return
+	}
+	db, err := initDB()
+	if err != nil || db == nil {
+		return
+	}
+	if row.TotalBytesFormatted == "" || row.TotalBytesFormatted == "0 B" {
+		row.TotalBytesFormatted = formatHumanBytes(row.TotalBytes)
+	}
+	if row.DbSizeFormatted == "" || row.DbSizeFormatted == "0 B" {
+		row.DbSizeFormatted = formatHumanBytes(row.DbSizeBytes)
+	}
+	if row.TopApp == "" {
+		row.TopApp = "-"
+	}
+	if row.TopSrcIP == "" {
+		row.TopSrcIP = "-"
+	}
+	if row.TopDstIP == "" {
+		row.TopDstIP = "-"
+	}
+	if row.UpdatedAt == "" {
+		row.UpdatedAt = time.Now().Format("2006-01-02 15:04:05")
+	}
+	if isDailyRollupRowComplete(&row) {
+		row.RollupComplete = 1
+	}
+	histJSON := ""
+	if len(hist) > 0 {
+		if b, mErr := json.Marshal(hist); mErr == nil {
+			histJSON = string(b)
+		}
+	}
+	if _, execErr := db.Exec(`
+		INSERT INTO traffic_daily_metrics_cache (
+			record_date, total_flows, db_size_bytes, db_size_fmt,
+			total_bytes, total_bytes_fmt, top_app, deny_flows,
+			allow_flows, lan_wan_bytes, wan_lan_bytes, lan_lan_bytes,
+			unique_src_ips, unique_dst_ips, top_src_ip, top_dst_ip,
+			rollup_complete, hourly_hist_json, schema_version, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, ?)
+		ON CONFLICT(record_date) DO UPDATE SET
+			total_flows = excluded.total_flows,
+			db_size_bytes = CASE WHEN excluded.db_size_bytes > 0 THEN excluded.db_size_bytes ELSE traffic_daily_metrics_cache.db_size_bytes END,
+			db_size_fmt = CASE WHEN excluded.db_size_bytes > 0 THEN excluded.db_size_fmt ELSE traffic_daily_metrics_cache.db_size_fmt END,
+			total_bytes = excluded.total_bytes,
+			total_bytes_fmt = excluded.total_bytes_fmt,
+			top_app = CASE WHEN excluded.top_app != '' AND excluded.top_app != '-' THEN excluded.top_app ELSE traffic_daily_metrics_cache.top_app END,
+			deny_flows = excluded.deny_flows,
+			allow_flows = CASE WHEN excluded.allow_flows > 0 THEN excluded.allow_flows ELSE traffic_daily_metrics_cache.allow_flows END,
+			lan_wan_bytes = CASE WHEN excluded.lan_wan_bytes > 0 THEN excluded.lan_wan_bytes ELSE traffic_daily_metrics_cache.lan_wan_bytes END,
+			wan_lan_bytes = CASE WHEN excluded.wan_lan_bytes > 0 THEN excluded.wan_lan_bytes ELSE traffic_daily_metrics_cache.wan_lan_bytes END,
+			lan_lan_bytes = CASE WHEN excluded.lan_lan_bytes > 0 THEN excluded.lan_lan_bytes ELSE traffic_daily_metrics_cache.lan_lan_bytes END,
+			unique_src_ips = CASE WHEN excluded.unique_src_ips > 0 THEN excluded.unique_src_ips ELSE traffic_daily_metrics_cache.unique_src_ips END,
+			unique_dst_ips = CASE WHEN excluded.unique_dst_ips > 0 THEN excluded.unique_dst_ips ELSE traffic_daily_metrics_cache.unique_dst_ips END,
+			top_src_ip = CASE WHEN excluded.top_src_ip != '' AND excluded.top_src_ip != '-' THEN excluded.top_src_ip ELSE traffic_daily_metrics_cache.top_src_ip END,
+			top_dst_ip = CASE WHEN excluded.top_dst_ip != '' AND excluded.top_dst_ip != '-' THEN excluded.top_dst_ip ELSE traffic_daily_metrics_cache.top_dst_ip END,
+			rollup_complete = CASE WHEN excluded.rollup_complete = 1 THEN 1 ELSE traffic_daily_metrics_cache.rollup_complete END,
+			hourly_hist_json = CASE WHEN excluded.hourly_hist_json != '' THEN excluded.hourly_hist_json ELSE traffic_daily_metrics_cache.hourly_hist_json END,
+			updated_at = excluded.updated_at
+	`,
+		row.Date, row.TotalFlows, row.DbSizeBytes, row.DbSizeFormatted,
+		row.TotalBytes, row.TotalBytesFormatted, row.TopApp, row.DenyFlows,
+		row.AllowFlows, row.LanWanBytes, row.WanLanBytes, row.LanLanBytes,
+		row.UniqueSrcIPs, row.UniqueDstIPs, row.TopSrcIP, row.TopDstIP,
+		row.RollupComplete, histJSON, row.UpdatedAt,
+	); execErr != nil {
+		fmt.Printf("[SQLite 快取寫入異常] %s: %v\n", row.Date, execErr)
+	} else {
+		fmt.Printf("💾 [SQLite 快取已完整儲存] %s 所有統計欄位已寫入資料庫 (筆數: %d, 流量: %s, LAN➔WAN: %s, 獨立IP: %d/%d, 完整: %d)\n",
+			row.Date, row.TotalFlows, row.TotalBytesFormatted, formatHumanBytes(row.LanWanBytes), row.UniqueSrcIPs, row.UniqueDstIPs, row.RollupComplete)
+	}
+}
+
+var (
+	rollupBackfillInFlightMux sync.Mutex
+	rollupBackfillInFlight    = make(map[string]bool)
+)
+
+// triggerAsyncRollupCompletenessBackfill 針對非當日日期，若 SQLite 資料庫任一欄位不齊全，背景自動補算並寫入全部欄位
+func triggerAsyncRollupCompletenessBackfill(dateStr string) {
+	todayStr := time.Now().Format("2006-01-02")
+	if dateStr == "" || dateStr >= todayStr || !isValidDateStr(dateStr) {
+		return
+	}
+	rollupBackfillInFlightMux.Lock()
+	if rollupBackfillInFlight[dateStr] {
+		rollupBackfillInFlightMux.Unlock()
+		return
+	}
+	rollupBackfillInFlight[dateStr] = true
+	rollupBackfillInFlightMux.Unlock()
+
+	go func(d string) {
+		defer func() {
+			rollupBackfillInFlightMux.Lock()
+			delete(rollupBackfillInFlight, d)
+			rollupBackfillInFlightMux.Unlock()
+		}()
+		fmt.Printf("🔄 [資料庫完整性檢查] 偵測到非當日 %s 預聚合欄位不齊全，自動背景補齊所有欄位...\n", d)
+		_, _ = computeAndSaveDailySummary(d)
+	}(dateStr)
+}
+
+// invalidateDailyMetricsCache 當歷史日誌被重新整併、補匯入或冷轉熱重建時，清除該日舊快取以便自動重新統計
+func invalidateDailyMetricsCache(dateStr string) {
+	if dateStr == "" {
+		return
+	}
+	db, err := initDB()
+	if err == nil && db != nil {
+		_, _ = db.Exec("DELETE FROM traffic_daily_metrics_cache WHERE record_date = ?", dateStr)
+	}
 }
 
 func parseAndInsertXML(xmlBytes []byte, recordDate string) (int, int, int, int, error) {
@@ -1374,6 +1792,25 @@ func fetchPAHealthData() (SystemHealthData, error) {
 	data.DiskUsagePct = disk.Percent
 	data.DiskDesc = disk.Desc
 	data.DiskPartitions = disk.AllPartitions
+
+	hw := getAdaptiveDuckDBProfile()
+	data.HostOS = hw.HostOS
+	data.HostOSType = hw.HostOSType
+	data.DuckDBPath = hw.DuckDBPath
+	data.HostCPUCores = hw.CPUCores
+	data.HostRAMGB = math.Round(hw.TotalRAMGB*10) / 10
+	data.ActiveETL = len(duckdbETLSem)
+	data.MaxETL = cap(duckdbETLSem)
+	if duckdbUISem != nil {
+		data.ActiveDuckDB = len(duckdbUISem)
+		data.MaxDuckDB = cap(duckdbUISem)
+	} else {
+		data.MaxDuckDB = hw.UIMaxConc
+	}
+	data.ETLMemGB = hw.ETLMemGB
+	data.ETLThreads = hw.ETLThreads
+	data.UIMemGB = hw.UIMemGB
+	data.UIThreads = hw.UIThreads
 
 	return data, nil
 }
@@ -2658,10 +3095,274 @@ func getDuckDBExePath() string {
 // 🌟 DuckDB 全域並行互斥鎖：強制循// 🌟 DuckDB 雙通道併發控制（Windows / Linux 通用）：
 // 1. etlSem：重型寫入/整併通道 (COPY TO)，限制同時 1 個執行，防止吃光 64GB 記憶體
 // 2. uiSem ：前端查詢/統計通道 (SELECT / Metadata)，允許最多 3 個 DuckDB 同時並行，絕不被轉檔阻塞
+
+// =========================================================================
+// 🌟 跨平台硬體規格偵測與 DuckDB 動態記憶體/執行緒自適應配置引擎
+// =========================================================================
+type DuckDBHardwareProfile struct {
+	HostOS     string
+	HostOSType string
+	DuckDBPath string
+	CPUCores   int
+	TotalRAMGB float64
+	ETLMemGB   int
+	ETLThreads int
+	UIMaxConc  int
+	UIMemGB    int
+	UIThreads  int
+}
+
+// detectHostOSInfo 跨平台偵測本機伺服器作業系統名稱與類型 (Linux / Windows)
+func detectHostOSInfo() (display string, osType string) {
+	osType = runtime.GOOS
+	arch := runtime.GOARCH
+	if runtime.GOOS == "linux" {
+		if raw, err := os.ReadFile("/etc/os-release"); err == nil {
+			var name, ver string
+			for _, line := range strings.Split(string(raw), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "ID=") {
+					name = strings.Trim(strings.TrimPrefix(line, "ID="), `"'`)
+				} else if strings.HasPrefix(line, "VERSION_ID=") {
+					ver = strings.Trim(strings.TrimPrefix(line, "VERSION_ID="), `"'`)
+				}
+			}
+			if name != "" {
+				capName := strings.ToUpper(name[:1]) + name[1:]
+				if ver != "" {
+					return fmt.Sprintf("Linux (%s %s)", capName, ver), "linux"
+				}
+				return fmt.Sprintf("Linux (%s)", capName), "linux"
+			}
+		}
+		return fmt.Sprintf("Linux (%s)", arch), "linux"
+	} else if runtime.GOOS == "windows" {
+		return fmt.Sprintf("Windows (%s)", arch), "windows"
+	}
+	return fmt.Sprintf("%s (%s)", runtime.GOOS, arch), runtime.GOOS
+}
+
+var (
+	cachedHWProfile     *DuckDBHardwareProfile
+	cachedHWProfileOnce sync.Once
+)
+
+// 跨平台偵測主機實體記憶體總量 (GB)，支援 Linux (/proc/meminfo + cgroup 容器限制) 與 Windows
+func detectSystemTotalRAMGB() float64 {
+	if runtime.GOOS == "linux" {
+		var hostBytes uint64
+		if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(line, "MemTotal:") {
+					fields := strings.Fields(line)
+					if len(fields) >= 2 {
+						if kb, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+							hostBytes = kb * 1024
+						}
+					}
+					break
+				}
+			}
+		}
+		// 檢查是否受 cgroup v2 / v1 記憶體上限約束
+		for _, cgPath := range []string{"/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"} {
+			if raw, err := os.ReadFile(cgPath); err == nil {
+				s := strings.TrimSpace(string(raw))
+				if s != "" && s != "max" {
+					if cgBytes, err := strconv.ParseUint(s, 10, 64); err == nil && cgBytes > 0 && cgBytes < (1<<60) {
+						if hostBytes == 0 || cgBytes < hostBytes {
+							hostBytes = cgBytes
+						}
+					}
+				}
+			}
+		}
+		if hostBytes > 0 {
+			return float64(hostBytes) / (1024.0 * 1024.0 * 1024.0)
+		}
+	} else if runtime.GOOS == "windows" {
+		// 優先透過 PowerShell CIM 取得實體記憶體
+		if out, err := exec.Command("powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory").Output(); err == nil {
+			if b, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64); err == nil && b > 0 {
+				return float64(b) / (1024.0 * 1024.0 * 1024.0)
+			}
+		}
+		// 備援：wmic
+		if out, err := exec.Command("wmic", "ComputerSystem", "get", "TotalPhysicalMemory").Output(); err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if b, err := strconv.ParseUint(trimmed, 10, 64); err == nil && b > 0 {
+					return float64(b) / (1024.0 * 1024.0 * 1024.0)
+				}
+			}
+		}
+	}
+	return 16.0 // 保底預設 16GB
+}
+
+// 依據主機 CPU 核心數與總記憶體，自動計算最安全且高效的 DuckDB ETL 與 UI 查詢資源上限
+func getAdaptiveDuckDBProfile() DuckDBHardwareProfile {
+	cachedHWProfileOnce.Do(func() {
+		cpus := runtime.NumCPU()
+		if cpus < 1 {
+			cpus = 4
+		}
+		ramGB := detectSystemTotalRAMGB()
+		if ramGB < 2.0 {
+			ramGB = 8.0
+		}
+
+		// 1. ETL 重型轉檔通道 (單一獨佔，配置約 55% 總記憶體，保留空間給 UI 查詢與作業系統快取)
+		etlMem := int(math.Round(ramGB * 0.56))
+		if ramGB <= 16.5 {
+			etlMem = int(math.Round(ramGB * 0.50))
+		}
+		if etlMem < 2 {
+			etlMem = 2
+		}
+		if etlMem > 48 {
+			etlMem = 48
+		}
+
+		// ETL 執行緒數：取實體核心數約 60%（上限 16 執行緒，避免 ZSTD 壓縮鎖競爭）
+		etlThreads := int(math.Round(float64(cpus) * 0.60))
+		if etlThreads < 2 {
+			etlThreads = 2
+		}
+		if etlThreads > 16 {
+			etlThreads = 16
+		}
+		if etlThreads > cpus {
+			etlThreads = cpus
+		}
+
+		// 2. UI 互動查詢通道：記憶體 <= 24GB (如 8C/16G) 自動收斂為 2 路並行；> 24GB 開放 3 路並行
+		uiMaxConc := 3
+		if ramGB <= 24.0 {
+			uiMaxConc = 2
+		}
+
+		uiMem := int(math.Floor(ramGB * 0.125))
+		if ramGB >= 60 {
+			uiMem = 6 // 64GB 主機：36GB ETL + 6GB*3 UI = 54GB，預留 10GB 緩衝
+		}
+		if uiMem < 1 {
+			uiMem = 1
+		}
+		if uiMem > 8 {
+			uiMem = 8
+		}
+
+		// UI 查詢執行緒數：取實體核心數約 25%（2～6 執行緒）
+		uiThreads := int(math.Round(float64(cpus) * 0.25))
+		if uiThreads < 2 {
+			uiThreads = 2
+		}
+		if uiThreads > 6 {
+			uiThreads = 6
+		}
+		if uiThreads > cpus {
+			uiThreads = cpus
+		}
+
+		duckdbUISem = make(chan struct{}, uiMaxConc)
+		hostOSLabel, hostOSType := detectHostOSInfo()
+		duckExe := getDuckDBExePath()
+
+		cachedHWProfile = &DuckDBHardwareProfile{
+			HostOS:     hostOSLabel,
+			HostOSType: hostOSType,
+			DuckDBPath: duckExe,
+			CPUCores:   cpus,
+			TotalRAMGB: ramGB,
+			ETLMemGB:   etlMem,
+			ETLThreads: etlThreads,
+			UIMaxConc:  uiMaxConc,
+			UIMemGB:    uiMem,
+			UIThreads:  uiThreads,
+		}
+
+		fmt.Printf("🖥️ [硬體自適應配置] 偵測到系統規格: %d vCPU / %.1f GB RAM ➔ DuckDB ETL 上限: %dGB (%d 執行緒) | UI 查詢上限: %dGB×%d (%d 執行緒)\n",
+			cpus, ramGB, etlMem, etlThreads, uiMem, uiMaxConc, uiThreads)
+	})
+	return *cachedHWProfile
+}
+
 var (
 	duckdbETLSem = make(chan struct{}, 1)
-	duckdbUISem  = make(chan struct{}, 3)
+	duckdbUISem  chan struct{}
 )
+
+// 🌟 取得本機硬體規格與 DuckDB ETL / 查詢通道即時運行數量
+func getDuckDBRuntimeStatus() map[string]interface{} {
+	hw := getAdaptiveDuckDBProfile()
+	activeETL := len(duckdbETLSem)
+	maxETL := cap(duckdbETLSem)
+	activeUI := 0
+	maxUI := hw.UIMaxConc
+	if duckdbUISem != nil {
+		activeUI = len(duckdbUISem)
+		maxUI = cap(duckdbUISem)
+	}
+	return map[string]interface{}{
+		"host_os":        hw.HostOS,
+		"host_os_type":   hw.HostOSType,
+		"duckdb_path":    hw.DuckDBPath,
+		"host_cpu_cores": hw.CPUCores,
+		"host_ram_gb":    math.Round(hw.TotalRAMGB*10) / 10,
+		"active_etl":     activeETL,
+		"max_etl":        maxETL,
+		"active_duckdb":  activeUI,
+		"max_duckdb":     maxUI,
+		"etl_mem_gb":     hw.ETLMemGB,
+		"etl_threads":    hw.ETLThreads,
+		"ui_mem_gb":      hw.UIMemGB,
+		"ui_threads":     hw.UIThreads,
+	}
+}
+
+// 🌟 清理殘留的 DuckDB 暫存子目錄 (開機全清 + 運行中清理超過 2 小時的孤兒目錄)
+func cleanupStaleDuckDBTempDirs(maxAge time.Duration) int {
+	tempRoot := filepath.Join(appDir, "duckdb_temp")
+	entries, err := os.ReadDir(tempRoot)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	now := time.Now()
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, "job_") && !strings.HasPrefix(name, "consolidate_") {
+			continue
+		}
+		fullPath := filepath.Join(tempRoot, name)
+		if maxAge > 0 {
+			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) < maxAge {
+				continue
+			}
+		}
+		if err := os.RemoveAll(fullPath); err == nil {
+			removed++
+		}
+	}
+	return removed
+}
+
+// 🌟 帶重試機制的暫存目錄安全刪除器 (防止 Windows 防毒軟體或行程剛結束時的短暫檔案鎖定)
+func removeTempDirSafe(dir string) {
+	if dir == "" {
+		return
+	}
+	for i := 0; i < 4; i++ {
+		if err := os.RemoveAll(dir); err == nil {
+			return
+		}
+		time.Sleep(time.Duration(50*(i+1)) * time.Millisecond)
+	}
+}
 
 // -------------------------------------------------------------
 // 🦆 DuckDB 內部呼叫小幫手 (雙通道並行 + 獨立暫存隔離 + 跨平台相容)
@@ -2676,6 +3377,7 @@ func runDuckDBQuery(query string) ([]map[string]interface{}, error) {
 	upperQ := strings.ToUpper(query)
 	isHeavyETL := strings.Contains(upperQ, "COPY (") || strings.Contains(upperQ, "COPY(")
 
+	hw := getAdaptiveDuckDBProfile()
 	var memLimit string
 	var threadNum int
 
@@ -2683,31 +3385,36 @@ func runDuckDBQuery(query string) ([]map[string]interface{}, error) {
 		duckdbETLSem <- struct{}{}
 		defer func() { <-duckdbETLSem }()
 
-		memLimit = "24GB"
-		threadNum = 8
-		if runtime.GOOS == "linux" {
-			memLimit = "32GB"
-			threadNum = 12
-		}
+		memLimit = fmt.Sprintf("%dGB", hw.ETLMemGB)
+		threadNum = hw.ETLThreads
 	} else {
 		duckdbUISem <- struct{}{}
 		defer func() { <-duckdbUISem }()
 
-		// UI 查詢通道配置 8GB / 6 執行緒，在 Windows 下讀取大型單日檔不溢位
-		memLimit = "8GB"
-		threadNum = 6
+		memLimit = fmt.Sprintf("%dGB", hw.UIMemGB)
+		threadNum = hw.UIThreads
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
 	defer cancel()
 
-	// 2. 為每一次 DuckDB 子行程建立專屬獨立暫存目錄，多行程並行互不干擾，結束後自動刪除零殘留
-	jobTempDir := filepath.Join(appDir, "duckdb_temp", fmt.Sprintf("job_%d", time.Now().UnixNano()))
-	_ = os.MkdirAll(jobTempDir, 0755)
-	defer os.RemoveAll(jobTempDir)
+	// 2. 純 Metadata / DESCRIBE 查詢絕不溢位磁碟，免建實體暫存資料夾；其餘查詢建立獨立暫存目錄並安全回收
+	isMetaOnly := !isHeavyETL && (strings.Contains(upperQ, "PARQUET_FILE_METADATA(") ||
+		strings.Contains(upperQ, "PARQUET_METADATA(") ||
+		strings.HasPrefix(strings.TrimSpace(upperQ), "DESCRIBE "))
 
-	safeSQL := fmt.Sprintf("SET max_memory = '%s'; SET threads = %d; SET preserve_insertion_order = false; SET temp_directory = '%s'; %s",
-		memLimit, threadNum, filepath.ToSlash(jobTempDir), query)
+	var safeSQL string
+	if isMetaOnly {
+		safeSQL = fmt.Sprintf("SET max_memory = '%s'; SET threads = %d; SET preserve_insertion_order = false; %s",
+			memLimit, threadNum, query)
+	} else {
+		jobTempDir := filepath.Join(appDir, "duckdb_temp", fmt.Sprintf("job_%d", time.Now().UnixNano()))
+		_ = os.MkdirAll(jobTempDir, 0755)
+		defer removeTempDirSafe(jobTempDir)
+
+		safeSQL = fmt.Sprintf("SET max_memory = '%s'; SET threads = %d; SET preserve_insertion_order = false; SET temp_directory = '%s'; %s",
+			memLimit, threadNum, filepath.ToSlash(jobTempDir), query)
+	}
 
 	cmd := exec.CommandContext(ctx, duckdbExe, "-json", "-c", safeSQL)
 	var stdout, stderr bytes.Buffer
@@ -2993,9 +3700,34 @@ func isTransientParquetCompactionError(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "Cannot open file") ||
+	return strings.Contains(msg, "No files found") ||
+		strings.Contains(msg, "Cannot open file") ||
+		strings.Contains(msg, "Could not open file") ||
 		strings.Contains(msg, "No such file or directory") ||
 		strings.Contains(msg, "cannot find the file")
+}
+
+// 🌟 安全錯誤訊息淨化器：徹底移除伺服器內部絕對路徑與原始 SQL 片段，防止目錄結構洩漏
+func sanitizeErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	if isTransientParquetCompactionError(err) {
+		return "背景資料整併作業進行中，請稍候重新整理"
+	}
+	msg := err.Error()
+	if idx := strings.Index(msg, "LINE "); idx != -1 {
+		msg = strings.TrimSpace(msg[:idx])
+	}
+	if appDir != "" {
+		msg = strings.ReplaceAll(msg, appDir, "[系統目錄]")
+		msg = strings.ReplaceAll(msg, filepath.ToSlash(appDir), "[系統目錄]")
+	}
+	reUnixPath := regexp.MustCompile(`(?:/(?:opt|var|home|usr|tmp|root|srv|mnt|media|etc|data)/[^\s"']+)`)
+	msg = reUnixPath.ReplaceAllString(msg, "[系統目錄]")
+	reWinPath := regexp.MustCompile(`[a-zA-Z]:\\[^\s"']+`)
+	msg = reWinPath.ReplaceAllString(msg, "[系統目錄]")
+	return msg
 }
 
 // 🌟 智慧 IP 條件建構器：同時支援 CIDR 網段 (192.168.1.0/24)、萬用字元 (192.168.1.* / 192.168.1.?) 與單一精準 IP
@@ -3060,15 +3792,15 @@ func buildIPFilterSQL(colName, rawVal string) string {
 // -------------------------------------------------------------
 func queryTrafficAnalytics(queryDate, src, dst, app, action, zone string, page, perPage int, onlyLogs bool, order string, knownTotal int64, firstLoad bool, countOnly bool) (*TrafficAnalyticsResult, error) {
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 5; attempt++ {
 		res, err := queryTrafficAnalyticsOnce(queryDate, src, dst, app, action, zone, page, perPage, onlyLogs, order, knownTotal, firstLoad, countOnly)
 		if err == nil {
 			return res, nil
 		}
 		lastErr = err
-		if isTransientParquetCompactionError(err) && attempt < 2 {
-			fmt.Printf("[查詢自動重試] 🔄 偵測到背景檔案整併替換，自動重新掃描目錄並重讀 (%d/2)...\n", attempt+1)
-			time.Sleep(80 * time.Millisecond)
+		if isTransientParquetCompactionError(err) && attempt < 4 {
+			fmt.Printf("[查詢自動重試] 🔄 偵測到背景檔案整併替換，自動重新掃描目錄並重讀 (%d/4)...\n", attempt+1)
+			time.Sleep(time.Duration(60*(attempt+1)) * time.Millisecond)
 			continue
 		}
 		break
@@ -3149,8 +3881,8 @@ func queryTrafficAnalyticsOnce(queryDate, src, dst, app, action, zone string, pa
 		duckdbSourceExpr = fmt.Sprintf("[%s]", strings.Join(quoted, ", "))
 	}
 
-	// 🌟 解析前端統一查詢列擴充條件 (natsrc, natdst, dport, rule, reason)，完全相容既有 API 參數
-	var natSrc, natDst, dport, ruleFilter, reasonFilter string
+	// 🌟 解析前端統一查詢列擴充條件 (natsrc, natdst, dport, rule, reason, time_leq, time_geq)，完全相容既有 API 參數
+	var natSrc, natDst, dport, ruleFilter, reasonFilter, timeLeq, timeGeq string
 	if idx := strings.Index(app, "__EXT__"); idx != -1 {
 		extJSON := app[idx+7:]
 		app = app[:idx]
@@ -3161,11 +3893,21 @@ func queryTrafficAnalyticsOnce(queryDate, src, dst, app, action, zone string, pa
 			dport = strings.TrimSpace(extMap["dport"])
 			ruleFilter = strings.TrimSpace(extMap["rule"])
 			reasonFilter = strings.TrimSpace(extMap["reason"])
+			timeLeq = strings.TrimSpace(extMap["time_leq"])
+			timeGeq = strings.TrimSpace(extMap["time_geq"])
 		}
 	}
 
 	var conds []string
 	conds = append(conds, "1=1")
+	if timeLeq != "" {
+		normLeq := strings.ReplaceAll(strings.ReplaceAll(timeLeq, "/", "-"), "T", " ")
+		conds = append(conds, fmt.Sprintf("timestamp <= '%s'", strings.ReplaceAll(normLeq, "'", "''")))
+	}
+	if timeGeq != "" {
+		normGeq := strings.ReplaceAll(strings.ReplaceAll(timeGeq, "/", "-"), "T", " ")
+		conds = append(conds, fmt.Sprintf("timestamp >= '%s'", strings.ReplaceAll(normGeq, "'", "''")))
+	}
 
 	if src != "" {
 		conds = append(conds, buildIPFilterSQL("source", src))
@@ -3222,6 +3964,7 @@ func queryTrafficAnalyticsOnce(queryDate, src, dst, app, action, zone string, pa
 	isToday := (queryDate == todayStr)
 	hasCustomFilter := (src != "" || natSrc != "" || dst != "" || natDst != "" ||
 		dport != "" || app != "" || ruleFilter != "" || reasonFilter != "" ||
+		timeLeq != "" || timeGeq != "" ||
 		(action != "" && strings.ToLower(action) != "all") ||
 		(zone != "" && strings.ToLower(zone) != "all"))
 
@@ -3245,10 +3988,48 @@ func queryTrafficAnalyticsOnce(queryDate, src, dst, app, action, zone string, pa
 		}
 	}
 
+	// 預先宣告 5 大卡片指標變數（支援 SQLite 歷史快取直讀，免重掃巨量 Parquet）
+	var totalFlows int = int(knownTotal)
+	var totalBytesNum int64
+	var denyFlows int
+	topApp := "-"
+	var cachedMetricsFound bool
+
 	// ==========================================
-	// 🦆 任務 1 & 2：單一 DuckDB 行程合併執行「統計 + 直方圖」(減少 Windows 行程啟動與重複讀檔)
+	// 🦆 任務 1 & 2：優先查詢 SQLite 歷史 5 卡片快取；無快取時才啟動 DuckDB 統計並寫入資料庫
 	// ==========================================
-	if countOnly || (!onlyLogs && !firstLoad) {
+	if !isToday && !hasCustomFilter {
+		if cachedRow, cachedHist, ok := getCachedDailyMetricsFromSQLite(queryDate); ok {
+			cachedMetricsFound = true
+			totalFlows = int(cachedRow.TotalFlows)
+			knownTotal = cachedRow.TotalFlows
+			totalBytesNum = cachedRow.TotalBytes
+			denyFlows = int(cachedRow.DenyFlows)
+			if cachedRow.TopApp != "" {
+				topApp = cachedRow.TopApp
+			}
+			hasCachedHist := false
+			for _, b := range cachedHist {
+				if b.Count > 0 {
+					hasCachedHist = true
+					break
+				}
+			}
+			if len(cachedHist) == 24 && hasCachedHist {
+				emptyHistogram = cachedHist
+			} else if hasFastMeta {
+				emptyHistogram = fastMetaHist
+			} else if _, mHist, mErr := getFastMetadataStats(duckdbSourceExpr); mErr == nil {
+				emptyHistogram = mHist
+			}
+			// 🌟 回到非當日日期時，檢查資料庫所有欄位是否齊全；若不齊全（例如缺少 LAN➔WAN、不重複 IP、Top 1 來源 IP），立即背景補齊！
+			if !isDailyRollupRowComplete(cachedRow) {
+				triggerAsyncRollupCompletenessBackfill(queryDate)
+			}
+		}
+	}
+
+	if (countOnly || (!onlyLogs && !firstLoad)) && !cachedMetricsFound {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -3373,8 +4154,8 @@ func queryTrafficAnalyticsOnce(queryDate, src, dst, app, action, zone string, pa
 				oppositeOrder = "DESC"
 			}
 
-			// 🌟 1. 無自訂過濾且位於前段頁面 (offset < 10000) 時，優先使用 Footer 時間窗剪枝 + 確定性 ORDER BY
-			if !hasCustomFilter && offset < 10000 {
+			// 🌟 1. 無自訂過濾、位於前段頁面 (offset < 10000) 且資料量超過 20 萬筆 (PA-5250 巨量檔) 時，優先使用 Footer 時間窗剪枝
+			if !hasCustomFilter && offset < 10000 && (!hasFastMeta || fastMetaTotal > 200000) {
 				prunedSQL := buildTimeWindowPrunedLogsSQL(targetScanExpr, whereClause, order, offset, perPage)
 				if prunedSQL != "" {
 					pRes, pErr := runDuckDBQuery(prunedSQL)
@@ -3443,62 +4224,64 @@ func queryTrafficAnalyticsOnce(queryDate, src, dst, app, action, zone string, pa
 		return nil, errLogs
 	}
 
-	// 處理結果
-	var totalFlows int = int(knownTotal)
-	var totalBytesNum int64
-	var denyFlows int
-	topApp := "-"
+	// 處理結果（若已從 SQLite 命中快取則直接沿用，無需重複覆蓋）
+	if !cachedMetricsFound {
+		if hasFastMeta {
+			totalFlows = int(fastMetaTotal)
+			emptyHistogram = fastMetaHist
+		}
 
-	if hasFastMeta {
-		totalFlows = int(fastMetaTotal)
-		emptyHistogram = fastMetaHist
-	}
-
-	if (countOnly || (!onlyLogs && !firstLoad)) && len(statsRes) > 0 {
-		histMap := make(map[string]int)
-		hasHistRows := false
-		for _, row := range statsRes {
-			recType := fmt.Sprintf("%v", row["rec_type"])
-			if recType == "hist" {
-				hasHistRows = true
-				if h, ok := row["h"].(string); ok && h != "" {
-					histMap[h] = int(parseDuckDBNumber(row["total_flows"]))
-				}
-			} else {
-				if !hasFastMeta {
-					totalFlows = int(parseDuckDBNumber(row["total_flows"]))
-				}
-				totalBytesNum = parseDuckDBNumber(row["total_bytes"])
-				denyFlows = int(parseDuckDBNumber(row["deny_flows"]))
-				if v, ok := row["top_app"].(string); ok && v != "" {
-					topApp = v
+		if (countOnly || (!onlyLogs && !firstLoad)) && len(statsRes) > 0 {
+			histMap := make(map[string]int)
+			hasHistRows := false
+			for _, row := range statsRes {
+				recType := fmt.Sprintf("%v", row["rec_type"])
+				if recType == "hist" {
+					hasHistRows = true
+					if h, ok := row["h"].(string); ok && h != "" {
+						histMap[h] = int(parseDuckDBNumber(row["total_flows"]))
+					}
+				} else {
+					if !hasFastMeta {
+						totalFlows = int(parseDuckDBNumber(row["total_flows"]))
+					}
+					totalBytesNum = parseDuckDBNumber(row["total_bytes"])
+					denyFlows = int(parseDuckDBNumber(row["deny_flows"]))
+					if v, ok := row["top_app"].(string); ok && v != "" {
+						topApp = v
+					}
 				}
 			}
-		}
-		if hasHistRows {
-			for h := 0; h < 24; h++ {
-				emptyHistogram[h].Count = histMap[fmt.Sprintf("%02d:00", h)]
+			if hasHistRows {
+				for h := 0; h < 24; h++ {
+					emptyHistogram[h].Count = histMap[fmt.Sprintf("%02d:00", h)]
+				}
 			}
-		}
-	} else if !hasFastMeta && probeRows > 0 && totalFlows <= 0 {
-		totalFlows = int(probeRows)
-	} else if !hasFastMeta && !firstLoad && onlyLogs && totalFlows <= 0 {
-		cntSQL := fmt.Sprintf(`SELECT COUNT(*) AS c FROM read_parquet(%s, union_by_name=true) WHERE %s`, duckdbSourceExpr, whereClause)
-		if cRes, err := runDuckDBQuery(cntSQL); err == nil && len(cRes) > 0 {
-			totalFlows = int(parseDuckDBNumber(cRes[0]["c"]))
+			// 🌟 寫入 SQLite 快取並補齊所有預聚合欄位 (非當日且無過濾條件時，確保所有視窗欄位 100% 齊全)
+			if !isToday && !hasCustomFilter && totalFlows > 0 {
+				saveDailyMetricsToSQLite(DailyRollupSummaryRow{
+					Date:                queryDate,
+					TotalFlows:          int64(totalFlows),
+					TotalBytes:          totalBytesNum,
+					TotalBytesFormatted: formatHumanBytes(totalBytesNum),
+					DenyFlows:           int64(denyFlows),
+					TopApp:              topApp,
+					DbSizeBytes:         totalFileSize,
+					DbSizeFormatted:     dbSizeStr,
+				}, emptyHistogram)
+				triggerAsyncRollupCompletenessBackfill(queryDate)
+			}
+		} else if !hasFastMeta && probeRows > 0 && totalFlows <= 0 {
+			totalFlows = int(probeRows)
+		} else if !hasFastMeta && !firstLoad && onlyLogs && totalFlows <= 0 {
+			cntSQL := fmt.Sprintf(`SELECT COUNT(*) AS c FROM read_parquet(%s, union_by_name=true) WHERE %s`, duckdbSourceExpr, whereClause)
+			if cRes, err := runDuckDBQuery(cntSQL); err == nil && len(cRes) > 0 {
+				totalFlows = int(parseDuckDBNumber(cRes[0]["c"]))
+			}
 		}
 	}
 
-	var totalBytesStr string
-	if totalBytesNum >= 1024*1024*1024 {
-		totalBytesStr = fmt.Sprintf("%.2f GB", float64(totalBytesNum)/(1024*1024*1024))
-	} else if totalBytesNum >= 1024*1024 {
-		totalBytesStr = fmt.Sprintf("%.2f MB", float64(totalBytesNum)/(1024*1024))
-	} else if totalBytesNum >= 1024 {
-		totalBytesStr = fmt.Sprintf("%.1f KB", float64(totalBytesNum)/1024)
-	} else {
-		totalBytesStr = fmt.Sprintf("%d B", totalBytesNum)
-	}
+	totalBytesStr := formatHumanBytes(totalBytesNum)
 
 	logs := make([]TrafficLogItem, 0, len(logsRes))
 	if !countOnly {
@@ -3555,11 +4338,30 @@ func queryTrafficAnalyticsOnce(queryDate, src, dst, app, action, zone string, pa
 				portVal = int(p)
 			}
 
+			srcIPStr := safeStr(r["source"])
+			dstIPStr := safeStr(r["destination"])
+			srcIntel := LookupGeoIPAndIOC(srcIPStr)
+			dstIntel := LookupGeoIPAndIOC(dstIPStr)
+			isMal := srcIntel.IsMalicious || dstIntel.IsMalicious
+			iocMatch := ""
+			if srcIntel.IsMalicious {
+				iocMatch = srcIntel.IOCBadge
+			}
+			if dstIntel.IsMalicious {
+				if iocMatch != "" && dstIntel.IOCBadge != iocMatch {
+					iocMatch += " | " + dstIntel.IOCBadge
+				} else {
+					iocMatch = dstIntel.IOCBadge
+				}
+			}
+
 			logs = append(logs, TrafficLogItem{
 				Timestamp: safeStr(r["timestamp"]), Type: safeStr(r["type"]), FromZone: safeStr(r["from_zone"]), ToZone: safeStr(r["to_zone"]),
-				Source: safeStr(r["source"]), SrcHostname: dhcpMap[safeStr(r["source"])], NatSourceIP: safeStr(r["nat_source_ip"]), Destination: safeStr(r["destination"]),
+				Source: srcIPStr, SrcHostname: dhcpMap[srcIPStr], SrcGeo: srcIntel.BadgeLabel, SrcASNType: srcIntel.ASNType,
+				NatSourceIP: safeStr(r["nat_source_ip"]), Destination: dstIPStr, DstGeo: dstIntel.BadgeLabel, DstASNType: dstIntel.ASNType,
 				NatDestIP: safeStr(r["nat_dest_ip"]), ToPort: portVal, Application: safeStr(r["application"]), Action: safeStr(r["action"]),
 				Rule: safeStr(r["rule"]), SessionEndReason: safeStr(r["session_end_reason"]), Bytes: bytesVal, BytesFormatted: bFmt,
+				IsMalicious: isMal, IOCMatch: iocMatch,
 			})
 		}
 	}
@@ -3576,6 +4378,7 @@ func queryTrafficAnalyticsOnce(queryDate, src, dst, app, action, zone string, pa
 		TotalFlows: totalFlows, TotalBytes: totalBytesStr, TopApp: topApp,
 		DenyFlows: denyFlows, DbSize: dbSizeStr, Histogram: emptyHistogram,
 		Logs: logs, CurrentPage: page, TotalPages: totalPages,
+		FromDBCache: cachedMetricsFound,
 	}, nil
 }
 
@@ -4462,6 +5265,7 @@ func processNASImport(nasFilePaths []string, logType string) {
 	if !hasConvertError {
 		globalNASProgress.addLog("🔄 啟動背景 DuckDB 去重整併作業，將新舊資料無縫融合...")
 		for d := range allDetectedDates {
+			invalidateDailyMetricsCache(d)
 			_ = consolidateDailyTraffic(d)
 		}
 		ConsolidateThreatParquetFiles()
@@ -4848,14 +5652,14 @@ func startFlowSecurityWorker() {
 				}
 			}
 
-			// ── 威脅 3: DDoS / 殭屍網路洪泛 (修正：僅偵測外部打進內網 WAN ➔ LAN) ──
+			// ── 威脅 3: DDoS / 殭屍網路洪泛 (相容 WAN/outside ➔ LAN/inside) ──
 			sqlDDoS := fmt.Sprintf(`
 				SELECT destination, COUNT(DISTINCT source) as src_count, round(SUM(bytes)/1048576.0, 2) as mb_size
 				FROM read_parquet('%s')
 				WHERE timestamp >= '%s' 
-				  AND from_zone = 'WAN' AND to_zone = 'LAN'
+				  AND %s AND %s
 				GROUP BY destination HAVING src_count >= 10 AND mb_size >= %d
-			`, trafficPattern, timeThreshold, cfg.DDoSMBThreshold)
+			`, trafficPattern, timeThreshold, sqlIsExternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone"), cfg.DDoSMBThreshold)
 			if rows, err := runDuckDBQuery(sqlDDoS); err == nil {
 				for _, r := range rows {
 					dst := fmt.Sprintf("%v", r["destination"])
@@ -4883,13 +5687,13 @@ func startFlowSecurityWorker() {
 				}
 			}
 
-			// ── 威脅 5: 異常巨量資料外洩 (LAN ➔ WAN) ──
+			// ── 威脅 5: 異常巨量資料外洩 (相容 LAN/inside ➔ WAN/outside) ──
 			sqlExfil := fmt.Sprintf(`
 				SELECT source, destination, round(SUM(bytes)/1048576.0, 2) as mb_size
 				FROM read_parquet('%s')
-				WHERE timestamp >= '%s' AND from_zone = 'LAN' AND to_zone = 'WAN'
+				WHERE timestamp >= '%s' AND %s AND %s
 				GROUP BY source, destination HAVING mb_size >= %d
-			`, trafficPattern, timeThreshold, cfg.DataExfilThreshold)
+			`, trafficPattern, timeThreshold, sqlIsInternalZoneExpr("from_zone"), sqlIsExternalZoneExpr("to_zone"), cfg.DataExfilThreshold)
 			if rows, err := runDuckDBQuery(sqlExfil); err == nil {
 				for _, r := range rows {
 					src := fmt.Sprintf("%v", r["source"])
@@ -4899,13 +5703,13 @@ func startFlowSecurityWorker() {
 				}
 			}
 
-			// ── 威脅 6: 內網橫向擴散移動 ──
+			// ── 威脅 6: 內網橫向擴散移動 (相容 LAN/inside ➔ LAN/inside) ──
 			sqlLateral := fmt.Sprintf(`
 				SELECT source, COUNT(DISTINCT destination) as target_cnt
 				FROM read_parquet('%s')
-				WHERE timestamp >= '%s' AND from_zone = 'LAN' AND to_zone = 'LAN' AND to_port IN (445, 135, 3389, 5985)
+				WHERE timestamp >= '%s' AND %s AND %s AND to_port IN (445, 135, 3389, 5985)
 				GROUP BY source HAVING target_cnt >= %d
-			`, trafficPattern, timeThreshold, cfg.LateralSpreadThreshold)
+			`, trafficPattern, timeThreshold, sqlIsInternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone"), cfg.LateralSpreadThreshold)
 			if rows, err := runDuckDBQuery(sqlLateral); err == nil {
 				for _, r := range rows {
 					src := fmt.Sprintf("%v", r["source"])
@@ -6015,13 +6819,26 @@ func queryHostTimeline(ip, targetDate string) (*Host360Profile, error) {
 	}
 	safeIP := strings.ReplaceAll(ip, "'", "''")
 
-	// 🌟 核心修正 1：主動向 SQLite ARP/DHCP 靜態資產庫精準反查 Hostname 與 MAC
+	// 🌟 核心修正 1：主動向 SQLite ARP/DHCP 靜態資產庫精準反查 Hostname 與 MAC，並疊加離線 GeoIP 與 Threat Intel IOC 情資
 	hostVal, macVal := lookupHostAssetInfo(ip)
+	targetIntel := LookupGeoIPAndIOC(ip)
+	geoSummary := "內網私有位址 (LAN)"
+	if !targetIntel.IsInternal {
+		if targetIntel.BadgeLabel != "" {
+			geoSummary = targetIntel.BadgeLabel
+		} else {
+			geoSummary = "外部公網 IP"
+		}
+	}
 
 	profile := &Host360Profile{
 		IP:          ip,
 		Hostname:    hostVal,
 		MAC:         macVal,
+		GeoInfo:     geoSummary,
+		ASNType:     targetIntel.ASNType,
+		IsMalicious: targetIntel.IsMalicious,
+		IOCMatch:    targetIntel.IOCBadge,
 		Events:      make([]TimelineEvent, 0),
 	}
 
@@ -6094,9 +6911,9 @@ func queryHostTimeline(ip, targetDate string) (*Host360Profile, error) {
 		if len(files) == 0 { return }
 
 		q := fmt.Sprintf(`
-			SELECT timestamp, threat_name, severity, action, application, destination, to_port
+			SELECT timestamp, threat_name, severity, action, application, src, dst, to_port
 			FROM read_parquet('%s', union_by_name=true) 
-			WHERE source = '%s' OR destination = '%s'
+			WHERE src = '%s' OR dst = '%s'
 			ORDER BY timestamp DESC LIMIT 2000
 		`, pattern, safeIP, safeIP)
 		res, err := runDuckDBQuery(q)
@@ -6106,13 +6923,32 @@ func queryHostTimeline(ip, targetDate string) (*Host360Profile, error) {
 				sev := strings.ToLower(fmt.Sprintf("%v", r["severity"]))
 				lvl := "warning"
 				if sev == "high" || sev == "critical" { lvl = "danger" }
+				sIP := strings.TrimSpace(fmt.Sprintf("%v", r["src"]))
+				dIP := strings.TrimSpace(fmt.Sprintf("%v", r["dst"]))
+				peerIP := dIP
+				if dIP == ip && sIP != "" && sIP != "<nil>" {
+					peerIP = sIP
+				}
+				pIntel := LookupGeoIPAndIOC(peerIP)
+				isMal := pIntel.IsMalicious
+				iocMsg := pIntel.IOCBadge
+				titleStr := fmt.Sprintf("威脅攔截: %v (%v)", r["threat_name"], r["severity"])
+				if isMal {
+					lvl = "danger"
+					titleStr = fmt.Sprintf("☠️ [命中惡意情資 IOC] %s", titleStr)
+				}
 				events = append(events, TimelineEvent{
 					Timestamp:   fmt.Sprintf("%v", r["timestamp"]),
 					Category:    "threat",
 					Level:       lvl,
 					Icon:        "bi-shield-slash-fill",
-					Title:       fmt.Sprintf("威脅攔截: %v (%v)", r["threat_name"], r["severity"]),
-					Description: fmt.Sprintf("動作: %v | 應用: %v | 目標: %v:%v", r["action"], r["application"], r["destination"], r["to_port"]),
+					Title:       titleStr,
+					Description: fmt.Sprintf("來源: %s ➔ 目標: %s:%v | 動作: %v | 應用: %v", sIP, dIP, r["to_port"], r["action"], r["application"]),
+					PeerIP:      peerIP,
+					PeerGeo:     pIntel.BadgeLabel,
+					PeerASNType: pIntel.ASNType,
+					IsMalicious: isMal,
+					IOCMatch:    iocMsg,
 				})
 			}
 			mu.Unlock()
@@ -6154,7 +6990,7 @@ func queryHostTimeline(ip, targetDate string) (*Host360Profile, error) {
 		}
 	}()
 
-	// 4. 查詢 Traffic (🌟 核心修正：從原本的 LIMIT 100 大幅解放至 5000 筆！)
+	// 4. 查詢 Traffic (🌟 自動標註外部對端 GeoIP / ASN 與惡意情資 IOC 命中)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -6163,7 +6999,7 @@ func queryHostTimeline(ip, targetDate string) (*Host360Profile, error) {
 		if len(files) == 0 { return }
 
 		q := fmt.Sprintf(`
-			SELECT timestamp, action, application, destination, to_port, bytes
+			SELECT timestamp, action, application, source, destination, to_port, bytes
 			FROM read_parquet('%s', union_by_name=true) 
 			WHERE source = '%s' OR destination = '%s'
 			ORDER BY timestamp DESC LIMIT 5000
@@ -6177,7 +7013,17 @@ func queryHostTimeline(ip, targetDate string) (*Host360Profile, error) {
 				icon := "bi-arrow-left-right"
 				title := fmt.Sprintf("網路連線: %v", r["application"])
 
-				// 阻擋事件以紅色強調，巨量傳輸以黃色提醒，正常連線以藍色呈現
+				sIP := strings.TrimSpace(fmt.Sprintf("%v", r["source"]))
+				dIP := strings.TrimSpace(fmt.Sprintf("%v", r["destination"]))
+				peerIP := dIP
+				dirLabel := "連線至外部目標"
+				if dIP == ip && sIP != "" && sIP != "<nil>" {
+					peerIP = sIP
+					dirLabel = "來自外部來源"
+				}
+				pIntel := LookupGeoIPAndIOC(peerIP)
+
+				// 阻擋事件以紅色強調，巨量傳輸以黃色提醒，命中惡意情資 IOC 標示最高紅警
 				if act == "deny" || act == "drop" || strings.HasPrefix(act, "reset") {
 					lvl = "danger"
 					icon = "bi-x-circle-fill"
@@ -6185,6 +7031,12 @@ func queryHostTimeline(ip, targetDate string) (*Host360Profile, error) {
 				} else if parseDuckDBNumber(r["bytes"]) > 20971520 {
 					lvl = "warning"
 					title = fmt.Sprintf("巨量連線: %v", r["application"])
+				}
+
+				if pIntel.IsMalicious {
+					lvl = "danger"
+					icon = "bi-radioactive"
+					title = fmt.Sprintf("☠️ [命中惡意情資 IOC] %s", title)
 				}
 
 				bytesVal := parseDuckDBNumber(r["bytes"])
@@ -6199,7 +7051,12 @@ func queryHostTimeline(ip, targetDate string) (*Host360Profile, error) {
 					Level:       lvl,
 					Icon:        icon,
 					Title:       title,
-					Description: fmt.Sprintf("目標端: %v:%v | 傳輸: %s", r["destination"], r["to_port"], bytesStr),
+					Description: fmt.Sprintf("%s: %s (目標端 %s:%v) | 傳輸: %s", dirLabel, peerIP, dIP, r["to_port"], bytesStr),
+					PeerIP:      peerIP,
+					PeerGeo:     pIntel.BadgeLabel,
+					PeerASNType: pIntel.ASNType,
+					IsMalicious: pIntel.IsMalicious,
+					IOCMatch:    pIntel.IOCBadge,
 				})
 			}
 			mu.Unlock()
@@ -6212,6 +7069,7 @@ func queryHostTimeline(ip, targetDate string) (*Host360Profile, error) {
 	for _, e := range events {
 		if e.Category == "threat" { profile.ThreatCount++ }
 		if e.Category == "traffic" && e.Level == "danger" { profile.BlockCount++ }
+		if e.IsMalicious { profile.IOCHitCount++ }
 	}
 	profile.TotalEvents = len(events)
 
@@ -6510,6 +7368,9 @@ func doRollupChunksNow() {
 	} else {
 		_ = os.Remove(tmpMerged)
 	}
+
+	// 🌟 同步整併稽核日誌碎片至 audit_logs/YYYY-MM-DD/
+	ConsolidateAuditLogs()
 }
 
 // 🌟 嚴格對齊時鐘整點與半點 (:00 / :30) 的 Rollup 排程器
@@ -6542,17 +7403,18 @@ func startChunkConsolidatorWorker() {
 	}()
 }
 
-// 🌟 每日凌晨 00:05 跨日低峰期，對「前一日」的完整日誌做唯一一次全量封存，內部的重複邏輯簡化為呼叫 consolidateDailyTraffic
+// 🌟 每日凌晨 00:40 跨日低峰期（待前一日 23:30 切片與冷轉熱完成後），對前一日執行全量封存
 func startMidnightDailyArchiver() {
     go func() {
         for {
             now := time.Now()
-            nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 5, 0, 0, now.Location())
+            nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 40, 0, 0, now.Location())
             time.Sleep(time.Until(nextMidnight))
 
             yesterdayStr := time.Now().Add(-24 * time.Hour).Format("2006-01-02")
             fmt.Printf("[%s] 🌙 [夜間封存] 開始對前一日 (%s) 執行全量去重整併...\n", time.Now().Format("15:04:05"), yesterdayStr)
             _ = consolidateDailyTraffic(yesterdayStr)
+            ConsolidateAuditLogs()
         }
     }()
 }
@@ -6614,13 +7476,44 @@ func consolidateDailyTraffic(dateStr string) error {
 
 	// 3. 檢查該日是否已有分時主檔 (traffic_YYYY-MM-DD_00.parquet ~ _23.parquet)
 	hourlyFiles, _ := filepath.Glob(filepath.Join(dayDir, fmt.Sprintf("traffic_%s_[0-2][0-9].parquet", dateStr)))
-	hasHourlyMainFiles := len(hourlyFiles) > 0
+	var validHourlyFiles []string
+	var coveredHourPrefixes []string
+	for _, hf := range hourlyFiles {
+		if fi, statErr := os.Stat(hf); statErr == nil && fi.Size() > 0 {
+			validHourlyFiles = append(validHourlyFiles, hf)
+			base := filepath.Base(hf) // traffic_YYYY-MM-DD_HH.parquet
+			if len(base) >= 21 {
+				hh := base[19:21]
+				coveredHourPrefixes = append(coveredHourPrefixes, fmt.Sprintf("'%s %s:'", dateStr, hh))
+			}
+		}
+	}
+	hasHourlyMainFiles := len(validHourlyFiles) > 0
+
+	// 若 00..23 共 24 個分時主檔皆已齊備，該日資料已 100% 由無損冷資料轉出，直接清除殘留碎片與舊 _syslog.parquet
+	if len(validHourlyFiles) >= 24 {
+		removed := 0
+		for _, f := range fragments {
+			if err := os.Remove(f); err == nil {
+				removed++
+			}
+		}
+		syslogArchive := filepath.Join(dayDir, fmt.Sprintf("traffic_%s_syslog.parquet", dateStr))
+		if err := os.Remove(syslogArchive); err == nil {
+			removed++
+		}
+		if removed > 0 {
+			fmt.Printf("[每日湖倉整併] ✅ %s 已具備完整 24 個分時熱主檔，自動清除 %d 個多餘碎片/Syslog歸檔！\n", dateStr, removed)
+		}
+		return nil
+	}
 
 	var targetMainFile string
 	var inputPaths []string
+	extraWhere := ""
 
 	if hasHourlyMainFiles {
-		// 🌟 PA-5250 分時主檔模式：保留 24 個分時主檔不動（避免重寫數十 GB 檔案），僅將零碎分塊合併為單一 syslog 歸檔
+		// 🌟 PA-5250 分時主檔模式：僅將尚未產出分時主檔的缺口時段整合為單一 syslog 歸檔，絕不與已有分時主檔重複
 		targetMainFile = filepath.Join(dayDir, fmt.Sprintf("traffic_%s_syslog.parquet", dateStr))
 		if _, err := os.Stat(targetMainFile); err == nil {
 			inputPaths = append(inputPaths, filepath.ToSlash(targetMainFile))
@@ -6628,8 +7521,11 @@ func consolidateDailyTraffic(dateStr string) error {
 		for _, f := range fragments {
 			inputPaths = append(inputPaths, filepath.ToSlash(f))
 		}
-		fmt.Printf("[每日湖倉整併] 📦 偵測到 %s 具備分時主檔，僅將 %d 個 Syslog 碎片整合為單一歸檔...\n",
-			dateStr, len(fragments))
+		if len(coveredHourPrefixes) > 0 {
+			extraWhere = fmt.Sprintf("WHERE SUBSTRING(TRY_CAST(timestamp AS VARCHAR), 1, 14) NOT IN (%s) ", strings.Join(coveredHourPrefixes, ", "))
+		}
+		fmt.Printf("[每日湖倉整併] 📦 偵測到 %s 具備 %d 個分時主檔，僅將缺口時段的 %d 個 Syslog 碎片整合為補充歸檔...\n",
+			dateStr, len(validHourlyFiles), len(fragments))
 	} else {
 		// 🌟 PA-1420 單日主檔模式：將該日所有資料融合為單一 ZSTD 主檔
 		targetMainFile = filepath.Join(dayDir, fmt.Sprintf("traffic_%s.parquet", dateStr))
@@ -6652,21 +7548,25 @@ func consolidateDailyTraffic(dateStr string) error {
 	tmpMerged := filepath.Join(dayDir, fmt.Sprintf("traffic_%s_consolidating_%d.parquet.tmp", dateStr, time.Now().UnixNano()))
 	tempSpillDir := filepath.Join(appDir, "duckdb_temp", fmt.Sprintf("consolidate_%s_%d", dateStr, time.Now().UnixNano()))
 	_ = os.MkdirAll(tempSpillDir, 0755)
-	defer os.RemoveAll(tempSpillDir)
+	defer removeTempDirSafe(tempSpillDir)
 
 	duckOutput := filepath.ToSlash(tmpMerged)
 	duckSpill := filepath.ToSlash(tempSpillDir)
 
+	duckdbETLSem <- struct{}{}
+	defer func() { <-duckdbETLSem }()
+
+	hw := getAdaptiveDuckDBProfile()
 	duckCmd := fmt.Sprintf(
-		"SET max_memory='16GB'; SET preserve_insertion_order=false; SET temp_directory='%s'; "+
+		"SET max_memory='%dGB'; SET threads=%d; SET preserve_insertion_order=false; SET temp_directory='%s'; "+
 			"COPY (SELECT * EXCLUDE (row_num) FROM ("+
 			"  SELECT *, ROW_NUMBER() OVER ("+
 			"    PARTITION BY timestamp, source, destination, to_port, session_id, action, bytes "+
 			"    ORDER BY timestamp DESC"+
 			"  ) as row_num "+
-			"  FROM read_parquet(%s, union_by_name=true)"+
+			"  FROM read_parquet(%s, union_by_name=true) " + extraWhere +
 			") WHERE row_num = 1 ORDER BY timestamp DESC) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);",
-		duckSpill, sourceListExpr, duckOutput,
+		hw.ETLMemGB, hw.ETLThreads, duckSpill, sourceListExpr, duckOutput,
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Second)
@@ -6692,7 +7592,1351 @@ func consolidateDailyTraffic(dateStr string) error {
 	}
 
 	fmt.Printf("[每日湖倉整併] ✅ %s 碎片整併完成，已清除 %d 個零碎分塊！\n", dateStr, len(fragments))
+	invalidateDailyMetricsCache(dateStr)
+	go func(d string) {
+		_, _ = computeAndSaveDailySummary(d)
+	}(dateStr)
 	return nil
 }
 
 
+
+
+// =========================================================================
+// 📊 每日預聚合統計表 (Daily Rollup Summary) 與跨日區間查詢引擎
+// =========================================================================
+
+type DailyRollupSummaryRow struct {
+	Date                string `parquet:"date,zstd" json:"date"`
+	TotalFlows          int64  `parquet:"total_flows" json:"total_flows"`
+	TotalBytes          int64  `parquet:"total_bytes" json:"total_bytes"`
+	TotalBytesFormatted string `parquet:"total_bytes_fmt,zstd" json:"total_bytes_fmt"`
+	AllowFlows          int64  `parquet:"allow_flows" json:"allow_flows"`
+	DenyFlows           int64  `parquet:"deny_flows" json:"deny_flows"`
+	LanWanBytes         int64  `parquet:"lan_wan_bytes" json:"lan_wan_bytes"`
+	WanLanBytes         int64  `parquet:"wan_lan_bytes" json:"wan_lan_bytes"`
+	LanLanBytes         int64  `parquet:"lan_lan_bytes" json:"lan_lan_bytes"`
+	UniqueSrcIPs        int64  `parquet:"unique_src_ips" json:"unique_src_ips"`
+	UniqueDstIPs        int64  `parquet:"unique_dst_ips" json:"unique_dst_ips"`
+	TopApp              string `parquet:"top_app,zstd" json:"top_app"`
+	TopSrcIP            string `parquet:"top_src_ip,zstd" json:"top_src_ip"`
+	TopDstIP            string `parquet:"top_dst_ip,zstd" json:"top_dst_ip"`
+	DbSizeBytes         int64  `parquet:"db_size_bytes" json:"db_size_bytes"`
+	DbSizeFormatted     string `parquet:"db_size_fmt,zstd" json:"db_size_fmt"`
+	RollupComplete      int    `parquet:"rollup_complete" json:"rollup_complete"`
+	UpdatedAt           string `parquet:"updated_at,zstd" json:"updated_at"`
+}
+
+var (
+	dailySummaryMutex    sync.Mutex
+	todayRollupCacheMux  sync.RWMutex
+	todayRollupCacheDate string
+	todayRollupCacheRow  *DailyRollupSummaryRow
+	todayRollupCacheAt   time.Time
+)
+
+// sqlIsInternalZoneExpr 判斷安全區域是否屬於內網 (相容 LAN、inside、trust、internal 及複合命名)
+func sqlIsInternalZoneExpr(col string) string {
+	c := fmt.Sprintf("LOWER(TRIM(%s))", col)
+	return fmt.Sprintf("(%s IN ('lan', 'inside', 'trust', 'internal', 'intranet') OR %s LIKE '%%inside%%' OR %s LIKE '%%lan%%' OR (%s LIKE '%%trust%%' AND %s NOT LIKE '%%untrust%%'))", c, c, c, c, c)
+}
+
+// sqlIsExternalZoneExpr 判斷安全區域是否屬於外網 (相容 WAN、outside、untrust、external 及複合命名)
+func sqlIsExternalZoneExpr(col string) string {
+	c := fmt.Sprintf("LOWER(TRIM(%s))", col)
+	return fmt.Sprintf("(%s IN ('wan', 'outside', 'untrust', 'external', 'internet') OR %s LIKE '%%outside%%' OR %s LIKE '%%wan%%' OR %s LIKE '%%untrust%%')", c, c, c, c)
+}
+
+func formatHumanBytes(b int64) string {
+	if b >= 1024*1024*1024*1024 {
+		return fmt.Sprintf("%.2f TB", float64(b)/(1024*1024*1024*1024))
+	} else if b >= 1024*1024*1024 {
+		return fmt.Sprintf("%.2f GB", float64(b)/(1024*1024*1024))
+	} else if b >= 1024*1024 {
+		return fmt.Sprintf("%.2f MB", float64(b)/(1024*1024))
+	} else if b >= 1024 {
+		return fmt.Sprintf("%.1f KB", float64(b)/1024)
+	}
+	return fmt.Sprintf("%d B", b)
+}
+
+func collectTrafficFilesForDate(dateStr string) ([]string, int64) {
+	if !isValidDateStr(dateStr) {
+		return nil, 0
+	}
+	dayDir := filepath.Join(trafficDir, dateStr)
+	subFiles, _ := filepath.Glob(filepath.Join(dayDir, "*.parquet"))
+	rootFiles, _ := filepath.Glob(filepath.Join(trafficDir, fmt.Sprintf("traffic_%s*.parquet", dateStr)))
+	rawFiles := append(subFiles, rootFiles...)
+
+	var paths []string
+	var totalBytes int64
+	for _, f := range rawFiles {
+		base := filepath.Base(f)
+		if strings.HasSuffix(base, ".tmp") || base == "daily_summary.parquet" {
+			continue
+		}
+		if fi, err := os.Stat(f); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			totalBytes += fi.Size()
+			paths = append(paths, filepath.ToSlash(f))
+		}
+	}
+	return paths, totalBytes
+}
+
+// computeAndSaveDailySummary 計算單日預聚合統計並同步寫入 SQLite 快取與 traffic_logs/daily_summary.parquet
+// 內建 5 次瞬時微整併重試與輕量降級備援，確保 PA-5250 高併發即時寫入當日絕不漏列
+func computeAndSaveDailySummary(dateStr string) (*DailyRollupSummaryRow, error) {
+	if !isValidDateStr(dateStr) {
+		return nil, fmt.Errorf("無效日期: %s", dateStr)
+	}
+	todayStr := time.Now().Format("2006-01-02")
+	paths, diskBytes := collectTrafficFilesForDate(dateStr)
+	if len(paths) == 0 {
+		return &DailyRollupSummaryRow{
+			Date:                dateStr,
+			TotalBytesFormatted: "0 B",
+			TopApp:              "-",
+			TopSrcIP:            "-",
+			TopDstIP:            "-",
+			DbSizeFormatted:     "0 B",
+			UpdatedAt:           time.Now().Format("2006-01-02 15:04:05"),
+		}, nil
+	}
+
+	// 🌟 當日 (todayStr) 60 秒記憶體短快取：避免高吞吐 20GB+ 連續點擊 7 日總表重複全表掃描
+	if dateStr == todayStr {
+		todayRollupCacheMux.RLock()
+		if todayRollupCacheDate == dateStr && todayRollupCacheRow != nil && time.Since(todayRollupCacheAt) < 60*time.Second {
+			cp := *todayRollupCacheRow
+			todayRollupCacheMux.RUnlock()
+			cp.DbSizeBytes = diskBytes
+			cp.DbSizeFormatted = formatHumanBytes(diskBytes)
+			return &cp, nil
+		}
+		todayRollupCacheMux.RUnlock()
+	}
+
+	// 🌟 非當日先查 SQLite 資料庫：必須「所有預聚合欄位皆齊全 (isDailyRollupRowComplete)」才直接讀取；若任一欄位缺漏則自動重算補齊！
+	if dateStr != todayStr {
+		if cachedRow, _, ok := getCachedDailyMetricsFromSQLite(dateStr); ok && isDailyRollupRowComplete(cachedRow) {
+			if diskBytes > 0 && cachedRow.DbSizeBytes != diskBytes {
+				cachedRow.DbSizeBytes = diskBytes
+				cachedRow.DbSizeFormatted = formatHumanBytes(diskBytes)
+			}
+			return cachedRow, nil
+		}
+	}
+
+	var rows []map[string]interface{}
+	var lastErr error
+	var latestDiskBytes int64 = diskBytes
+	var latestPaths []string = paths
+
+	// 🌟 最多重試 5 次：防止當日 Syslog 微整併 (_live_ -> _chunk_) 或分時切片轉檔刪除舊檔造成瞬時失敗
+	for attempt := 0; attempt < 5; attempt++ {
+		curPaths, curDisk := collectTrafficFilesForDate(dateStr)
+		if len(curPaths) == 0 {
+			break
+		}
+		latestPaths = curPaths
+		latestDiskBytes = curDisk
+
+		quoted := make([]string, len(curPaths))
+		for i, p := range curPaths {
+			quoted[i] = fmt.Sprintf("'%s'", p)
+		}
+		srcExpr := fmt.Sprintf("[%s]", strings.Join(quoted, ", "))
+
+		// 🌟 優先從 Parquet 檔尾 Metadata 秒讀總筆數 (< 20ms)，PA-5250 巨量 (>5,000萬筆) 自動啟用輕量高基數採樣避免 DuckDB 逾時
+		metaTotal, _, metaErr := getFastMetadataStats(srcExpr)
+		totalFlowsExpr := "COUNT(*)"
+		if metaErr == nil && metaTotal > 0 {
+			totalFlowsExpr = fmt.Sprintf("CAST(%d AS BIGINT)", metaTotal)
+		}
+
+		var sql string
+		if metaErr == nil && metaTotal > 50000000 {
+			// 🚀 PA-5250 巨量模式 (5,000 萬 ~ 22+ 億筆)：全表僅掃描數值/短字典欄位 (bytes/action/zone)，高基數字串採樣前 20 萬筆，確保 1~2 秒內完成
+			sql = fmt.Sprintf(`
+				WITH sample_hot AS (
+					SELECT application, source, destination
+					FROM read_parquet(%s, union_by_name=true)
+					LIMIT 200000
+				)
+				SELECT
+					%s AS total_flows,
+					CAST(COALESCE(SUM(bytes), 0) AS DOUBLE) AS total_bytes,
+					COUNT(CASE WHEN LOWER(TRIM(action)) = 'allow' THEN 1 END) AS allow_flows,
+					COUNT(CASE WHEN LOWER(TRIM(action)) IN ('deny', 'drop') THEN 1 END) AS deny_flows,
+					CAST(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes ELSE 0 END), 0) AS DOUBLE) AS lan_wan_bytes,
+					CAST(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes ELSE 0 END), 0) AS DOUBLE) AS wan_lan_bytes,
+					CAST(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes ELSE 0 END), 0) AS DOUBLE) AS lan_lan_bytes,
+					COALESCE((SELECT APPROX_COUNT_DISTINCT(source) FROM sample_hot), 0) AS unique_src_ips,
+					COALESCE((SELECT APPROX_COUNT_DISTINCT(destination) FROM sample_hot), 0) AS unique_dst_ips,
+					COALESCE((SELECT MODE(NULLIF(application, '')) FROM sample_hot), '-') AS top_app,
+					COALESCE((SELECT MODE(NULLIF(source, '')) FROM sample_hot), '-') AS top_src_ip,
+					COALESCE((SELECT MODE(NULLIF(destination, '')) FROM sample_hot), '-') AS top_dst_ip
+				FROM read_parquet(%s, union_by_name=true)
+			`, srcExpr, totalFlowsExpr,
+				sqlIsInternalZoneExpr("from_zone"), sqlIsExternalZoneExpr("to_zone"),
+				sqlIsExternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone"),
+				sqlIsInternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone"),
+				srcExpr)
+		} else {
+			// 🛡️ PA-1420 / 中小型資料量 (< 5,000 萬筆)：完整單趟向量化聚合
+			sql = fmt.Sprintf(`
+				SELECT
+					%s AS total_flows,
+					CAST(COALESCE(SUM(bytes), 0) AS DOUBLE) AS total_bytes,
+					COUNT(CASE WHEN LOWER(TRIM(action)) = 'allow' THEN 1 END) AS allow_flows,
+					COUNT(CASE WHEN LOWER(TRIM(action)) IN ('deny', 'drop') THEN 1 END) AS deny_flows,
+					CAST(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes ELSE 0 END), 0) AS DOUBLE) AS lan_wan_bytes,
+					CAST(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes ELSE 0 END), 0) AS DOUBLE) AS wan_lan_bytes,
+					CAST(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes ELSE 0 END), 0) AS DOUBLE) AS lan_lan_bytes,
+					APPROX_COUNT_DISTINCT(source) AS unique_src_ips,
+					APPROX_COUNT_DISTINCT(destination) AS unique_dst_ips,
+					COALESCE(MODE(NULLIF(application, '')), '-') AS top_app,
+					COALESCE(MODE(NULLIF(source, '')), '-') AS top_src_ip,
+					COALESCE(MODE(NULLIF(destination, '')), '-') AS top_dst_ip
+				FROM read_parquet(%s, union_by_name=true)
+			`, totalFlowsExpr,
+				sqlIsInternalZoneExpr("from_zone"), sqlIsExternalZoneExpr("to_zone"),
+				sqlIsExternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone"),
+				sqlIsInternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone"),
+				srcExpr)
+		}
+
+		qRows, qErr := runDuckDBQuery(sql)
+		if qErr == nil && len(qRows) > 0 {
+			rows = qRows
+			lastErr = nil
+			break
+		}
+		lastErr = qErr
+		if isTransientParquetCompactionError(qErr) && attempt < 4 {
+			time.Sleep(time.Duration(80*(attempt+1)) * time.Millisecond)
+			continue
+		}
+		break
+	}
+
+	// 🌟 降級備援：若完整聚合仍失敗（例如極端高負載），改用 Metadata 秒讀筆數與輕量聚合，絕不讓當日從總表中消失
+	if len(rows) == 0 && len(latestPaths) > 0 {
+		quoted := make([]string, len(latestPaths))
+		for i, p := range latestPaths {
+			quoted[i] = fmt.Sprintf("'%s'", p)
+		}
+		srcExpr := fmt.Sprintf("[%s]", strings.Join(quoted, ", "))
+		if mTot, _, mErr := getFastMetadataStats(srcExpr); mErr == nil && mTot > 0 {
+			liteSQL := fmt.Sprintf(`
+				SELECT
+					CAST(%d AS BIGINT) AS total_flows,
+					CAST(COALESCE(SUM(bytes), 0) AS DOUBLE) AS total_bytes,
+					COUNT(CASE WHEN LOWER(TRIM(action)) = 'allow' THEN 1 END) AS allow_flows,
+					COUNT(CASE WHEN LOWER(TRIM(action)) IN ('deny', 'drop') THEN 1 END) AS deny_flows,
+					0.0 AS lan_wan_bytes,
+					0.0 AS wan_lan_bytes,
+					0.0 AS lan_lan_bytes,
+					0 AS unique_src_ips,
+					0 AS unique_dst_ips,
+					COALESCE((SELECT MODE(application) FROM (SELECT application FROM read_parquet(%s, union_by_name=true) LIMIT 100000)), '-') AS top_app,
+					'-' AS top_src_ip,
+					'-' AS top_dst_ip
+				FROM read_parquet(%s, union_by_name=true)
+			`, mTot, srcExpr, srcExpr)
+			if lRows, lErr := runDuckDBQuery(liteSQL); lErr == nil && len(lRows) > 0 {
+				rows = lRows
+				lastErr = nil
+			} else {
+				// 最終保底：直接回傳 Metadata 筆數與磁碟容量
+				rows = []map[string]interface{}{
+					{
+						"total_flows":    mTot,
+						"total_bytes":    int64(0),
+						"allow_flows":    int64(0),
+						"deny_flows":     int64(0),
+						"lan_wan_bytes":  int64(0),
+						"wan_lan_bytes":  int64(0),
+						"lan_lan_bytes":  int64(0),
+						"unique_src_ips": int64(0),
+						"unique_dst_ips": int64(0),
+						"top_app":        "-",
+						"top_src_ip":     "-",
+						"top_dst_ip":     "-",
+					},
+				}
+				lastErr = nil
+			}
+		}
+	}
+
+	if len(rows) == 0 {
+		return nil, lastErr
+	}
+
+	r := rows[0]
+	totBytes := parseDuckDBNumber(r["total_bytes"])
+	row := &DailyRollupSummaryRow{
+		Date:                dateStr,
+		TotalFlows:          parseDuckDBNumber(r["total_flows"]),
+		TotalBytes:          totBytes,
+		TotalBytesFormatted: formatHumanBytes(totBytes),
+		AllowFlows:          parseDuckDBNumber(r["allow_flows"]),
+		DenyFlows:           parseDuckDBNumber(r["deny_flows"]),
+		LanWanBytes:         parseDuckDBNumber(r["lan_wan_bytes"]),
+		WanLanBytes:         parseDuckDBNumber(r["wan_lan_bytes"]),
+		LanLanBytes:         parseDuckDBNumber(r["lan_lan_bytes"]),
+		UniqueSrcIPs:        parseDuckDBNumber(r["unique_src_ips"]),
+		UniqueDstIPs:        parseDuckDBNumber(r["unique_dst_ips"]),
+		TopApp:              fmt.Sprintf("%v", r["top_app"]),
+		TopSrcIP:            fmt.Sprintf("%v", r["top_src_ip"]),
+		TopDstIP:            fmt.Sprintf("%v", r["top_dst_ip"]),
+		DbSizeBytes:         latestDiskBytes,
+		DbSizeFormatted:     formatHumanBytes(latestDiskBytes),
+		UpdatedAt:           time.Now().Format("2006-01-02 15:04:05"),
+	}
+
+	if dateStr == todayStr {
+		todayRollupCacheMux.Lock()
+		todayRollupCacheDate = dateStr
+		cp := *row
+		todayRollupCacheRow = &cp
+		todayRollupCacheAt = time.Now()
+		todayRollupCacheMux.Unlock()
+	} else if row.TotalFlows > 0 {
+		saveDailyMetricsToSQLite(*row, nil)
+	}
+
+	dailySummaryMutex.Lock()
+	defer dailySummaryMutex.Unlock()
+
+	summaryFile := filepath.Join(trafficDir, "daily_summary.parquet")
+	var existing []DailyRollupSummaryRow
+	if fi, err := os.Stat(summaryFile); err == nil && fi.Size() > 0 {
+		if loaded, err := parquet.ReadFile[DailyRollupSummaryRow](summaryFile); err == nil {
+			for _, item := range loaded {
+				if item.Date != dateStr {
+					existing = append(existing, item)
+				}
+			}
+		}
+	}
+	existing = append(existing, *row)
+	sort.Slice(existing, func(i, j int) bool { return existing[i].Date > existing[j].Date })
+
+	tmpFile := summaryFile + ".tmp"
+	if err := parquet.WriteFile(tmpFile, existing); err == nil {
+		_ = os.Remove(summaryFile)
+		_ = os.Rename(tmpFile, summaryFile)
+	} else {
+		_ = os.Remove(tmpFile)
+	}
+
+	return row, nil
+}
+
+func queryTrafficAnalyticsWithFilter(vf *ValidatedTrafficFilter, page, perPage int, onlyLogs bool, order string, knownTotal int64, firstLoad bool, countOnly bool) (*TrafficAnalyticsResult, error) {
+	// 單日且未指定 summary:daily 時，沿用原極速單日管線並填寫日期區間欄位
+	if vf.StartDate == vf.EndDate && !vf.ShowDailyRollup {
+		packedApp := vf.App
+		ext := map[string]string{}
+		if vf.NatSrc != "" { ext["natsrc"] = vf.NatSrc }
+		if vf.NatDst != "" { ext["natdst"] = vf.NatDst }
+		if vf.Dport != "" { ext["dport"] = vf.Dport }
+		if vf.Rule != "" { ext["rule"] = vf.Rule }
+		if vf.Reason != "" { ext["reason"] = vf.Reason }
+		if vf.TimeLeq != "" { ext["time_leq"] = vf.TimeLeq }
+		if vf.TimeGeq != "" { ext["time_geq"] = vf.TimeGeq }
+		if len(ext) > 0 {
+			b, _ := json.Marshal(ext)
+			packedApp = vf.App + "__EXT__" + string(b)
+		}
+		res, err := queryTrafficAnalytics(vf.StartDate, vf.Src, vf.Dst, packedApp, vf.Action, vf.Zone, page, perPage, onlyLogs, order, knownTotal, firstLoad, countOnly)
+		if res != nil {
+			res.StartDate = vf.StartDate
+			res.EndDate = vf.EndDate
+		}
+		return res, err
+	}
+
+	// 跨日區間查詢 或 summary:daily 模式
+	tStart, _ := time.Parse("2006-01-02", vf.StartDate)
+	tEnd, _ := time.Parse("2006-01-02", vf.EndDate)
+
+	var dates []string
+	var allFiles []string
+	var totalDiskBytes int64
+	for d := tEnd; !d.Before(tStart); d = d.AddDate(0, 0, -1) {
+		ds := d.Format("2006-01-02")
+		dates = append(dates, ds)
+		files, sz := collectTrafficFilesForDate(ds)
+		allFiles = append(allFiles, files...)
+		totalDiskBytes += sz
+	}
+
+	// 建立安全的 WHERE 條件（所有字串均經過逃脫處理）
+	var conds []string
+	conds = append(conds, "1=1")
+	if vf.Src != "" { conds = append(conds, buildIPFilterSQL("source", vf.Src)) }
+	if vf.NatSrc != "" { conds = append(conds, buildIPFilterSQL("nat_source_ip", vf.NatSrc)) }
+	if vf.Dst != "" { conds = append(conds, buildIPFilterSQL("destination", vf.Dst)) }
+	if vf.NatDst != "" { conds = append(conds, buildIPFilterSQL("nat_dest_ip", vf.NatDst)) }
+	if vf.Dport != "" {
+		if strings.Contains(vf.Dport, "-") {
+			ps := strings.Split(vf.Dport, "-")
+			p1, _ := strconv.Atoi(ps[0])
+			p2, _ := strconv.Atoi(ps[1])
+			conds = append(conds, fmt.Sprintf("to_port BETWEEN %d AND %d", p1, p2))
+		} else {
+			p1, _ := strconv.Atoi(vf.Dport)
+			conds = append(conds, fmt.Sprintf("to_port = %d", p1))
+		}
+	}
+	if vf.App != "" {
+		esc := strings.ReplaceAll(escapeSQLLikeLiteral(vf.App), "*", "%")
+		conds = append(conds, fmt.Sprintf("application ILIKE '%%%s%%' ESCAPE '\\'", esc))
+	}
+	if vf.Action != "" && vf.Action != "all" {
+		if vf.Action == "deny_drop" {
+			conds = append(conds, "LOWER(TRIM(action)) IN ('deny', 'drop')")
+		} else {
+			conds = append(conds, fmt.Sprintf("LOWER(TRIM(action)) = '%s'", strings.ReplaceAll(vf.Action, "'", "''")))
+		}
+	}
+	if vf.Zone != "" && vf.Zone != "all" {
+		esc := escapeSQLLikeLiteral(vf.Zone)
+		conds = append(conds, fmt.Sprintf("(from_zone ILIKE '%%%s%%' ESCAPE '\\' OR to_zone ILIKE '%%%s%%' ESCAPE '\\')", esc, esc))
+	}
+	if vf.Rule != "" {
+		esc := escapeSQLLikeLiteral(vf.Rule)
+		conds = append(conds, fmt.Sprintf("rule ILIKE '%%%s%%' ESCAPE '\\'", esc))
+	}
+	if vf.Reason != "" {
+		esc := escapeSQLLikeLiteral(vf.Reason)
+		conds = append(conds, fmt.Sprintf("session_end_reason ILIKE '%%%s%%' ESCAPE '\\'", esc))
+	}
+	if vf.TimeLeq != "" {
+		conds = append(conds, fmt.Sprintf("timestamp <= '%s'", strings.ReplaceAll(vf.TimeLeq, "'", "''")))
+	}
+	if vf.TimeGeq != "" {
+		conds = append(conds, fmt.Sprintf("timestamp >= '%s'", strings.ReplaceAll(vf.TimeGeq, "'", "''")))
+	}
+	whereClause := strings.Join(conds, " AND ")
+
+	hasCustomFilter := vf.Src != "" || vf.NatSrc != "" || vf.Dst != "" || vf.NatDst != "" ||
+		vf.Dport != "" || vf.App != "" || vf.Rule != "" || vf.Reason != "" ||
+		vf.TimeLeq != "" || vf.TimeGeq != "" ||
+		(vf.Action != "" && vf.Action != "all") || (vf.Zone != "" && vf.Zone != "all")
+
+	// 1. 取得每日預聚合統計表 (Daily Rollup Summary)
+	var rollups []DailyRollupSummaryRow
+	todayStr := time.Now().Format("2006-01-02")
+
+	if !hasCustomFilter {
+		cachedMap := make(map[string]DailyRollupSummaryRow)
+		summaryFile := filepath.Join(trafficDir, "daily_summary.parquet")
+		if loaded, err := parquet.ReadFile[DailyRollupSummaryRow](summaryFile); err == nil {
+			for _, item := range loaded {
+				cachedMap[item.Date] = item
+			}
+		}
+		for _, ds := range dates {
+			// 🌟 1. 非當日優先讀取 SQLite 資料庫：檢查所有欄位是否齊全，齊全才直接讀取；若缺漏任一欄位則自動補齊
+			if ds != todayStr {
+				if sqlRow, _, ok := getCachedDailyMetricsFromSQLite(ds); ok && isDailyRollupRowComplete(sqlRow) {
+					if sqlRow.DbSizeBytes <= 0 {
+						_, dDisk := collectTrafficFilesForDate(ds)
+						sqlRow.DbSizeBytes = dDisk
+						sqlRow.DbSizeFormatted = formatHumanBytes(dDisk)
+					}
+					rollups = append(rollups, *sqlRow)
+					continue
+				}
+				// 次要檢查：若 daily_summary.parquet 已有完整欄位，直接寫入 SQLite 並使用
+				if item, ok := cachedMap[ds]; ok && isDailyRollupRowComplete(&item) {
+					if item.DbSizeBytes <= 0 {
+						_, dDisk := collectTrafficFilesForDate(ds)
+						item.DbSizeBytes = dDisk
+						item.DbSizeFormatted = formatHumanBytes(dDisk)
+					}
+					saveDailyMetricsToSQLite(item, nil)
+					rollups = append(rollups, item)
+					continue
+				}
+			}
+
+			// 🌟 2. 計算「當日 (todayStr)」或「資料庫尚無紀錄 / 欄位不齊全的歷史日」（計算完自動補齊並寫入 SQLite）
+			if computed, err := computeAndSaveDailySummary(ds); err == nil && computed != nil {
+				rollups = append(rollups, *computed)
+			}
+		}
+	} else if len(allFiles) > 0 {
+		quoted := make([]string, len(allFiles))
+		for i, p := range allFiles {
+			quoted[i] = fmt.Sprintf("'%s'", p)
+		}
+		srcExpr := fmt.Sprintf("[%s]", strings.Join(quoted, ", "))
+		grpSQL := fmt.Sprintf(`
+			SELECT
+				SUBSTRING(timestamp, 1, 10) AS d,
+				COUNT(*) AS total_flows,
+				CAST(COALESCE(SUM(bytes), 0) AS DOUBLE) AS total_bytes,
+				COUNT(CASE WHEN LOWER(TRIM(action)) = 'allow' THEN 1 END) AS allow_flows,
+				COUNT(CASE WHEN LOWER(TRIM(action)) IN ('deny', 'drop') THEN 1 END) AS deny_flows,
+				CAST(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes ELSE 0 END), 0) AS DOUBLE) AS lan_wan_bytes,
+				CAST(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes ELSE 0 END), 0) AS DOUBLE) AS wan_lan_bytes,
+				CAST(COALESCE(SUM(CASE WHEN %s AND %s THEN bytes ELSE 0 END), 0) AS DOUBLE) AS lan_lan_bytes,
+				APPROX_COUNT_DISTINCT(source) AS unique_src_ips,
+				APPROX_COUNT_DISTINCT(destination) AS unique_dst_ips,
+				COALESCE(MODE(NULLIF(application, '')), '-') AS top_app,
+				COALESCE(MODE(NULLIF(source, '')), '-') AS top_src_ip,
+				COALESCE(MODE(NULLIF(destination, '')), '-') AS top_dst_ip
+			FROM read_parquet(%s, union_by_name=true)
+			WHERE %s
+			GROUP BY d
+			ORDER BY d DESC
+		`, sqlIsInternalZoneExpr("from_zone"), sqlIsExternalZoneExpr("to_zone"),
+			sqlIsExternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone"),
+			sqlIsInternalZoneExpr("from_zone"), sqlIsInternalZoneExpr("to_zone"),
+			srcExpr, whereClause)
+		if gRows, err := runDuckDBQuery(grpSQL); err == nil {
+			for _, gr := range gRows {
+				ds := fmt.Sprintf("%v", gr["d"])
+				_, dDisk := collectTrafficFilesForDate(ds)
+				tb := parseDuckDBNumber(gr["total_bytes"])
+				rollups = append(rollups, DailyRollupSummaryRow{
+					Date:                ds,
+					TotalFlows:          parseDuckDBNumber(gr["total_flows"]),
+					TotalBytes:          tb,
+					TotalBytesFormatted: formatHumanBytes(tb),
+					AllowFlows:          parseDuckDBNumber(gr["allow_flows"]),
+					DenyFlows:           parseDuckDBNumber(gr["deny_flows"]),
+					LanWanBytes:         parseDuckDBNumber(gr["lan_wan_bytes"]),
+					WanLanBytes:         parseDuckDBNumber(gr["wan_lan_bytes"]),
+					LanLanBytes:         parseDuckDBNumber(gr["lan_lan_bytes"]),
+					UniqueSrcIPs:        parseDuckDBNumber(gr["unique_src_ips"]),
+					UniqueDstIPs:        parseDuckDBNumber(gr["unique_dst_ips"]),
+					TopApp:              fmt.Sprintf("%v", gr["top_app"]),
+					TopSrcIP:            fmt.Sprintf("%v", gr["top_src_ip"]),
+					TopDstIP:            fmt.Sprintf("%v", gr["top_dst_ip"]),
+					DbSizeBytes:         dDisk,
+					DbSizeFormatted:     formatHumanBytes(dDisk),
+				})
+			}
+		}
+	}
+
+	var sumFlows, sumBytes, sumDeny int64
+	topApp := "-"
+	hist := make([]HistogramBucket, 0, len(rollups))
+	for i := len(rollups) - 1; i >= 0; i-- {
+		r := rollups[i]
+		sumFlows += r.TotalFlows
+		sumBytes += r.TotalBytes
+		sumDeny += r.DenyFlows
+		if topApp == "-" && r.TopApp != "" && r.TopApp != "-" {
+			topApp = r.TopApp
+		}
+		label := r.Date
+		if len(label) == 10 {
+			label = label[5:] // MM-DD
+		}
+		hist = append(hist, HistogramBucket{TimeBucket: label, Count: int(r.TotalFlows)})
+	}
+
+	// 2. 撈取分頁明細（無自訂過濾且前段頁面時，依時間序僅讀取必要數量的最新/最舊分檔，避免跨日掃描數十 GB）
+	var logs []TrafficLogItem
+	if !countOnly && len(allFiles) > 0 {
+		scanFiles := append([]string{}, allFiles...)
+		if order == "ASC" {
+			sort.Strings(scanFiles)
+		} else {
+			sort.Slice(scanFiles, func(i, j int) bool { return scanFiles[i] > scanFiles[j] })
+		}
+
+		offset := (page - 1) * perPage
+		if !hasCustomFilter && offset < 10000 && len(scanFiles) > 2 {
+			needed := int64(offset + perPage)
+			var accRows int64
+			var subset []string
+			for _, sf := range scanFiles {
+				subset = append(subset, sf)
+				accRows += getParquetExactRowCount(sf)
+				if accRows >= needed {
+					break
+				}
+			}
+			if len(subset) > 0 {
+				scanFiles = subset
+			}
+		}
+
+		quoted := make([]string, len(scanFiles))
+		for i, p := range scanFiles {
+			quoted[i] = fmt.Sprintf("'%s'", p)
+		}
+		srcExpr := fmt.Sprintf("[%s]", strings.Join(quoted, ", "))
+		logSQL := fmt.Sprintf(`SELECT * FROM read_parquet(%s, union_by_name=true) WHERE %s ORDER BY timestamp %s LIMIT %d OFFSET %d`,
+			srcExpr, whereClause, order, perPage, offset)
+		if lRows, err := runDuckDBQuery(logSQL); err == nil {
+			dhcpMap := make(map[string]string)
+			if db, dbErr := initDB(); dbErr == nil && db != nil {
+				if rDHCP, qErr := db.Query("SELECT ip, hostname FROM dhcp_leases WHERE record_date BETWEEN ? AND ?", vf.StartDate, vf.EndDate); qErr == nil {
+					for rDHCP.Next() {
+						var ip, hn string
+						_ = rDHCP.Scan(&ip, &hn)
+						if hn != "" {
+							dhcpMap[ip] = hn
+						}
+					}
+					rDHCP.Close()
+				}
+				if rCache, qErr := db.Query("SELECT ip, hostname FROM ip_hostname_cache"); qErr == nil {
+					for rCache.Next() {
+						var ip, hn string
+						_ = rCache.Scan(&ip, &hn)
+						if hn != "" && dhcpMap[ip] == "" {
+							dhcpMap[ip] = hn
+						}
+					}
+					rCache.Close()
+				}
+			}
+
+			safeStr := func(v interface{}) string {
+				if v == nil {
+					return ""
+				}
+				s := fmt.Sprintf("%v", v)
+				if s == "<nil>" {
+					return ""
+				}
+				return s
+			}
+
+			for _, r := range lRows {
+				bVal := parseDuckDBNumber(r["bytes"])
+				srcIP := safeStr(r["source"])
+				dstIP := safeStr(r["destination"])
+				srcIntel := LookupGeoIPAndIOC(srcIP)
+				dstIntel := LookupGeoIPAndIOC(dstIP)
+				isMal := srcIntel.IsMalicious || dstIntel.IsMalicious
+				iocMatch := ""
+				if srcIntel.IsMalicious {
+					iocMatch = srcIntel.IOCBadge
+				}
+				if dstIntel.IsMalicious {
+					if iocMatch != "" && dstIntel.IOCBadge != iocMatch {
+						iocMatch += " | " + dstIntel.IOCBadge
+					} else {
+						iocMatch = dstIntel.IOCBadge
+					}
+				}
+				logs = append(logs, TrafficLogItem{
+					Timestamp:        safeStr(r["timestamp"]),
+					Type:             safeStr(r["type"]),
+					FromZone:         safeStr(r["from_zone"]),
+					ToZone:           safeStr(r["to_zone"]),
+					Source:           srcIP,
+					SrcHostname:      dhcpMap[srcIP],
+					SrcGeo:           srcIntel.BadgeLabel,
+					SrcASNType:       srcIntel.ASNType,
+					NatSourceIP:      safeStr(r["nat_source_ip"]),
+					Destination:      dstIP,
+					DstGeo:           dstIntel.BadgeLabel,
+					DstASNType:       dstIntel.ASNType,
+					NatDestIP:        safeStr(r["nat_dest_ip"]),
+					ToPort:           int(parseDuckDBNumber(r["to_port"])),
+					Application:      safeStr(r["application"]),
+					Action:           safeStr(r["action"]),
+					Rule:             safeStr(r["rule"]),
+					SessionEndReason: safeStr(r["session_end_reason"]),
+					Bytes:            bVal,
+					BytesFormatted:   formatHumanBytes(bVal),
+					IsMalicious:      isMal,
+					IOCMatch:         iocMatch,
+				})
+			}
+		}
+	}
+
+	totalPages := int(math.Ceil(float64(sumFlows) / float64(perPage)))
+	if totalPages == 0 {
+		totalPages = 1
+	}
+
+	return &TrafficAnalyticsResult{
+		TotalFlows:      int(sumFlows),
+		TotalBytes:      formatHumanBytes(sumBytes),
+		TopApp:          topApp,
+		DenyFlows:       int(sumDeny),
+		DbSize:          formatHumanBytes(totalDiskBytes),
+		Histogram:       hist,
+		Logs:            logs,
+		CurrentPage:     page,
+		TotalPages:      totalPages,
+		StartDate:       vf.StartDate,
+		EndDate:         vf.EndDate,
+		IsCrossDay:      vf.StartDate != vf.EndDate,
+		ShowDailyRollup: vf.ShowDailyRollup,
+		DailyRollups:    rollups,
+	}, nil
+}
+
+
+// =========================================================================
+// 📊 Top-N 排行視覺化與 Zone-to-Zone 通訊拓撲引擎 (Traffic & Threat)
+// =========================================================================
+
+type TopTalkerHostItem struct {
+	IP         string `json:"ip"`
+	Hostname   string `json:"hostname"`
+	DeviceType string `json:"device_type"`
+	Label      string `json:"label"`
+	Role       string `json:"role,omitempty"`
+	Bytes      int64  `json:"bytes"`
+	BytesFmt   string `json:"bytes_fmt"`
+	Flows      int64  `json:"flows"`
+	DenyFlows  int64  `json:"deny_flows"`
+	CritHigh   int64  `json:"crit_high,omitempty"`
+}
+
+type TopHitRuleItem struct {
+	Rule      string `json:"rule"`
+	Subtype   string `json:"subtype,omitempty"`
+	Severity  string `json:"severity,omitempty"`
+	Hits      int64  `json:"hits"`
+	AllowHits int64  `json:"allow_hits"`
+	DenyHits  int64  `json:"deny_hits"`
+	Bytes     int64  `json:"bytes"`
+	BytesFmt  string `json:"bytes_fmt"`
+	TopApp    string `json:"top_app,omitempty"`
+}
+
+type ZoneFlowLinkItem struct {
+	FromZone  string `json:"from_zone"`
+	ToZone    string `json:"to_zone"`
+	Flows     int64  `json:"flows"`
+	DenyFlows int64  `json:"deny_flows"`
+	CritHigh  int64  `json:"crit_high,omitempty"`
+	Bytes     int64  `json:"bytes"`
+	BytesFmt  string `json:"bytes_fmt"`
+}
+
+type TrafficTopNResult struct {
+	TopUploadHosts   []TopTalkerHostItem `json:"top_upload_hosts"`
+	TopDownloadHosts []TopTalkerHostItem `json:"top_download_hosts"`
+	TopRules         []TopHitRuleItem    `json:"top_rules"`
+	ZoneFlows        []ZoneFlowLinkItem  `json:"zone_flows"`
+	IsSampled        bool                `json:"is_sampled"`
+	SampleNote       string              `json:"sample_note"`
+}
+
+type ThreatTopNResult struct {
+	TopInternalHosts []TopTalkerHostItem `json:"top_internal_hosts"`
+	TopThreatRules   []TopHitRuleItem    `json:"top_threat_rules"`
+	ZoneFlows        []ZoneFlowLinkItem  `json:"zone_flows"`
+}
+
+type hostInventoryMeta struct {
+	Hostname   string
+	DeviceType string
+}
+
+// loadIPHostInventoryMap 整合設備清冊 (external_devices)、DHCP 租約、ARP 與 DNS 快取，提供 IP -> 主機名稱與設備性質關聯
+func loadIPHostInventoryMap(startDate, endDate string) map[string]hostInventoryMeta {
+	inv := make(map[string]hostInventoryMeta)
+	db, err := initDB()
+	if err != nil || db == nil {
+		return inv
+	}
+
+	// 1. 優先載入管理員已列管的設備清冊 (external_devices)
+	if rExt, err := db.Query("SELECT ip, COALESCE(name, ''), COALESCE(device_type, '') FROM external_devices WHERE ip != ''"); err == nil {
+		for rExt.Next() {
+			var ip, name, dtype string
+			if err := rExt.Scan(&ip, &name, &dtype); err == nil {
+				ip = strings.TrimSpace(ip)
+				name = strings.TrimSpace(name)
+				dtype = strings.TrimSpace(dtype)
+				if ip != "" && (name != "" || dtype != "") {
+					inv[ip] = hostInventoryMeta{Hostname: name, DeviceType: dtype}
+				}
+			}
+		}
+		rExt.Close()
+	}
+
+	// 2. 載入指定日期區間的 DHCP 租約主機名
+	if startDate != "" && endDate != "" {
+		if rDHCP, err := db.Query("SELECT ip, COALESCE(hostname, '') FROM dhcp_leases WHERE record_date BETWEEN ? AND ? AND hostname != ''", startDate, endDate); err == nil {
+			for rDHCP.Next() {
+				var ip, hn string
+				if err := rDHCP.Scan(&ip, &hn); err == nil {
+					ip = strings.TrimSpace(ip)
+					hn = strings.TrimSpace(hn)
+					if ip != "" && hn != "" {
+						cur := inv[ip]
+						if cur.Hostname == "" {
+							cur.Hostname = hn
+							inv[ip] = cur
+						}
+					}
+				}
+			}
+			rDHCP.Close()
+		}
+	}
+
+	// 3. 補充歷史最新 DHCP 租約主機名（避免跨日查詢缺漏）
+	if rDHCPAll, err := db.Query("SELECT ip, COALESCE(hostname, '') FROM dhcp_leases WHERE hostname != '' GROUP BY ip"); err == nil {
+		for rDHCPAll.Next() {
+			var ip, hn string
+			if err := rDHCPAll.Scan(&ip, &hn); err == nil {
+				ip = strings.TrimSpace(ip)
+				hn = strings.TrimSpace(hn)
+				if ip != "" && hn != "" {
+					cur := inv[ip]
+					if cur.Hostname == "" {
+						cur.Hostname = hn
+						inv[ip] = cur
+					}
+				}
+			}
+		}
+		rDHCPAll.Close()
+	}
+
+	// 4. 補充 ARP 與 DNS PTR 快取
+	if rARP, err := db.Query("SELECT ip, COALESCE(hostname, '') FROM arp_records WHERE hostname != '' AND hostname != '-'"); err == nil {
+		for rARP.Next() {
+			var ip, hn string
+			if err := rARP.Scan(&ip, &hn); err == nil {
+				ip = strings.TrimSpace(ip)
+				hn = strings.TrimSpace(hn)
+				if ip != "" && hn != "" && !strings.Contains(hn, "<") {
+					cur := inv[ip]
+					if cur.Hostname == "" {
+						cur.Hostname = hn
+						inv[ip] = cur
+					}
+				}
+			}
+		}
+		rARP.Close()
+	}
+	if rDNS, err := db.Query("SELECT ip, COALESCE(hostname, '') FROM ip_hostname_cache WHERE hostname != ''"); err == nil {
+		for rDNS.Next() {
+			var ip, hn string
+			if err := rDNS.Scan(&ip, &hn); err == nil {
+				ip = strings.TrimSpace(ip)
+				hn = strings.TrimSpace(hn)
+				if ip != "" && hn != "" {
+					cur := inv[ip]
+					if cur.Hostname == "" {
+						cur.Hostname = hn
+						inv[ip] = cur
+					}
+				}
+			}
+		}
+		rDNS.Close()
+	}
+
+	return inv
+}
+
+func formatHostInventoryLabel(ip string, inv map[string]hostInventoryMeta) (string, string, string) {
+	meta, ok := inv[ip]
+	if !ok || (meta.Hostname == "" && meta.DeviceType == "") {
+		return "", "", ip
+	}
+	if meta.Hostname != "" && meta.DeviceType != "" {
+		return meta.Hostname, meta.DeviceType, fmt.Sprintf("%s (%s · %s)", meta.Hostname, ip, meta.DeviceType)
+	}
+	if meta.Hostname != "" {
+		return meta.Hostname, meta.DeviceType, fmt.Sprintf("%s (%s)", meta.Hostname, ip)
+	}
+	return "", meta.DeviceType, fmt.Sprintf("%s (%s)", ip, meta.DeviceType)
+}
+
+// queryTrafficTopNAnalytics 計算內網上傳/下載 Top 10 主機、命中率最高安全規則與 Zone-to-Zone 流量流向拓撲
+func queryTrafficTopNAnalytics(vf *ValidatedTrafficFilter) (*TrafficTopNResult, error) {
+	out := &TrafficTopNResult{
+		TopUploadHosts:   make([]TopTalkerHostItem, 0),
+		TopDownloadHosts: make([]TopTalkerHostItem, 0),
+		TopRules:         make([]TopHitRuleItem, 0),
+		ZoneFlows:        make([]ZoneFlowLinkItem, 0),
+	}
+
+	tStart, err1 := time.Parse("2006-01-02", vf.StartDate)
+	tEnd, err2 := time.Parse("2006-01-02", vf.EndDate)
+	if err1 != nil || err2 != nil {
+		return out, nil
+	}
+
+	buildTrafficSrcExpr := func() (string, bool) {
+		var filesList []string
+		for d := tEnd; !d.Before(tStart); d = d.AddDate(0, 0, -1) {
+			files, _ := collectTrafficFilesForDate(d.Format("2006-01-02"))
+			filesList = append(filesList, files...)
+		}
+		if len(filesList) == 0 {
+			return "", false
+		}
+		q := make([]string, len(filesList))
+		for i, p := range filesList {
+			q[i] = fmt.Sprintf("'%s'", p)
+		}
+		return fmt.Sprintf("[%s]", strings.Join(q, ", ")), true
+	}
+
+	srcExpr, hasAnyFiles := buildTrafficSrcExpr()
+	if !hasAnyFiles {
+		return out, nil
+	}
+
+	runTopNQuerySafe := func(makeSQL func(curSrc string, curHostFrom string) string) []map[string]interface{} {
+		for attempt := 0; attempt < 5; attempt++ {
+			curSrc, ok := buildTrafficSrcExpr()
+			if !ok {
+				return nil
+			}
+			curHostFrom := fmt.Sprintf("read_parquet(%s, union_by_name=true)", curSrc)
+			if out.IsSampled {
+				curHostFrom = fmt.Sprintf("(SELECT from_zone, to_zone, source, destination, bytes, action FROM read_parquet(%s, union_by_name=true) LIMIT 3000000)", curSrc)
+			}
+			rows, err := runDuckDBQuery(makeSQL(curSrc, curHostFrom))
+			if err == nil {
+				return rows
+			}
+			if isTransientParquetCompactionError(err) && attempt < 4 {
+				time.Sleep(time.Duration(80*(attempt+1)) * time.Millisecond)
+				continue
+			}
+			fmt.Printf("[Traffic TopN 查詢警告] %v\n", err)
+			return nil
+		}
+		return nil
+	}
+
+	var conds []string
+	conds = append(conds, "1=1")
+	if vf.Src != "" { conds = append(conds, buildIPFilterSQL("source", vf.Src)) }
+	if vf.NatSrc != "" { conds = append(conds, buildIPFilterSQL("nat_source_ip", vf.NatSrc)) }
+	if vf.Dst != "" { conds = append(conds, buildIPFilterSQL("destination", vf.Dst)) }
+	if vf.NatDst != "" { conds = append(conds, buildIPFilterSQL("nat_dest_ip", vf.NatDst)) }
+	if vf.Dport != "" {
+		if strings.Contains(vf.Dport, "-") {
+			ps := strings.Split(vf.Dport, "-")
+			p1, _ := strconv.Atoi(ps[0])
+			p2, _ := strconv.Atoi(ps[1])
+			conds = append(conds, fmt.Sprintf("to_port BETWEEN %d AND %d", p1, p2))
+		} else {
+			p1, _ := strconv.Atoi(vf.Dport)
+			conds = append(conds, fmt.Sprintf("to_port = %d", p1))
+		}
+	}
+	if vf.App != "" {
+		esc := strings.ReplaceAll(escapeSQLLikeLiteral(vf.App), "*", "%")
+		conds = append(conds, fmt.Sprintf("application ILIKE '%%%s%%' ESCAPE '\\'", esc))
+	}
+	if vf.Action != "" && vf.Action != "all" {
+		if vf.Action == "deny_drop" {
+			conds = append(conds, "LOWER(TRIM(action)) IN ('deny', 'drop')")
+		} else {
+			conds = append(conds, fmt.Sprintf("LOWER(TRIM(action)) = '%s'", strings.ReplaceAll(vf.Action, "'", "''")))
+		}
+	}
+	if vf.Zone != "" && vf.Zone != "all" {
+		esc := escapeSQLLikeLiteral(vf.Zone)
+		conds = append(conds, fmt.Sprintf("(from_zone ILIKE '%%%s%%' ESCAPE '\\' OR to_zone ILIKE '%%%s%%' ESCAPE '\\')", esc, esc))
+	}
+	if vf.Rule != "" {
+		esc := escapeSQLLikeLiteral(vf.Rule)
+		conds = append(conds, fmt.Sprintf("rule ILIKE '%%%s%%' ESCAPE '\\'", esc))
+	}
+	if vf.Reason != "" {
+		esc := escapeSQLLikeLiteral(vf.Reason)
+		conds = append(conds, fmt.Sprintf("session_end_reason ILIKE '%%%s%%' ESCAPE '\\'", esc))
+	}
+	if vf.TimeLeq != "" {
+		conds = append(conds, fmt.Sprintf("timestamp <= '%s'", strings.ReplaceAll(vf.TimeLeq, "'", "''")))
+	}
+	if vf.TimeGeq != "" {
+		conds = append(conds, fmt.Sprintf("timestamp >= '%s'", strings.ReplaceAll(vf.TimeGeq, "'", "''")))
+	}
+	whereClause := strings.Join(conds, " AND ")
+
+	hasCustomFilter := vf.Src != "" || vf.NatSrc != "" || vf.Dst != "" || vf.NatDst != "" ||
+		vf.Dport != "" || vf.App != "" || vf.Rule != "" || vf.Reason != "" ||
+		vf.TimeLeq != "" || vf.TimeGeq != "" ||
+		(vf.Action != "" && vf.Action != "all") || (vf.Zone != "" && vf.Zone != "all")
+
+	// PA-5250 巨量保護 (> 5,000 萬筆時，高基數 IP 排行採樣 300 萬筆確保秒級回應且不 OOM)
+	if metaTotal, _, mErr := getFastMetadataStats(srcExpr); mErr == nil && metaTotal > 50000000 && !hasCustomFilter {
+		out.IsSampled = true
+		out.SampleNote = fmt.Sprintf("高吞吐採樣模式 (總筆數 %d 筆，主機排行採樣 300 萬筆極速分析)", metaTotal)
+	}
+
+	invMap := loadIPHostInventoryMap(vf.StartDate, vf.EndDate)
+	internalFrom := sqlIsInternalZoneExpr("from_zone")
+	internalTo := sqlIsInternalZoneExpr("to_zone")
+
+	var upRows, downRows, ruleRows, zoneRows []map[string]interface{}
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	// 1. 內網上傳 Top 10 主機 (from_zone 為內網且 to_zone 為外網/DMZ)
+	go func() {
+		defer wg.Done()
+		upRows = runTopNQuerySafe(func(_ string, curHostFrom string) string {
+			return fmt.Sprintf(`
+				SELECT
+					TRIM(source) AS ip,
+					CAST(COALESCE(SUM(bytes), 0) AS DOUBLE) AS total_bytes,
+					COUNT(*) AS flows,
+					COUNT(CASE WHEN LOWER(TRIM(action)) IN ('deny', 'drop', 'reset-both', 'reset-client', 'reset-server') THEN 1 END) AS deny_flows
+				FROM %s
+				WHERE %s AND %s AND NOT %s AND COALESCE(TRIM(source), '') != ''
+				GROUP BY ip
+				ORDER BY total_bytes DESC
+				LIMIT 10
+			`, curHostFrom, whereClause, internalFrom, internalTo)
+		})
+	}()
+
+	// 2. 內網下載 Top 10 主機 (from_zone 為外網/非內網且 to_zone 為內網)
+	go func() {
+		defer wg.Done()
+		downRows = runTopNQuerySafe(func(_ string, curHostFrom string) string {
+			return fmt.Sprintf(`
+				SELECT
+					TRIM(destination) AS ip,
+					CAST(COALESCE(SUM(bytes), 0) AS DOUBLE) AS total_bytes,
+					COUNT(*) AS flows,
+					COUNT(CASE WHEN LOWER(TRIM(action)) IN ('deny', 'drop', 'reset-both', 'reset-client', 'reset-server') THEN 1 END) AS deny_flows
+				FROM %s
+				WHERE %s AND NOT %s AND %s AND COALESCE(TRIM(destination), '') != ''
+				GROUP BY ip
+				ORDER BY total_bytes DESC
+				LIMIT 10
+			`, curHostFrom, whereClause, internalFrom, internalTo)
+		})
+	}()
+
+	// 3. 命中率最高的安全規則 (Top 10 Hit Rules)
+	go func() {
+		defer wg.Done()
+		ruleRows = runTopNQuerySafe(func(curSrc string, _ string) string {
+			return fmt.Sprintf(`
+				SELECT
+					TRIM(rule) AS rule_name,
+					COUNT(*) AS hits,
+					COUNT(CASE WHEN LOWER(TRIM(action)) = 'allow' THEN 1 END) AS allow_hits,
+					COUNT(CASE WHEN LOWER(TRIM(action)) IN ('deny', 'drop', 'reset-both', 'reset-client', 'reset-server') THEN 1 END) AS deny_hits,
+					CAST(COALESCE(SUM(bytes), 0) AS DOUBLE) AS total_bytes,
+					COALESCE(MODE(NULLIF(application, '')), '-') AS top_app
+				FROM read_parquet(%s, union_by_name=true)
+				WHERE %s AND COALESCE(TRIM(rule), '') != ''
+				GROUP BY rule_name
+				ORDER BY hits DESC
+				LIMIT 10
+			`, curSrc, whereClause)
+		})
+	}()
+
+	// 4. Zone-to-Zone 流量流向圖 (Sankey)
+	go func() {
+		defer wg.Done()
+		zoneRows = runTopNQuerySafe(func(curSrc string, _ string) string {
+			return fmt.Sprintf(`
+				SELECT
+					TRIM(from_zone) AS fz,
+					TRIM(to_zone) AS tz,
+					COUNT(*) AS flows,
+					COUNT(CASE WHEN LOWER(TRIM(action)) IN ('deny', 'drop', 'reset-both', 'reset-client', 'reset-server') THEN 1 END) AS deny_flows,
+					CAST(COALESCE(SUM(bytes), 0) AS DOUBLE) AS total_bytes
+				FROM read_parquet(%s, union_by_name=true)
+				WHERE %s AND COALESCE(TRIM(from_zone), '') != '' AND COALESCE(TRIM(to_zone), '') != ''
+				GROUP BY fz, tz
+				ORDER BY total_bytes DESC
+				LIMIT 25
+			`, curSrc, whereClause)
+		})
+	}()
+
+	wg.Wait()
+
+	for _, r := range upRows {
+		ip := strings.TrimSpace(fmt.Sprintf("%v", r["ip"]))
+		if ip == "" || ip == "<nil>" {
+			continue
+		}
+		bVal := parseDuckDBNumber(r["total_bytes"])
+		hn, dt, lbl := formatHostInventoryLabel(ip, invMap)
+		out.TopUploadHosts = append(out.TopUploadHosts, TopTalkerHostItem{
+			IP:         ip,
+			Hostname:   hn,
+			DeviceType: dt,
+			Label:      lbl,
+			Bytes:      bVal,
+			BytesFmt:   formatHumanBytes(bVal),
+			Flows:      parseDuckDBNumber(r["flows"]),
+			DenyFlows:  parseDuckDBNumber(r["deny_flows"]),
+		})
+	}
+
+	for _, r := range downRows {
+		ip := strings.TrimSpace(fmt.Sprintf("%v", r["ip"]))
+		if ip == "" || ip == "<nil>" {
+			continue
+		}
+		bVal := parseDuckDBNumber(r["total_bytes"])
+		hn, dt, lbl := formatHostInventoryLabel(ip, invMap)
+		out.TopDownloadHosts = append(out.TopDownloadHosts, TopTalkerHostItem{
+			IP:         ip,
+			Hostname:   hn,
+			DeviceType: dt,
+			Label:      lbl,
+			Bytes:      bVal,
+			BytesFmt:   formatHumanBytes(bVal),
+			Flows:      parseDuckDBNumber(r["flows"]),
+			DenyFlows:  parseDuckDBNumber(r["deny_flows"]),
+		})
+	}
+
+	for _, r := range ruleRows {
+		rName := strings.TrimSpace(fmt.Sprintf("%v", r["rule_name"]))
+		if rName == "" || rName == "<nil>" {
+			continue
+		}
+		bVal := parseDuckDBNumber(r["total_bytes"])
+		out.TopRules = append(out.TopRules, TopHitRuleItem{
+			Rule:      rName,
+			Hits:      parseDuckDBNumber(r["hits"]),
+			AllowHits: parseDuckDBNumber(r["allow_hits"]),
+			DenyHits:  parseDuckDBNumber(r["deny_hits"]),
+			Bytes:     bVal,
+			BytesFmt:  formatHumanBytes(bVal),
+			TopApp:    strings.TrimSpace(fmt.Sprintf("%v", r["top_app"])),
+		})
+	}
+
+	for _, r := range zoneRows {
+		fz := strings.TrimSpace(fmt.Sprintf("%v", r["fz"]))
+		tz := strings.TrimSpace(fmt.Sprintf("%v", r["tz"]))
+		if fz == "" || tz == "" || fz == "<nil>" || tz == "<nil>" {
+			continue
+		}
+		bVal := parseDuckDBNumber(r["total_bytes"])
+		out.ZoneFlows = append(out.ZoneFlows, ZoneFlowLinkItem{
+			FromZone:  fz,
+			ToZone:    tz,
+			Flows:     parseDuckDBNumber(r["flows"]),
+			DenyFlows: parseDuckDBNumber(r["deny_flows"]),
+			Bytes:     bVal,
+			BytesFmt:  formatHumanBytes(bVal),
+		})
+	}
+
+	return out, nil
+}
+
+// queryThreatTopNAnalytics 計算威脅頁面之 Top 10 受駭/異常內網主機、Top 10 阻擋威脅規則特徵與 Zone-to-Zone 威脅流向拓撲
+func queryThreatTopNAnalytics(queryDate, src, dst, severity, action, threatName string) (*ThreatTopNResult, error) {
+	out := &ThreatTopNResult{
+		TopInternalHosts: make([]TopTalkerHostItem, 0),
+		TopThreatRules:   make([]TopHitRuleItem, 0),
+		ZoneFlows:        make([]ZoneFlowLinkItem, 0),
+	}
+
+	queryDate = strings.ReplaceAll(strings.TrimSpace(queryDate), "/", "-")
+	if queryDate == "" {
+		queryDate = time.Now().Format("2006-01-02")
+	}
+
+	files, _ := filepath.Glob(filepath.Join(threatDir, fmt.Sprintf("threat_%s*.parquet", queryDate)))
+	if subFiles, err := filepath.Glob(filepath.Join(threatDir, queryDate, fmt.Sprintf("threat*%s*.parquet", queryDate))); err == nil {
+		files = append(files, subFiles...)
+	}
+	var validPaths []string
+	for _, f := range files {
+		if !strings.HasSuffix(f, ".tmp") {
+			if fi, err := os.Stat(f); err == nil && !fi.IsDir() && fi.Size() > 0 {
+				validPaths = append(validPaths, filepath.ToSlash(f))
+			}
+		}
+	}
+	if len(validPaths) == 0 {
+		return out, nil
+	}
+
+	quoted := make([]string, len(validPaths))
+	for i, p := range validPaths {
+		quoted[i] = fmt.Sprintf("'%s'", p)
+	}
+	srcExpr := fmt.Sprintf("[%s]", strings.Join(quoted, ", "))
+
+	var conds []string
+	conds = append(conds, "1=1")
+	if src != "" { conds = append(conds, fmt.Sprintf("src ILIKE '%%%s%%'", strings.ReplaceAll(src, "'", "''"))) }
+	if dst != "" { conds = append(conds, fmt.Sprintf("dst ILIKE '%%%s%%'", strings.ReplaceAll(dst, "'", "''"))) }
+	if threatName != "" {
+		t := strings.ReplaceAll(threatName, "'", "''")
+		conds = append(conds, fmt.Sprintf("(threat_name ILIKE '%%%s%%' OR subtype ILIKE '%%%s%%')", t, t))
+	}
+	if severity != "" && strings.ToLower(severity) != "all" {
+		s := strings.ToLower(severity)
+		if s == "crit_high" {
+			conds = append(conds, "LOWER(severity) IN ('critical', 'high')")
+		} else {
+			conds = append(conds, fmt.Sprintf("LOWER(severity) = '%s'", strings.ReplaceAll(s, "'", "''")))
+		}
+	}
+	if action != "" && strings.ToLower(action) != "all" {
+		act := strings.ToLower(strings.ReplaceAll(action, "'", "''"))
+		if act == "allow" {
+			conds = append(conds, "LOWER(action) = 'allow'")
+		} else if act == "deny" {
+			conds = append(conds, "(LOWER(action) IN ('deny', 'drop') OR LOWER(action) LIKE 'reset%')")
+		} else if act == "reset" {
+			conds = append(conds, "LOWER(action) LIKE 'reset%'")
+		} else {
+			conds = append(conds, fmt.Sprintf("LOWER(action) = '%s'", act))
+		}
+	}
+	whereClause := strings.Join(conds, " AND ")
+
+	invMap := loadIPHostInventoryMap(queryDate, queryDate)
+	internalFrom := sqlIsInternalZoneExpr("from_zone")
+	internalTo := sqlIsInternalZoneExpr("to_zone")
+
+	var hostRows, threatRuleRows, zoneRows []map[string]interface{}
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	// 1. 內網受駭/異常主機 Top 10 (自動關聯 DHCP/設備清冊名稱)
+	go func() {
+		defer wg.Done()
+		q := fmt.Sprintf(`
+			WITH base AS (
+				SELECT from_zone, to_zone, src, dst, severity, action
+				FROM read_parquet(%s, union_by_name=true)
+				WHERE %s
+			),
+			internal_events AS (
+				SELECT TRIM(src) AS ip, '來源發起' AS role, severity, action
+				FROM base
+				WHERE %s AND COALESCE(TRIM(src), '') != ''
+				UNION ALL
+				SELECT TRIM(dst) AS ip, '目的受駭' AS role, severity, action
+				FROM base
+				WHERE %s AND NOT %s AND COALESCE(TRIM(dst), '') != ''
+			)
+			SELECT
+				ip,
+				MODE(role) AS top_role,
+				COUNT(*) AS hits,
+				COUNT(CASE WHEN LOWER(TRIM(severity)) IN ('critical', 'high') THEN 1 END) AS crit_high,
+				COUNT(CASE WHEN LOWER(TRIM(action)) IN ('deny', 'drop', 'block', 'reset-both', 'reset-server', 'reset-client') THEN 1 END) AS blocked_hits
+			FROM internal_events
+			GROUP BY ip
+			ORDER BY hits DESC
+			LIMIT 10
+		`, srcExpr, whereClause, internalFrom, internalTo, internalFrom)
+		hostRows, _ = runDuckDBQuery(q)
+	}()
+
+	// 2. Top 10 阻擋/觸發威脅規則特徵
+	go func() {
+		defer wg.Done()
+		q := fmt.Sprintf(`
+			SELECT
+				COALESCE(NULLIF(TRIM(threat_name), ''), '未知威脅') AS tname,
+				COALESCE(NULLIF(TRIM(subtype), ''), '-') AS subtype,
+				LOWER(COALESCE(NULLIF(TRIM(severity), ''), 'low')) AS sev,
+				COUNT(*) AS hits,
+				COUNT(CASE WHEN LOWER(TRIM(action)) IN ('deny', 'drop', 'block', 'reset-both', 'reset-server', 'reset-client') THEN 1 END) AS blocked_hits,
+				COUNT(CASE WHEN LOWER(TRIM(action)) NOT IN ('deny', 'drop', 'block', 'reset-both', 'reset-server', 'reset-client') THEN 1 END) AS alert_hits
+			FROM read_parquet(%s, union_by_name=true)
+			WHERE %s
+			GROUP BY tname, subtype, sev
+			ORDER BY hits DESC
+			LIMIT 10
+		`, srcExpr, whereClause)
+		threatRuleRows, _ = runDuckDBQuery(q)
+	}()
+
+	// 3. Zone-to-Zone 威脅攻擊流向拓撲 (Sankey)
+	go func() {
+		defer wg.Done()
+		q := fmt.Sprintf(`
+			SELECT
+				COALESCE(NULLIF(TRIM(from_zone), ''), 'unknown') AS fz,
+				COALESCE(NULLIF(TRIM(to_zone), ''), 'unknown') AS tz,
+				COUNT(*) AS hits,
+				COUNT(CASE WHEN LOWER(TRIM(action)) IN ('deny', 'drop', 'block', 'reset-both', 'reset-server', 'reset-client') THEN 1 END) AS blocked_hits,
+				COUNT(CASE WHEN LOWER(TRIM(severity)) IN ('critical', 'high') THEN 1 END) AS crit_high
+			FROM read_parquet(%s, union_by_name=true)
+			WHERE %s
+			GROUP BY fz, tz
+			ORDER BY hits DESC
+			LIMIT 20
+		`, srcExpr, whereClause)
+		zoneRows, _ = runDuckDBQuery(q)
+	}()
+
+	wg.Wait()
+
+	for _, r := range hostRows {
+		ip := strings.TrimSpace(fmt.Sprintf("%v", r["ip"]))
+		if ip == "" || ip == "<nil>" {
+			continue
+		}
+		hn, dt, lbl := formatHostInventoryLabel(ip, invMap)
+		out.TopInternalHosts = append(out.TopInternalHosts, TopTalkerHostItem{
+			IP:         ip,
+			Hostname:   hn,
+			DeviceType: dt,
+			Label:      lbl,
+			Role:       strings.TrimSpace(fmt.Sprintf("%v", r["top_role"])),
+			Flows:      parseDuckDBNumber(r["hits"]),
+			CritHigh:   parseDuckDBNumber(r["crit_high"]),
+			DenyFlows:  parseDuckDBNumber(r["blocked_hits"]),
+		})
+	}
+
+	for _, r := range threatRuleRows {
+		tName := strings.TrimSpace(fmt.Sprintf("%v", r["tname"]))
+		if tName == "" || tName == "<nil>" {
+			continue
+		}
+		out.TopThreatRules = append(out.TopThreatRules, TopHitRuleItem{
+			Rule:      tName,
+			Subtype:   strings.TrimSpace(fmt.Sprintf("%v", r["subtype"])),
+			Severity:  strings.TrimSpace(fmt.Sprintf("%v", r["sev"])),
+			Hits:      parseDuckDBNumber(r["hits"]),
+			DenyHits:  parseDuckDBNumber(r["blocked_hits"]),
+			AllowHits: parseDuckDBNumber(r["alert_hits"]),
+		})
+	}
+
+	for _, r := range zoneRows {
+		fz := strings.TrimSpace(fmt.Sprintf("%v", r["fz"]))
+		tz := strings.TrimSpace(fmt.Sprintf("%v", r["tz"]))
+		if fz == "" || tz == "" || fz == "<nil>" || tz == "<nil>" {
+			continue
+		}
+		out.ZoneFlows = append(out.ZoneFlows, ZoneFlowLinkItem{
+			FromZone:  fz,
+			ToZone:    tz,
+			Flows:     parseDuckDBNumber(r["hits"]),
+			DenyFlows: parseDuckDBNumber(r["blocked_hits"]),
+			CritHigh:  parseDuckDBNumber(r["crit_high"]),
+		})
+	}
+
+	return out, nil
+}

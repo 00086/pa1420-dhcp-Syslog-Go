@@ -11,8 +11,15 @@
     white-space: nowrap; 
 }
 .table-scroll-container { 
-    overflow-y: scroll; 
+    overflow: hidden; 
     flex-grow: 1; 
+    min-height: 0; 
+
+}
+.table-scroll-container > .table-responsive {
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: auto;
 }
 
 /* 固定欄寬與文字截斷 */
@@ -28,8 +35,8 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    padding-top: 3px;
-    padding-bottom: 3px;
+    padding-top: 1px;
+    padding-bottom: 1px;
     padding-left: 6px;
     padding-right: 6px;
     line-height: 1.35;
@@ -73,11 +80,11 @@
 {% endblock %}
 
 {% block content %}
-<!-- 系統日誌查詢工具列 -->
-<div class="row mb-2 flex-shrink-0" style="position: relative; z-index: 1050;">
+<!-- 系統日誌查詢工具列 (精簡列高版) -->
+<div class="row mb-1 flex-shrink-0 compact-filter-bar" style="position: relative; z-index: 1050;">
     <div class="col-12">
         <div class="card shadow-sm border-0 bg-white" style="overflow: visible;">
-            <div class="card-body py-2 px-3 d-flex align-items-center justify-content-between flex-nowrap gap-2" style="overflow: visible;">
+            <div class="card-body py-1 px-2 d-flex align-items-center justify-content-between flex-nowrap gap-1" style="overflow: visible;">
                 
                 <!-- 條件篩選輸入組 -->
                 <div class="d-flex align-items-center gap-1 flex-nowrap flex-shrink-0">
@@ -89,7 +96,7 @@
                             <i class="bi bi-chevron-left"></i>
                         </button>
                         <input type="date" class="form-control form-control-sm font-monospace text-info fw-bold" style="width: 125px; cursor: pointer;" id="system-date" onclick="this.showPicker()">
-                        <span class="input-group-text bg-white text-info fw-bold px-2 font-monospace" id="system-weekday" style="font-size: 13px;">(四)</span>
+                        <span class="input-group-text bg-white text-info fw-bold px-2 font-monospace" id="system-weekday" style="font-size: 14.5px;">(四)</span>
                         <button class="btn btn-outline-secondary px-2" type="button" onclick="changeSystemDate(1)" title="後一日">
                             <i class="bi bi-chevron-right"></i>
                         </button>
@@ -116,7 +123,7 @@
                     <div class="input-group input-group-sm ms-1" style="width: auto; position: relative;">
                         <button class="btn btn-outline-secondary dropdown-toggle fw-bold d-flex align-items-center gap-1 bg-light text-dark py-1" type="button" id="refreshIntervalDropdown" data-bs-toggle="dropdown" aria-expanded="false" title="設定重新顯示週期">
                             <span id="currentIntervalLabel">30 秒</span>
-                            <span id="countdownBadge" class="badge bg-info text-dark font-monospace" style="font-size: 10px;">30s</span>
+                            <span id="countdownBadge" class="badge bg-info text-dark font-monospace" style="font-size: 10px; display: inline-flex; align-items: center; justify-content: center; width: 30px; min-width: 30px; padding-left: 0; padding-right: 0; text-align: center; font-variant-numeric: tabular-nums;">30s</span>
                         </button>
                         <ul class="dropdown-menu dropdown-menu-end shadow border" aria-labelledby="refreshIntervalDropdown" style="z-index: 1060; min-width: 110px;">
                             <li><a class="dropdown-item" href="javascript:void(0)" id="item-10" onclick="setRefreshInterval(10, '10 秒')">10 秒</a></li>
@@ -134,7 +141,7 @@
                 <!-- 右側狀態徽章 (固定不折行，1:1 對齊 traffic 與 threat) -->
                 <div class="d-flex align-items-center gap-2 ms-auto flex-shrink-0">
                     <span class="badge bg-warning text-dark"><i class="bi bi-lightning-charge-fill"></i> DuckDB 向量加速</span>
-                    <span class="badge bg-info-subtle text-info-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" style="font-size: 12px;">
+                    <span class="badge bg-info-subtle text-info-emphasis border d-flex align-items-center gap-1 font-monospace text-nowrap py-1 px-2" style="font-size: 14px;">
                         <span class="spinner-grow spinner-grow-sm text-info" style="width: 6px; height: 6px;"></span>
                         <span id="system-syslog-flush-text">Syslog 514: System 0 筆</span>
                     </span>
@@ -210,9 +217,9 @@
             </div>
             <div class="card-body p-0 table-scroll-container">
                 <div class="table-responsive h-100">
-                    <table class="table table-hover table-striped table-sm table-sticky-header font-monospace system-table-fixed" style="font-size: 14px;">
+                    <table class="table table-hover table-striped table-sm table-sticky-header font-monospace system-table-fixed" style="font-size: 16.0px;">
                         <colgroup>
-                            <col style="width: 170px;"> <!-- 1. 接收時間 -->
+                            <col style="width: 175px;"> <!-- 1. 接收時間 -->
                             <col style="width: 110px;"> <!-- 2. 類型 -->
                             <col style="width: 120px;"> <!-- 3. 嚴重性 -->
                             <col style="width: 160px;"> <!-- 4. 事件 -->
@@ -339,7 +346,7 @@
             if (activeItem) activeItem.classList.add('active');
 
             badge.classList.remove('d-none');
-            badge.innerText = `${remainingSeconds}s`;
+            badge.innerText = `${String(Math.max(0, remainingSeconds)).padStart(2, '0')}s`;
 
             if (countdownTimer) clearInterval(countdownTimer);
             countdownTimer = setInterval(() => {
@@ -348,7 +355,7 @@
                     remainingSeconds = currentIntervalSeconds;
                     triggerSilentRefresh();
                 }
-                badge.innerText = `${remainingSeconds}s`;
+                badge.innerText = `${String(Math.max(0, remainingSeconds)).padStart(2, '0')}s`;
             }, 1000);
         } else {
             labelElem.innerText = '手動';
@@ -367,7 +374,7 @@
 
         remainingSeconds = currentIntervalSeconds;
         const badge = document.getElementById('countdownBadge');
-        if (currentIntervalSeconds > 0) badge.innerText = `${remainingSeconds}s`;
+        if (currentIntervalSeconds > 0) badge.innerText = `${String(Math.max(0, remainingSeconds)).padStart(2, '0')}s`;
 
         querySystemLogs(currentSystemPage, true, () => {
             setTimeout(() => icon.classList.remove('spin-anim'), 400);
@@ -587,7 +594,7 @@
 
         remainingSeconds = currentIntervalSeconds;
         const badge = document.getElementById('countdownBadge');
-        if (currentIntervalSeconds > 0) badge.innerText = `${remainingSeconds}s`;
+        if (currentIntervalSeconds > 0) badge.innerText = `${String(Math.max(0, remainingSeconds)).padStart(2, '0')}s`;
 
         querySystemLogs(currentSystemPage, true, () => {
             setTimeout(() => icon.classList.remove('spin-anim'), 400);

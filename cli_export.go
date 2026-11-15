@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -352,7 +353,8 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 			var lines []string
 			for _, l := range strings.Split(string(content), "\n") {
 				trimmed := strings.TrimSpace(l)
-				if trimmed != "" {
+				// 僅過濾明確帶說明的註解 (如 "# "、"# 第"、"# 選填") 與 INTERNAL_SUBNETS=，杜絕誤殺開頭帶 # 的真實 SSH 密碼
+				if trimmed != "" && !isPAConfigCommentLine(trimmed) && !strings.HasPrefix(strings.ToUpper(trimmed), "INTERNAL_SUBNETS=") {
 					lines = append(lines, trimmed)
 				}
 			}
@@ -436,7 +438,7 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 			var rawLines []string
 			for _, l := range strings.Split(string(content), "\n") {
 				trimmed := strings.TrimSpace(l)
-				if trimmed != "" {
+				if trimmed != "" && !isPAConfigCommentLine(trimmed) && !strings.HasPrefix(strings.ToUpper(trimmed), "INTERNAL_SUBNETS=") {
 					rawLines = append(rawLines, trimmed)
 				}
 			}
@@ -776,11 +778,12 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 		tmpDestSlash := filepath.ToSlash(tmpDestParquet)
 
 		// 🌟 32 vCPU / 64GB 配置：配置 16 核心向量解析、45GB 記憶體天花板與磁碟溢位保護
+		hw := getAdaptiveDuckDBProfile()
 		tempSpillDir := filepath.ToSlash(filepath.Join(appDir, "duckdb_temp"))
 		_ = os.MkdirAll(filepath.Join(appDir, "duckdb_temp"), 0755)
 
 		duckCmd := fmt.Sprintf(
-			"SET max_memory='45GB'; SET threads=16; SET preserve_insertion_order=false; SET temp_directory='%s'; "+
+			fmt.Sprintf("SET max_memory='%dGB'; SET threads=%d; ", hw.ETLMemGB, hw.ETLThreads) + "SET preserve_insertion_order=false; SET temp_directory='%s'; "+
 				"COPY (SELECT * FROM read_csv_auto('%s', all_varchar=true, union_by_name=true, quote='\"', escape='\"', null_padding=true, ignore_errors=true)) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);",
 			tempSpillDir, csvPattern, tmpDestSlash,
 		)
@@ -938,11 +941,12 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 	coldStart := time.Now()
 	log("    🧊 [1/2] 正在將 %d 個碎片 CSV 轉換為全量無損冷資料 (RAW Parquet)...\n", len(matches))
 
+	hw := getAdaptiveDuckDBProfile()
 	tempSpillDir := filepath.ToSlash(filepath.Join(appDir, "duckdb_temp"))
 	_ = os.MkdirAll(filepath.Join(appDir, "duckdb_temp"), 0755)
 
 	coldQuery := fmt.Sprintf(
-		"SET max_memory='16GB'; SET threads=16; SET preserve_insertion_order=false; SET temp_directory='%s'; "+
+		fmt.Sprintf("SET max_memory='%dGB'; SET threads=%d; ", hw.ETLMemGB, hw.ETLThreads) + "SET preserve_insertion_order=false; SET temp_directory='%s'; "+
 			"COPY (SELECT * FROM read_csv_auto('%s', all_varchar=true, union_by_name=true, quote='\"', escape='\"', null_padding=true, ignore_errors=true) ORDER BY \"Generate Time\" DESC) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);",
 		tempSpillDir, txtPattern, tmpCold,
 	)
@@ -986,7 +990,7 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 	var hotQuery string
 	if req.LogType == "threat" {
 		hotQuery = fmt.Sprintf(`
-			SET max_memory='16GB'; SET threads=16; SET preserve_insertion_order=false; SET temp_directory='%s';
+			SET max_memory='" + strconv.Itoa(hw.ETLMemGB) + "GB'; SET threads=" + strconv.Itoa(hw.ETLThreads) + "; SET preserve_insertion_order=false; SET temp_directory='%s';
 			COPY (
 				SELECT
 					REPLACE(REPLACE(COALESCE(TRY_CAST("Generate Time" AS VARCHAR), TRY_CAST("Receive Time" AS VARCHAR)), '/', '-'), ' ', ' ') AS timestamp,
@@ -1009,7 +1013,7 @@ func performCLIExportAndConvert(req CLIExportRequest, log StreamLogger) error {
 		`, tempSpillDir, coldSlashPath, tmpHot)
 	} else {
 		hotQuery = fmt.Sprintf(`
-			SET max_memory='16GB'; SET threads=16; SET preserve_insertion_order=false; SET temp_directory='%s';
+			SET max_memory='" + strconv.Itoa(hw.ETLMemGB) + "GB'; SET threads=" + strconv.Itoa(hw.ETLThreads) + "; SET preserve_insertion_order=false; SET temp_directory='%s';
 			COPY (
 				SELECT
 					REPLACE(REPLACE(COALESCE(TRY_CAST("Generate Time" AS VARCHAR), TRY_CAST("Receive Time" AS VARCHAR)), '/', '-'), ' ', ' ') AS timestamp,
@@ -1154,8 +1158,9 @@ func consolidateHourlyRawParquet(logType, targetDate, targetHour string) error {
 	targetHourlyFile := filepath.Join(dayDir, fmt.Sprintf("%s_raw_%s_%s.parquet", logType, targetDate, targetHour))
 	tmpHourlyFile := targetHourlyFile + ".tmp"
 
+	hw := getAdaptiveDuckDBProfile()
 	sqlCmd := fmt.Sprintf(
-		"SET max_memory='16GB'; SET threads=16; SET preserve_insertion_order=false; "+
+		fmt.Sprintf("SET max_memory='%dGB'; SET threads=%d; ", hw.ETLMemGB, hw.ETLThreads) + "SET preserve_insertion_order=false; "+
 			"COPY (SELECT * FROM read_parquet('%s', union_by_name=true)) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);",
 		filepath.ToSlash(pattern), filepath.ToSlash(tmpHourlyFile),
 	)
@@ -1837,7 +1842,7 @@ func getHourReconcileLock(date, hour string) *sync.Mutex {
 	return l
 }
 
-// 🌟 雙軌反哺引擎：整點小時 RAW 主檔完成後，動態偵測欄位萃取 14 欄熱資料並與現有熱庫全量去重融合
+// 🌟 整點冷轉熱直通引擎：直接由完整整點 RAW 主檔萃取 14 欄熱資料，並清理該小時舊 Syslog 碎片
 func reconcileSyslogMissingRecords(logType, targetDate, targetHour, hourlyRawFile string) {
 	if logType != "traffic" {
 		return
@@ -1942,89 +1947,39 @@ func reconcileSyslogMissingRecords(logType, targetDate, targetHour, hourlyRawFil
 	_ = os.MkdirAll(hotDayDir, 0755)
 
 	hotHourlyFile := filepath.Join(hotDayDir, fmt.Sprintf("traffic_%s_%s.parquet", targetDate, targetHour))
-	tmpMergeFile := fmt.Sprintf("%s.%d.tmp", hotHourlyFile, time.Now().UnixNano())
+	tmpHotFile := fmt.Sprintf("%s.%d.tmp", hotHourlyFile, time.Now().UnixNano())
 	tempSpillDir := filepath.ToSlash(filepath.Join(appDir, "duckdb_temp"))
 	_ = os.MkdirAll(filepath.Join(appDir, "duckdb_temp"), 0755)
 
-	// 4. 盤點現有熱資料檔案（包含既有小時熱主檔、舊小時切片、以及同日 Syslog 碎片）
-	var existingHotFiles []string
-	allDayParquets, _ := filepath.Glob(filepath.Join(hotDayDir, fmt.Sprintf("traffic*%s*.parquet", targetDate)))
-	for _, f := range allDayParquets {
-		base := filepath.Base(f)
-		if strings.HasSuffix(base, ".tmp") || strings.HasPrefix(base, "patch_") {
-			continue
-		}
-		if fi, err := os.Stat(f); err == nil && fi.Size() > 0 {
-			existingHotFiles = append(existingHotFiles, filepath.ToSlash(f))
-		}
-	}
-
 	hourPrefix := fmt.Sprintf("%s %s:", targetDate, targetHour)
-	rawSelectSQL := fmt.Sprintf(`
-		SELECT
-			REPLACE(REPLACE(%s, '/', '-'), '  ', ' ') AS timestamp,
-			%s AS type, %s AS from_zone, %s AS to_zone,
-			%s AS source, %s AS nat_source_ip, %s AS destination, %s AS nat_dest_ip,
-			%s AS to_port, %s AS application, %s AS action, %s AS rule,
-			%s AS session_end_reason, %s AS bytes, %s AS session_id
-		FROM read_parquet('%s')
-		WHERE REPLACE(%s, '/', '-') LIKE '%s%%'
-	`, tsExpr, typeExpr, fromZoneExpr, toZoneExpr,
+
+	// 4. 直接由完整 RAW 主檔向量投影產出 14 欄熱資料（不做跨檔 UNION 與全表去重排序，耗時 < 30s）
+	hw := getAdaptiveDuckDBProfile()
+	directHotSQL := fmt.Sprintf(`
+		SET max_memory='` + strconv.Itoa(hw.ETLMemGB) + `GB'; SET threads=` + strconv.Itoa(hw.ETLThreads) + `; SET preserve_insertion_order=false; SET temp_directory='%s';
+		COPY (
+			SELECT * FROM (
+				SELECT
+					REPLACE(REPLACE(%s, '/', '-'), '  ', ' ') AS timestamp,
+					%s AS type, %s AS from_zone, %s AS to_zone,
+					%s AS source, %s AS nat_source_ip, %s AS destination, %s AS nat_dest_ip,
+					%s AS to_port, %s AS application, %s AS action, %s AS rule,
+					%s AS session_end_reason, %s AS bytes, %s AS session_id
+				FROM read_parquet('%s')
+			)
+			WHERE timestamp LIKE '%s%%' AND source != '' AND destination != ''
+			ORDER BY timestamp DESC
+		) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
+	`, tempSpillDir,
+		tsExpr, typeExpr, fromZoneExpr, toZoneExpr,
 		srcExpr, natSrcExpr, dstExpr, natDstExpr,
 		portExpr, appExpr, actionExpr, ruleExpr,
 		endReasonExpr, bytesExpr, sidExpr,
-		rawSlash, tsExpr, hourPrefix)
+		rawSlash, hourPrefix, filepath.ToSlash(tmpHotFile))
 
-	var unionSourceSQL string
-	if len(existingHotFiles) > 0 {
-		quotedFiles := make([]string, len(existingHotFiles))
-		for i, f := range existingHotFiles {
-			quotedFiles[i] = fmt.Sprintf("'%s'", f)
-		}
-		existingSelectSQL := fmt.Sprintf(`
-			SELECT
-				TRY_CAST(timestamp AS VARCHAR) AS timestamp,
-				TRY_CAST(type AS VARCHAR) AS type,
-				TRY_CAST(from_zone AS VARCHAR) AS from_zone,
-				TRY_CAST(to_zone AS VARCHAR) AS to_zone,
-				TRY_CAST(source AS VARCHAR) AS source,
-				TRY_CAST(nat_source_ip AS VARCHAR) AS nat_source_ip,
-				TRY_CAST(destination AS VARCHAR) AS destination,
-				TRY_CAST(nat_dest_ip AS VARCHAR) AS nat_dest_ip,
-				TRY_CAST(to_port AS INT) AS to_port,
-				TRY_CAST(application AS VARCHAR) AS application,
-				TRY_CAST(action AS VARCHAR) AS action,
-				TRY_CAST(rule AS VARCHAR) AS rule,
-				TRY_CAST(session_end_reason AS VARCHAR) AS session_end_reason,
-				TRY_CAST(bytes AS BIGINT) AS bytes,
-				TRY_CAST(session_id AS VARCHAR) AS session_id
-			FROM read_parquet([%s], union_by_name=true)
-			WHERE TRY_CAST(timestamp AS VARCHAR) LIKE '%s%%'
-		`, strings.Join(quotedFiles, ", "), hourPrefix)
-
-		unionSourceSQL = fmt.Sprintf("(%s) UNION ALL (%s)", rawSelectSQL, existingSelectSQL)
-	} else {
-		unionSourceSQL = rawSelectSQL
-	}
-
-	// 5. 全量去重整合並降冪排序寫入
-	mergeSQL := fmt.Sprintf(`
-		SET max_memory='32GB'; SET threads=12; SET preserve_insertion_order=false; SET temp_directory='%s';
-		COPY (
-			SELECT * EXCLUDE (rn) FROM (
-				SELECT *, ROW_NUMBER() OVER (
-					PARTITION BY timestamp, source, destination, to_port, session_id, action, bytes
-					ORDER BY timestamp DESC
-				) AS rn
-				FROM (%s)
-			) WHERE rn = 1 AND source != '' AND destination != ''
-			ORDER BY timestamp DESC
-		) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
-	`, tempSpillDir, unionSourceSQL, filepath.ToSlash(tmpMergeFile))
-
-	if _, err := runDuckDBQuery(mergeSQL); err != nil {
-		_ = os.Remove(tmpMergeFile)
-		fmt.Printf("❌ [雙軌反哺失敗] %s 第 %s 時熱資料整合失敗: %v\n", targetDate, targetHour, err)
+	if _, err := runDuckDBQuery(directHotSQL); err != nil {
+		_ = os.Remove(tmpHotFile)
+		fmt.Printf("❌ [冷轉熱失敗] %s 第 %s 時熱資料轉換失敗: %v\n", targetDate, targetHour, err)
 		RecordAuditLog(AuditLogRecord{
 			FWModel:     currentModel,
 			LogType:     logType,
@@ -2034,44 +1989,95 @@ func reconcileSyslogMissingRecords(logType, targetDate, targetHour, hourlyRawFil
 			Status:      "FAILED",
 			DurationSec: time.Since(startT).Seconds(),
 			OutputFile:  filepath.Base(hotHourlyFile),
-			Details:     fmt.Sprintf("第 %s 時冷資料自動轉熱資料失敗", targetHour),
-			ErrorReason: err.Error(),
+			Details:     fmt.Sprintf("第 %s 時冷資料直接轉換熱資料失敗", targetHour),
+			ErrorReason: sanitizeErrorMessage(err),
 			Operator:    "AUTO_SCHEDULER",
 		})
 		return
 	}
 
-	// 6. 原子替換為正式小時熱主檔，並清理該小時舊的熱碎片
+	// 5. 原子替換為正式小時熱主檔
 	_ = os.Remove(hotHourlyFile)
-	if err := os.Rename(tmpMergeFile, hotHourlyFile); err != nil {
-		_ = os.Remove(tmpMergeFile)
-		fmt.Printf("❌ [雙軌反哺失敗] %s 第 %s 時小時熱主檔替換失敗: %v\n", targetDate, targetHour, err)
+	invalidateDailyMetricsCache(targetDate)
+	if err := os.Rename(tmpHotFile, hotHourlyFile); err != nil {
+		_ = os.Remove(tmpHotFile)
+		fmt.Printf("❌ [冷轉熱失敗] %s 第 %s 時小時熱主檔替換失敗: %v\n", targetDate, targetHour, err)
 		return
 	}
 
+	// 6. 清理該小時舊切片與 Syslog 臨時碎片，避免總筆數重複計算
 	oldHourSlices, _ := filepath.Glob(filepath.Join(hotDayDir, fmt.Sprintf("traffic_%s_%s_*.parquet", targetDate, targetHour)))
 	for _, f := range oldHourSlices {
 		_ = os.Remove(f)
 	}
 
-	rollupFrags, _ := filepath.Glob(filepath.Join(hotDayDir, fmt.Sprintf("traffic_%s_*.parquet", targetDate)))
-	for _, rf := range rollupFrags {
+	// 計算該小時結束時間點（例如 14:00 ➔ 15:00），早於該時間點建立的 Syslog 碎片可直接秒刪免重寫
+	var nextHourEnd time.Time
+	if parsedH, err := time.ParseInLocation("2006-01-02 15", fmt.Sprintf("%s %s", targetDate, targetHour), time.Local); err == nil {
+		nextHourEnd = parsedH.Add(1 * time.Hour)
+	}
+
+	// 檢查 00..targetHour 是否皆已具備正式整點熱主檔
+	allPriorHoursReady := true
+	if hInt, err := strconv.Atoi(targetHour); err == nil {
+		for h := 0; h <= hInt; h++ {
+			priorFile := filepath.Join(hotDayDir, fmt.Sprintf("traffic_%s_%02d.parquet", targetDate, h))
+			if pFi, pErr := os.Stat(priorFile); pErr != nil || pFi.Size() == 0 {
+				allPriorHoursReady = false
+				break
+			}
+		}
+	} else {
+		allPriorHoursReady = false
+	}
+
+	allFrags, _ := filepath.Glob(filepath.Join(hotDayDir, fmt.Sprintf("traffic_%s_*.parquet", targetDate)))
+	for _, rf := range allFrags {
 		base := filepath.Base(rf)
-		if strings.Contains(base, "_chunk_") || strings.Contains(base, "_rollup_") {
-			trimTmp := rf + ".trim.tmp"
-			trimSQL := fmt.Sprintf(`
-				SET max_memory='16GB'; SET threads=8; SET preserve_insertion_order=false;
-				COPY (
-					SELECT * FROM read_parquet('%s')
-					WHERE TRY_CAST(timestamp AS VARCHAR) NOT LIKE '%s%%'
-				) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
-			`, filepath.ToSlash(rf), hourPrefix, filepath.ToSlash(trimTmp))
-			if _, err := runDuckDBQuery(trimSQL); err == nil {
+		if strings.HasSuffix(base, ".tmp") {
+			continue
+		}
+		isSyslogArchive := strings.HasSuffix(base, "_syslog.parquet")
+		if !strings.Contains(base, "_live_") && !strings.Contains(base, "_chunk_") && !strings.Contains(base, "_rollup_") && !isSyslogArchive {
+			continue
+		}
+
+		// 若 00..23 全天 24 小時熱主檔皆已齊備，_syslog.parquet 內容已 100% 涵蓋，直接刪除
+		if isSyslogArchive && allPriorHoursReady && targetHour == "23" {
+			_ = os.Remove(rf)
+			fmt.Printf("🧹 [重複資料清理] %s 全日 24 小時熱主檔已齊全，自動移除多餘的 %s\n", targetDate, base)
+			continue
+		}
+
+		// 若檔案修改時間早於下一小時整點，且前面各小時皆已轉檔完成，代表內容已全數涵蓋，直接刪除 (0ms)
+		if !isSyslogArchive && allPriorHoursReady && !nextHourEnd.IsZero() {
+			if fi, err := os.Stat(rf); err == nil && fi.ModTime().Before(nextHourEnd) {
 				_ = os.Remove(rf)
+				continue
+			}
+		}
+
+		// 若為跨整點碎片或歷史 _syslog.parquet，剔除本小時已轉檔的紀錄；若剩餘 0 筆則直接刪除該檔
+		trimTmp := rf + ".trim.tmp"
+		trimSQL := fmt.Sprintf(`
+			SET max_memory='` + strconv.Itoa(hw.UIMemGB) + `GB'; SET threads=` + strconv.Itoa(hw.UIThreads) + `; SET preserve_insertion_order=false;
+			COPY (
+				SELECT * FROM read_parquet('%s')
+				WHERE TRY_CAST(timestamp AS VARCHAR) NOT LIKE '%s%%'
+			) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD);
+		`, filepath.ToSlash(rf), hourPrefix, filepath.ToSlash(trimTmp))
+		if _, err := runDuckDBQuery(trimSQL); err == nil {
+			_ = os.Remove(rf)
+			if getParquetExactRowCount(trimTmp) > 0 {
 				_ = os.Rename(trimTmp, rf)
 			} else {
 				_ = os.Remove(trimTmp)
+				if isSyslogArchive {
+					fmt.Printf("🧹 [重複資料清理] %s 內所有時段皆已由整點熱主檔涵蓋，自動移除 %s\n", base, base)
+				}
 			}
+		} else {
+			_ = os.Remove(trimTmp)
 		}
 	}
 
@@ -2082,7 +2088,7 @@ func reconcileSyslogMissingRecords(logType, targetDate, targetHour, hourlyRawFil
 	hotRowCount := getParquetExactRowCount(hotHourlyFile)
 	durationSec := time.Since(startT).Seconds()
 
-	fmt.Printf("🛡️ [雙軌反哺整合完成] %s 第 %s 時已與現有熱資料去重融合 ➔ %s (共 %d 筆，%.1f MB，耗時: %.1f 秒)\n",
+	fmt.Printf("⚡ [整點冷轉熱完成] %s 第 %s 時已直接轉換為熱主檔 ➔ %s (共 %d 筆，%.1f MB，耗時: %.1f 秒)\n",
 		targetDate, targetHour, filepath.Base(hotHourlyFile), hotRowCount, finalMB, durationSec)
 
 	RecordAuditLog(AuditLogRecord{
@@ -2096,9 +2102,10 @@ func reconcileSyslogMissingRecords(logType, targetDate, targetHour, hourlyRawFil
 		FileSizeMB:  finalMB,
 		DurationSec: durationSec,
 		OutputFile:  filepath.Base(hotHourlyFile),
-		Details:     fmt.Sprintf("第 %s 時整點冷資料自動反哺 14 欄熱資料並去重融合完成", targetHour),
+		Details:     fmt.Sprintf("第 %s 時整點冷資料直接轉換為 14 欄熱主檔完成（已清理舊碎片）", targetHour),
 		Operator:    "AUTO_SCHEDULER",
 	})
+	go func(d string) { _, _ = computeAndSaveDailySummary(d) }(targetDate)
 }
 
 var (
@@ -2251,8 +2258,9 @@ func reconcileDailySyslogAndCleanup(logType, targetDate, dailyRawFile string) {
 		unionSourceSQL = rawSelectSQL
 	}
 
+	hw := getAdaptiveDuckDBProfile()
 	mergeSQL := fmt.Sprintf(`
-		SET max_memory='16GB'; SET threads=8; SET preserve_insertion_order=false; SET temp_directory='%s';
+		SET max_memory='` + strconv.Itoa(hw.ETLMemGB) + `GB'; SET threads=` + strconv.Itoa(hw.ETLThreads) + `; SET preserve_insertion_order=false; SET temp_directory='%s';
 		COPY (
 			SELECT * EXCLUDE (rn) FROM (
 				SELECT *, ROW_NUMBER() OVER (
@@ -2332,4 +2340,5 @@ func reconcileDailySyslogAndCleanup(logType, targetDate, dailyRawFile string) {
 		Details:     fmt.Sprintf("PA-1420 全日 RAW 萃取熱資料並與現有熱庫去重融合完成 (已清除 %d 個零碎檔)", cleanedCount),
 		Operator:    "AUTO_SCHEDULER",
 	})
+	go func(d string) { _, _ = computeAndSaveDailySummary(d) }(targetDate)
 }
