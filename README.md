@@ -1,11 +1,11 @@
-# PA-1420 / PA-5250 防火牆日誌分析與 DHCP 監控系統 (Go 湖倉進階版) 📡
+# PA-1420 / PA-大型 防火牆日誌分析與 DHCP 監控系統 (Go 湖倉進階版) 📡
 
 專為 Palo Alto Networks PA-1420 次世代防火牆設計的日誌分析與網路監控系統。本專案最初以 **DHCP 租約管理與 ARP 聯防比對** 為核心基礎開發，後續採用 **Go 語言 (Golang)** 原生架構全面重構，並正式升級為現代化的 **Lakehouse (資料湖倉) 冷熱分離架構**。
 
 系統無縫整合了 **HTTP JSON Webhook 即時串流**、**UDP 514 Syslog**、**Parquet 列式壓縮** 與 **DuckDB 向量化 SQL 引擎**，不僅能以極低記憶體佔用穩定承載每日高達 400 萬筆以上的 Traffic 流量與 Threat 威脅日誌，更具備 100% 原始報文留存的資安稽核能力。
 
-> **🚀 旗艦級雙機型與跨平台架構演進（PA-1420 & PA-5250 / Windows & Linux）**：
-> 系統現已全面支援 **Windows (.exe)** 與 **Linux 原生 ELF 執行檔** 跨平台編譯部署，並具備**防火牆硬體型號自動偵測引擎**，可無縫適配標準機型（**PA-1420**）與高吞吐旗艦機型（**PA-5250 / PA-5200 / PA-5400 / PA-7000**）。透過 **64MB UDP 核心接收緩衝區**、**無鎖單專職 I/O 管線**、**DuckDB ETL/UI 雙通道併發隔離** 以及 **Parquet Footer Metadata 時間窗剪枝**，在 Linux 生產環境下已實測穩定承載單日 **22 億筆以上（22+ GB/日）** 連線日誌且達成**核心層級零掉包**，前端檢索依然維持毫秒級秒開體驗。
+> **🚀 旗艦級雙機型與跨平台架構演進（PA-1420 & PA-大型 / Windows & Linux）**：
+> 系統現已全面支援 **Windows (.exe)** 與 **Linux 原生 ELF 執行檔** 跨平台編譯部署，並具備**防火牆硬體型號自動偵測引擎**，可無縫適配標準機型（**PA-1420**）與高吞吐旗艦機型（**PA-大型 / PA-5200 / PA-5400 / PA-7000**）。透過 **64MB UDP 核心接收緩衝區**、**無鎖單專職 I/O 管線**、**DuckDB ETL/UI 雙通道併發隔離** 以及 **Parquet Footer Metadata 時間窗剪枝**，在 Linux 生產環境下已實測穩定承載單日 **22 億筆以上（22+ GB/日）** 連線日誌且達成**核心層級零掉包**，前端檢索依然維持毫秒級秒開體驗。
 
 ## 🆕 更新亮點
 
@@ -23,13 +23,13 @@
 
 * **⚡ 前景查詢隔離鎖與 30 秒逾時保護**：前端加入 `isForegroundQueryInFlight` 請求狀態鎖，確保首屏載入或手動檢索執行期間絕不被 10 秒自動背景刷新中斷，並為 `/traffic` 路由補齊防快取標頭 (`Cache-Control: no-store`)，杜絕重新編譯後瀏覽器載入舊版樣板。
 
-* **🏢 PA-1420 與 PA-5250 雙機型自適應引擎**：啟動時自動向防火牆查詢並識別真實硬體型號 (`getFWModelName` / `isHighEndFirewall`)。針對 **PA-1420** 維持每日單檔整併與防護型 API 輪詢間隔（600ms / 1.5s）；針對 **PA-5250** 等高階機種自動啟用旗艦極速模式（API 輪詢縮減至 200ms、分時熱檔 `_00`\~`_23` 獨立儲存與保護），跨日整併時自動保留分時主檔不動，僅將零碎 Syslog 分塊融合為獨立歸檔，徹底杜絕數十 GB 重寫逾時。
+* **🏢 PA-1420 與 PA-大型 雙機型自適應引擎**：啟動時自動向防火牆查詢並識別真實硬體型號 (`getFWModelName` / `isHighEndFirewall`)。針對 **PA-1420** 維持每日單檔整併與防護型 API 輪詢間隔（600ms / 1.5s）；針對 **PA-大型** 等高階機種自動啟用旗艦極速模式（API 輪詢縮減至 200ms、分時熱檔 `_00`\~`_23` 獨立儲存與保護），跨日整併時自動保留分時主檔不動，僅將零碎 Syslog 分塊融合為獨立歸檔，徹底杜絕數十 GB 重寫逾時。
 
 * **🐧 Windows / Linux 跨平台原生支援與核心網路調優**：全面解除 Windows API 依賴，支援 `GOOS=linux` 單一執行檔部署與 `systemd` 守護服務。在 Linux 下自動切換為 30 分鐘高精度切片排程，並直接讀取 Linux 核心 `/proc/net/arp` 提取區網實體 MAC 位址（毫秒級提取，零外部工具依賴），ARP 介面自動標註為 `Linux ARP` / `Windows ARP`。
 
 * **📡 64MB UDP 核心緩衝區與無鎖零掉包接收管線**：UDP 514 監聽器配置 `64MB` Socket 接收緩衝區 (`SO_RCVBUF`)，搭配「單一專職極速 I/O 讀取器 + 100,000 容量緩衝通道 + 多核心並行剖析池 (`runtime.NumCPU()`)」。全面捨棄高 GC 負擔的 `csv.Reader`，改用零配置字串分割極速解析，每 2 秒或達 5,000 筆自動批次寫入日期子目錄 (`traffic_logs/YYYY-MM-DD/`)，在 25,000+ EPS 高密度流量下達成 `RcvbufErrors` 零增長。
 
-* **🛡️ 冷熱雙軌自動反哺與自癒對賬巡檢 (`reconcileSyslogMissingRecords`)**：針對 PA-5250 每日數十億筆流量，建立「30 分鐘切片 ➔ 整點 RAW 冷主檔 ➔ 14 欄熱主檔」全自動管線。整點冷檔一旦完成，立即動態偵測表頭（同時相容具名表頭與無表頭 `column0`\~`column46`）萃取 14 欄熱資料，與即時 Syslog 進行 `ROW_NUMBER()` 全量去重融合。內建開機全盤對賬與每半小時巡邏 (`ReconcileMissingHours`)，自動補抓缺失切片、補合延遲完成的整點切片，並自動補轉缺失的熱資料檔案。
+* **🛡️ 冷熱雙軌自動反哺與自癒對賬巡檢 (`reconcileSyslogMissingRecords`)**：針對 PA-大型 每日數十億筆流量，建立「30 分鐘切片 ➔ 整點 RAW 冷主檔 ➔ 14 欄熱主檔」全自動管線。整點冷檔一旦完成，立即動態偵測表頭（同時相容具名表頭與無表頭 `column0`\~`column46`）萃取 14 欄熱資料，與即時 Syslog 進行 `ROW_NUMBER()` 全量去重融合。內建開機全盤對賬與每半小時巡邏 (`ReconcileMissingHours`)，自動補抓缺失切片、補合延遲完成的整點切片，並自動補轉缺失的熱資料檔案。
 
 * **⚡ Parquet Footer 時間窗剪枝與確定性排序**：針對單日超過 20 億筆（22GB+）的巨量熱資料，查詢引擎讀取 Parquet 檔尾 Metadata (`parquet_file_metadata` 與 `parquet_metadata` 的 `stats_min`/`stats_max`)，耗時 `< 10ms` 即算出目標時間邊界並進行 Row Group 區塊剪枝，直接跳過 99.6% 舊區塊，同時保留完整 `ORDER BY timestamp DESC` 確定性排序，徹底消除非當日與當日切換檢索時的紀錄時間跳動問題。
 
@@ -241,7 +241,7 @@ zone:WAN and rule:"Allow Outbound" and app:ssl
 系統針對四大日誌模組（Traffic 流量、Threat 威脅、System 系統、Config 組態），全面導入企業級冷熱分離雙軌落盤機制：
 
 * **熱資料分析層 (`traffic_logs/`, `threat_logs/`, `system_logs/`, `config_logs/`)**：
-  Go 後端將日誌精煉為強型別的純淨結構，寫入 ZSTD 壓縮的 Parquet 主檔（在 PA-5250 高密度場景下自動依日期與小時分片為 `traffic_logs/YYYY-MM-DD/traffic_YYYY-MM-DD_HH.parquet`）。DuckDB 查詢引擎只需讀取特定欄位（如 Bytes、IP），實現**零 Go 記憶體指標負擔**，結合 Footer Metadata 剪枝將十億級 24 小時直方圖與首屏明細查詢極限壓縮至 **0.02 \~ 0.1 秒**。
+  Go 後端將日誌精煉為強型別的純淨結構，寫入 ZSTD 壓縮的 Parquet 主檔（在 PA-大型 高密度場景下自動依日期與小時分片為 `traffic_logs/YYYY-MM-DD/traffic_YYYY-MM-DD_HH.parquet`）。DuckDB 查詢引擎只需讀取特定欄位（如 Bytes、IP），實現**零 Go 記憶體指標負擔**，結合 Footer Metadata 剪枝將十億級 24 小時直方圖與首屏明細查詢極限壓縮至 **0.02 \~ 0.1 秒**。
 
 * **冷資料稽核層 (`traffic_raw_logs/`, `threat_raw_logs/`, `system_raw_logs/`, `config_raw_logs/`)**：
   系統將接收到的 100% 原始封包（JSON / CSV / XML）原封不動寫入 `raw_content` 或全欄位 RAW Parquet 並高壓落盤。專供資安事件複查、封包還原佐證與法規留存。即使防火牆韌體升級新增了未知欄位，底層證據也絕對不漏接。
@@ -286,9 +286,9 @@ zone:WAN and rule:"Allow Outbound" and app:ssl
 
 * **NAS 歷史日誌匯入 (TXT)**：完全捨棄傳統「強加 63 欄固定表頭中繼 CSV」的做法。改以 `read_csv` 搭配不可見字元 (`delim=E' '`) 將整行日誌視為單一字串載入，後續利用 DuckDB 的 `split_part` 函數精準切分。完全免疫欄位數量超標（PAN-OS 10+ 擴充欄位）與特殊字元干擾，實測 225 萬筆瑕疵資料可 100% 完美去重還原為 211 萬筆真實會話，資料零遺失。
 
-### 8. PA-5250 旗艦級高密度湖倉與冷熱雙軌自動反哺架構 🌟
+### 8. PA-大型 旗艦級高密度湖倉與冷熱雙軌自動反哺架構 🌟
 
-專為企業核心防火牆（PA-5250 等級，單日流量可達數十億筆 / 20GB+）打造的分時切片與雙軌融合引擎：
+專為企業核心防火牆（PA-大型 等級，單日流量可達數十億筆 / 20GB+）打造的分時切片與雙軌融合引擎：
 
 * **分時切片自動排程 (`StartAutoExportScheduler`)**：Linux 環境每 30 分鐘（`:00` / `:30`）自動觸發 CLI 傾印切片，Windows 環境每 10 分鐘自動切片，透過容量 288 的循序工作佇列 (`sliceTaskQueue`) 配合 SQLite 標註庫 (`export_checkpoints`) 確保任務零重複執行。
 
@@ -334,7 +334,7 @@ zone:WAN and rule:"Allow Outbound" and app:ssl
 
    * **特性**：內建 Web 伺服器 (Port: 9090)，採用「稀疏索引」與「虛擬分頁」技術。頂端提供全域真實行號即時統計，支援像 Notepad++ / VS Code 般任意行號跳轉，並具備**高對比螢光雙向尋找（Shift+Enter / Enter）**，毫秒級定位命中資料。
 
-## 📊 四種匯出方式綜合評比 (PA-1420 / PA-5250 日誌提取策略)
+## 📊 四種匯出方式綜合評比 (PA-1420 / PA-大型 日誌提取策略)
 
 在 Palo Alto 系統中提取日誌有多種方式，本系統目前已將最快的 **CLI FTP Export** 與自動化的 **XML API** 完美融合。各方式優劣對比如下：
 
@@ -388,7 +388,7 @@ dhcpxml-go/
 ├── core.go                     # 核心邏輯 (64MB UDP 管線、Metadata 剪枝、雙通道 DuckDB、IP/CIDR 過濾、每日預聚合)
 ├── routes.go                   # Web API 端點、Webhook 接收器、冷轉熱轉換與 360° 鑑識 API
 ├── tls_security.go             # 🆕 TLS 1.2+ 自動憑證簽發、安全標頭中介層與綜合查詢語法/防注入驗證引擎
-├── cli_export.go               # PA-1420 / PA-5250 虛擬終端自動化登入、分時切片與冷熱雙軌反哺核心
+├── cli_export.go               # PA-1420 / PA-大型 虛擬終端自動化登入、分時切片與冷熱雙軌反哺核心
 ├── audit_logger.go             # WORM 不可變湖倉稽核紀錄寫入、查詢與任務重試控制
 ├── ftp_server.go               # Go 原生輕量化 FTP 伺服器 (支援 PASV / PORT)
 ├── geoip_intel.go              # 🆕 MaxMind GeoLite2 解析與 CTI 威脅情資 (IOC) 自動同步與管理模組
@@ -438,7 +438,7 @@ dhcpxml-go/
 ```
 192.168.1.1
 ethernet1/1
-LUFRPT14MW55QW...（您的 PA-1420 / PA-5250 API Key）...==
+LUFRPT14MW55QW...（您的 PA-1420 / PA-大型 API Key）...==
 FWusername
 （您的防火牆 SSH 密碼）
 username
@@ -452,7 +452,7 @@ password
 
 系統提供完整 HTTP / HTTPS API，防火牆或外部系統可直接呼叫，亦可透過 Windows `curl.exe` 或 Linux `curl` 執行自動化排程（HTTPS 自簽憑證環境請加上 `-k` 參數）：
 
-### 1. Webhook 接收端點 (供 PA-1420 / PA-5250 Log Forwarding 設定)
+### 1. Webhook 接收端點 (供 PA-1420 / PA-大型 Log Forwarding 設定)
 
 * **流量日誌 (Traffic)**：`POST http://<伺服器IP>:5006/api/webhook/traffic`（或 `https://<伺服器IP>:5443/api/webhook/traffic`）
 
@@ -610,7 +610,7 @@ go build -ldflags="-s -w" -o BigLogViewer.exe tools igLogviewer.go
 
 5. 使用瀏覽器訪問 `https://127.0.0.1:5443`（或 `http://localhost:5006`）。
 
-### 二、 Linux 生產環境部署與核心網路調優 (PA-5250 高吞吐推薦)
+### 二、 Linux 生產環境部署與核心網路調優 (PA-大型 高吞吐推薦)
 
 1. **跨平台編譯 Linux 執行檔（於 Windows 開發機執行）**：
 
@@ -647,7 +647,7 @@ sudo chmod +x /opt/pa_monitor/PA1420_Monitor /opt/pa_monitor/duckdb
 
 ```
 [Unit]
-Description=PA-1420 / PA-5250 Lakehouse Log & DHCP Monitor
+Description=PA-1420 / PA-大型 Lakehouse Log & DHCP Monitor
 After=network.target
 
 [Service]
